@@ -1,0 +1,3 @@
+# Pin the browser adapter's private CF solver contract.
+scrapling[fetchers]==0.4.15
+patchright==1.63.0

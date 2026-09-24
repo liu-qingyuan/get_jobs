@@ -248,39 +248,23 @@ tasks.named<BootRun>("bootRun") {
     systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
     resolveNodePath()?.let { environment("PLAYWRIGHT_NODEJS_PATH", it) }
 }
-// Opt-in JobsDB CLI. No Spring startup, frontend build, ports, or Boss profile.
-val jobsdbTestSource = sourceSets.create("jobsdbTest") {
-    compileClasspath += sourceSets.main.get().output.classesDirs + configurations.runtimeClasspath.get()
-    runtimeClasspath += output + compileClasspath
+// JobsDB has its own subprocess/profile. Other platform tasks above remain unchanged.
+tasks.register<Exec>("jobsdbSetup") {
+    group = "application"
+    description = "Install pinned JobsDB Python runtime into .jobsdb/venv"
+    commandLine("bash", "scripts/jobsdb/setup.sh")
 }
 tasks.register<JavaExec>("jobsdb") {
     group = "application"
-    description = "Isolated JobsDB HK assistant; --args='help'"
+    description = "Isolated JobsDB Scrapling CLI; --args='help'"
     dependsOn(tasks.compileJava)
     classpath = sourceSets.main.get().output.classesDirs + configurations.runtimeClasspath.get()
     mainClass.set("com.getjobs.jobsdb.JobsDbMain")
+    systemProperty("jobsdb.root", layout.projectDirectory.asFile.absolutePath)
     standardInput = System.`in`
 }
-tasks.register<JavaExec>("jobsdbTest") {
+tasks.register<Exec>("jobsdbTest") {
     group = "verification"
-    description = "JobsDB contracts and local browser fixtures; no real applications"
-    dependsOn(tasks.named(jobsdbTestSource.compileJavaTaskName))
-    classpath = jobsdbTestSource.runtimeClasspath
-    mainClass.set("com.getjobs.jobsdb.JobsDbTest")
-}
-tasks.register<JavaExec>("jobsdbInstallBrowser") {
-    group = "application"
-    description = "Install only Chromium into this clone's private JobsDB cache"
-    classpath = configurations.runtimeClasspath.get()
-    mainClass.set("com.microsoft.playwright.CLI")
-    args("install", "chromium")
-}
-tasks.withType<JavaExec>().matching { it.name in setOf("jobsdb", "jobsdbTest", "jobsdbInstallBrowser") }.configureEach {
-    dependsOn(installPatchrightDriver)
-    systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
-    val node = resolveNodePath() ?: throw GradleException("JobsDB requires Node.js on PATH for the Patchright driver")
-    environment("PLAYWRIGHT_NODEJS_PATH", node)
-    environment("PLAYWRIGHT_BROWSERS_PATH", layout.projectDirectory.dir(".jobsdb/browsers").asFile.absolutePath)
-    environment("PLAYWRIGHT_SKIP_BROWSER_GC", "1")
-    environment("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+    description = "JobsDB browser, ledger and CLI contracts; intercepted fixture traffic only"
+    commandLine(".jobsdb/venv/bin/python", "-m", "unittest", "discover", "-s", "scripts/jobsdb", "-v")
 }

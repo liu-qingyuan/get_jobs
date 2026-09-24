@@ -69,3 +69,6 @@ AGENTS.md
 .claude/
 .jobsdb/
 .jobsdb-evidence/
+
+# JobsDB Python bytecode
+scripts/jobsdb/__pycache__/

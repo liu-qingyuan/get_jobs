@@ -1,93 +1,84 @@
-# JobsDB 局部设计
+# JobsDB Scrapling 接入（固定点 7d0813f）
+仅迁移 JobsDB CLI。Java Interface 为原命令参数与子进程退出码；Python Module 独占浏览器、DOM 与账本知识，不引入 RPC/HTTP 服务、不保留两份投递实现。登录与申请人工确认沿用现有合同；批量调度另行实现。
+
 ## 当前架构
 ```mermaid
 flowchart LR
-  UI[国内平台页面] --> Spring[Spring Boot]
-  Spring --> Manager[共享 PlaywrightManager]
-  Manager --> Boss[Boss 等平台]
+  Main[JobsDbMain] --> Flow[Java JobsDbFlow]
+  Main --> Store[Java SQLite Store]
+  Flow --> Browser[Patchright Chrome]
 ```
 ## 目标架构
 ```mermaid
 flowchart LR
-  CLI[JobsDbMain] --> Flow[JobsDbFlow]
-  CLI --> Store[JobsDbStore]
-  Flow --> Browser[独立浏览器 profile]
-  Store --> DB[独立 SQLite]
-  UI[国内平台页面] --> Spring[原有 Spring Boot 保持不变]
+  Main[JobsDbMain] --> Worker[Python JobsDB CLI]
+  Worker --> Browser[Scrapling Chrome persistent profile]
+  Worker --> Store[Same SQLite ledger]
+  Boss[Other platforms] --> Existing[Unchanged Java browser flow]
 ```
 ## 当前时序
 ```mermaid
 sequenceDiagram
-  participant U as 用户
-  participant B as 国内平台
-  U->>B: 发起任务
-  Note over U,B: JobsDB 尚无入口
+  User->>Java: login
+  Java->>Chrome: navigate
+  Chrome-->>User: CF loop
 ```
 ## 目标时序
 ```mermaid
 sequenceDiagram
-  participant U as 用户
-  participant C as JobsDbMain
-  participant F as JobsDbFlow
-  participant S as JobsDbStore
-  U->>C: apply URL
-  C->>S: 查询去重记录
-  C->>F: 打开 Quick Apply 并准备
-  F-->>C: REVIEW 或 NEEDS_INPUT
-  C-->>U: 核对表单，明确确认
-  U->>C: SUBMIT 职位ID
-  C->>S: 原子 claim UNKNOWN
-  C->>F: 提交一次
-  F-->>C: SUBMITTED 或 UNKNOWN
-  C->>S: 保存结果
+  User->>Java: jobsdb login
+  Java->>Python: args and inherited terminal
+  Python->>Scrapling: persistent session and solve_cloudflare
+  Scrapling-->>User: JobsDB login page
+  User->>Python: Enter after login
+  Python->>Python: preserve profile and close; login status unasserted
+  Python-->>Java: exit status
 ```
 ## 当前状态
 ```mermaid
 stateDiagram-v2
-  [*] --> Absent
-  Absent: JobsDB 尚未实现
+  [*] --> Navigate
+  Navigate --> Challenge
+  Challenge --> ManualRetry
+  ManualRetry --> Challenge
 ```
 ## 目标状态
 ```mermaid
 stateDiagram-v2
-  [*] --> Preparing
-  Preparing --> NEEDS_INPUT
-  NEEDS_INPUT --> Preparing: 用户补充
-  Preparing --> REVIEW
-  Preparing --> SKIPPED
-  Preparing --> ALREADY_APPLIED
-  REVIEW --> UNKNOWN: 确认并 claim
-  UNKNOWN --> SUBMITTED: 成功证据
-  REVIEW --> Cancelled: 取消或 prepare
-  UNKNOWN --> [*]
-  SUBMITTED --> [*]
+  [*] --> Locked
+  Locked --> Solving
+  Solving --> Ready
+  Solving --> NeedsInput: bounded failure
+  Ready --> SessionSaved: login
+  Ready --> Review: prepare or apply
+  Review --> Unknown: confirmation and atomic claim
+  Unknown --> Submitted: positive evidence
+  NeedsInput --> Closed
+  SessionSaved --> Closed
+  Submitted --> Closed
+  Unknown --> Closed
 ```
 ## 当前类图
 ```mermaid
 classDiagram
-  class JobPlatformService
-  class BossJobService
-  class PlaywrightManager
-  JobPlatformService <|.. BossJobService
-  BossJobService --> PlaywrightManager
+  JobsDbMain --> JobsDbFlow
+  JobsDbMain --> JobsDbStore
 ```
 ## 目标类图
 ```mermaid
 classDiagram
-  class JobsDbMain {
-    main(args)
-  }
-  class JobsDbFlow {
-    search(keywords, pages)
-    open(jobUrl)
-    advance()
-    submit()
-  }
-  class JobsDbStore {
-    contains(jobId)
-    claim(jobId)
-    finish(jobId, status)
-  }
-  JobsDbMain --> JobsDbFlow
-  JobsDbMain --> JobsDbStore
+  JobsDbMain --> PythonCLI
+  PythonCLI --> Browser
+  PythonCLI --> Flow
+  PythonCLI --> Store
+  Browser --> StealthySession
+  Flow --> Page
 ```
+
+## 验收
+- 原 jobsdb login/search/prepare/apply/history/help 命令接入新实现，不留下旧浏览器路径。
+- 独立 profile、锁、原 SQLite 表和 UNKNOWN 去重保持；不启动 Boss/Spring/前端。
+- 登录会话跨进程保留；登录状态未验证不得声称已登录；EOF 不表示确认。
+- CF 自动处理有超时；Scrapling action 异常不被吞掉；提交不自动重试。
+- 无账号 fixture 覆盖原申请合同、持久化、锁、Java 转发；真实搜索从正式 Java 入口通过 CF。
+- 文档、安装命令、回滚与验证记录；独立 Standards/Spec review；推送原 PR。
