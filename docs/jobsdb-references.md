@@ -16,3 +16,15 @@
 - AutoApply: `053071ba1bba5733b522d78c3d645002d817e55a`
 
 另：旧 AIHawk URL 当前重定向到 feder-cr/invisible_playwright_mcp（31,647 stars），已是通用浏览器代理，不能用早期自动投递宣传代表当前功能；本增量不引入它。
+
+## CF 验证循环相关项目（同日 GitHub API）
+
+| 项目 | Stars | 与当前实现的关系 |
+|---|---:|---|
+| [Scrapling](https://github.com/D4Vinci/Scrapling) | 83,296 | 抓取框架，包含浏览器抓取能力；不是现成 JobsDB 投递工具。 |
+| [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) | 15,668 | 独立代理服务；引入第二套进程，不作为本项目首选。 |
+| [Camoufox](https://github.com/daijro/camoufox) | 12,112 | Firefox 派生浏览器；涉及新增浏览器栈。 |
+| [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) | 4,674 | 本项目已有固定版本的安装任务，优先复用；作者声明兼容 Cloudflare，不代表每个站点均通过。 |
+| [nodriver](https://github.com/ultrafunkamsterdam/nodriver) | 4,771 | Python 自动化框架，替换当前 Java 路线成本较高。 |
+
+发现：原 bootRun 使用 Patchright，而新 jobsdb/jobsdbTest/jobsdbInstallBrowser 任务遗漏了 driver 配置。本次以同一独立 profile、同一网络、同一搜索命令比较修复前后；不复制普通浏览器的认证 cookie，不改变 Boss 的运行环境。

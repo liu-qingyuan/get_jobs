@@ -11,6 +11,11 @@ public final class JobsDbTest {
     private static int passed;
     private static final String URL = "https://hk.jobsdb.com/job/12345678";
     public static void main(String[] args) throws Exception {
+        String driver = System.getProperty("playwright.cli.dir", "");
+        equal(true, !driver.isBlank() && Files.isRegularFile(Path.of(driver, "package", "cli.js")),
+                "JobsDB tasks explicitly use the installed Patchright driver");
+        equal(true, System.getenv("PLAYWRIGHT_NODEJS_PATH") != null,
+                "custom driver has an explicit Node runtime");
         equal("12345678", JobsDbFlow.jobId(URL + "?ref=search"), "canonical ID strips tracking");
         for (String url : List.of("http://hk.jobsdb.com/job/123", "https://evil.test/job/123",
                 "https://hk.jobsdb.com.evil.test/job/123", "https://me@hk.jobsdb.com/job/123",

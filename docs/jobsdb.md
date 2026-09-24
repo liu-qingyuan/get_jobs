@@ -4,7 +4,7 @@
 
 ## 安装与运行
 
-需要 JDK 21。以下命令在 **JobsDB 独立副本根目录**执行，不在正在投 Boss 的目录执行：
+需要 JDK 21、Node.js 和已安装的正式版 Google Chrome。JobsDB 使用项目已有的 Patchright driver，首次运行会在本副本 build/ 下安装它。以下命令在 **JobsDB 独立副本根目录**执行，不在正在投 Boss 的目录执行：
 
 ```bash
 # 本机示例；其他电脑设置为自己的 JDK 21 路径
@@ -17,7 +17,7 @@ bash gradlew --no-daemon jobsdb --console=plain --args='login'
 bash gradlew --no-daemon jobsdb --console=plain --args='search "software engineer" 2'
 ```
 
-`login` 打开新的独立 Chromium 窗口。手动登录，切换英文站点，再回终端按 Enter；仅保存会话，不宣称自动验证登录成功。
+`login` 打开新的独立 Chrome 窗口（使用本项目独立 profile，不使用日常 Chrome 或 Boss profile）。手动登录，切换英文站点，再回终端按 Enter；仅保存会话，不宣称自动验证登录成功。
 
 搜索默认一页、最多五页，按岗位 ID 去重，输出到 `.jobsdb/search.json`，并标出本地有过提交尝试的岗位。匹配关键词由 JobsDB 搜索完成；本增量尚未接 AI 打分。搜索遇站点验证或未检测到岗位时保留窗口，手动处理后输入 `retry`；其他输入或 EOF 取消。
 
@@ -40,7 +40,7 @@ bash gradlew --no-daemon jobsdb --console=plain --args='history'
 全部运行数据固定放在副本 `.jobsdb/`（gitignored）：
 
 - `browser-profile/`：独立登录；不读取 Boss cookies，不连接 CDP。
-- `browsers/`：独立浏览器安装缓存，禁用自动清理其他版本。
+- `browsers/`：fixture 测试的独立 Chromium 安装缓存，禁用自动清理其他版本；实际登录使用系统已安装的 Chrome 二进制。
 - `applications.db`：新 SQLite ledger，不读原 `db/getjobs.db`。
 - `run.lock`：单进程锁，浏览器命令及 history 互斥。
 - `screenshots/`：审核、结果和故障截图，可能含个人信息，仅保留本地。
@@ -66,3 +66,9 @@ bash gradlew --no-daemon jobsdbTest --console=plain
 ## 当日线上检查
 
 2026-09-24 使用独立、未登录 profile 访问公开搜索，遇到 Cloudflare 的 `Performing security verification` 页面，未取得职位结果。已根据该页面补充人工暂停/恢复处理及回归测试。未进行真实账号申请或声称线上投递成功。下一步需要在 `login` 窗口手动完成验证，再测试 `search` / `prepare`。
+
+### Driver 修正
+
+修正了 jobsdb / jobsdbTest / jobsdbInstallBrowser 未接上已有 Patchright driver 的遗漏；新增两个启动合同断言，避免测试走不同 driver。另将实际会话设为 Chrome channel、原生窗口尺寸，保持独立 profile。
+
+同网络同搜索词对照：原版 Playwright、Patchright + bundled Chromium、Patchright + Chrome 都出现站点验证，尚未取得搜索结果。作者关于通过 Cloudflare 的声明不作为本项目成功证据。已打开修正后的独立登录窗口，等待用户验证一次后反馈是否仍循环；没有自动提交任何申请。

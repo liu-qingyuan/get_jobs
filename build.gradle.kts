@@ -276,6 +276,10 @@ tasks.register<JavaExec>("jobsdbInstallBrowser") {
     args("install", "chromium")
 }
 tasks.withType<JavaExec>().matching { it.name in setOf("jobsdb", "jobsdbTest", "jobsdbInstallBrowser") }.configureEach {
+    dependsOn(installPatchrightDriver)
+    systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
+    val node = resolveNodePath() ?: throw GradleException("JobsDB requires Node.js on PATH for the Patchright driver")
+    environment("PLAYWRIGHT_NODEJS_PATH", node)
     environment("PLAYWRIGHT_BROWSERS_PATH", layout.projectDirectory.dir(".jobsdb/browsers").asFile.absolutePath)
     environment("PLAYWRIGHT_SKIP_BROWSER_GC", "1")
     environment("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")

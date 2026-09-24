@@ -57,7 +57,7 @@ public final class JobsDbMain {
     private static void runBrowser(String command, String[] args, String id, int pages, JobsDbStore store) throws Exception {
         try (Playwright playwright = Playwright.create();
              BrowserContext context = playwright.chromium().launchPersistentContext(DATA.resolve("browser-profile"),
-                     new BrowserType.LaunchPersistentContextOptions().setHeadless(false).setLocale("en-HK"))) {
+                     new BrowserType.LaunchPersistentContextOptions().setChannel("chrome").setHeadless(false).setViewportSize(null).setLocale("en-HK"))) {
             // Own context only; never attach over CDP or touch another Chrome session.
             Page page = context.newPage();
             JobsDbFlow flow = new JobsDbFlow(page);
