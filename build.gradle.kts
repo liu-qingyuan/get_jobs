@@ -248,3 +248,35 @@ tasks.named<BootRun>("bootRun") {
     systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
     resolveNodePath()?.let { environment("PLAYWRIGHT_NODEJS_PATH", it) }
 }
+// Opt-in JobsDB CLI. No Spring startup, frontend build, ports, or Boss profile.
+val jobsdbTestSource = sourceSets.create("jobsdbTest") {
+    compileClasspath += sourceSets.main.get().output.classesDirs + configurations.runtimeClasspath.get()
+    runtimeClasspath += output + compileClasspath
+}
+tasks.register<JavaExec>("jobsdb") {
+    group = "application"
+    description = "Isolated JobsDB HK assistant; --args='help'"
+    dependsOn(tasks.compileJava)
+    classpath = sourceSets.main.get().output.classesDirs + configurations.runtimeClasspath.get()
+    mainClass.set("com.getjobs.jobsdb.JobsDbMain")
+    standardInput = System.`in`
+}
+tasks.register<JavaExec>("jobsdbTest") {
+    group = "verification"
+    description = "JobsDB contracts and local browser fixtures; no real applications"
+    dependsOn(tasks.named(jobsdbTestSource.compileJavaTaskName))
+    classpath = jobsdbTestSource.runtimeClasspath
+    mainClass.set("com.getjobs.jobsdb.JobsDbTest")
+}
+tasks.register<JavaExec>("jobsdbInstallBrowser") {
+    group = "application"
+    description = "Install only Chromium into this clone's private JobsDB cache"
+    classpath = configurations.runtimeClasspath.get()
+    mainClass.set("com.microsoft.playwright.CLI")
+    args("install", "chromium")
+}
+tasks.withType<JavaExec>().matching { it.name in setOf("jobsdb", "jobsdbTest", "jobsdbInstallBrowser") }.configureEach {
+    environment("PLAYWRIGHT_BROWSERS_PATH", layout.projectDirectory.dir(".jobsdb/browsers").asFile.absolutePath)
+    environment("PLAYWRIGHT_SKIP_BROWSER_GC", "1")
+    environment("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+}
