@@ -22,7 +22,7 @@ def screen(title, description, location):
         return 'location outside Hong Kong in job description'
     if not re.search(r'Hong Kong|Kowloon|New Territories|Central|Wan Chai|Eastern|Southern|Sham Shui Po|Yau Tsim Mong|Wong Tai Sin|Kwun Tong|Kwai Tsing|Tsuen Wan|Tuen Mun|Yuen Long|North District|Tai Po|Sha Tin|Sai Kung|Islands|香港|九龍|九龙|新界',location,re.I):
         return 'location not confirmed in Hong Kong'
-    if re.search(r'currently (?:enrolled|pursuing|studying)|must be (?:a )?(?:current )?student|在讀學生|在读学生',description,re.I):
+    if re.search(r'currently (?:enrolled|pursuing|studying)|pursuing\s+(?:a\s+|an\s+)?(?:master|bachelor|undergraduate|postgraduate|degree)|must be (?:a )?(?:current )?student|在[讀读](?:學生|学生|碩士|硕士|博士|本科|研究生)|大三|大四',description,re.I):
         return 'current student eligibility required'
     normalized=re.sub(r'Ph\.?D\.?', 'PhD', description, flags=re.I)
     for line in re.split(r'[\n;；。!?]|\.(?:\s|$)', normalized):

@@ -62,6 +62,12 @@ class BatchTests(unittest.TestCase):
             self.assertEqual('FINISHED',saved['status'])
             self.assertEqual('SUBMITTED',saved['jobs'][-1]['state'])
 
+class StudentEligibilityTests(unittest.TestCase):
+    def test_explicit_student_only_variants(self):
+        for description in ['计算机相关专业在读硕士；优秀大三及以上本科生亦可', 'Pursuing a Master’s degree in Computer Science', 'Currently enrolled in a university programme']:
+            with self.subTest(description=description):
+                self.assertIn('student',screen('AI System and Application Engineer (Intern)',description,'Hong Kong Island'))
+
 class ConfigTests(unittest.TestCase):
     def test_resume_hash_mismatch_fails_before_browser(self):
         import tempfile,json
