@@ -62,3 +62,13 @@ dist/
 .gradle/
 # 持久化浏览器用户数据（含登录态，绝对不能提交）
 browser-data/
+
+# Local agent and JobsDB state
+.ralph/
+AGENTS.md
+.claude/
+.jobsdb/
+.jobsdb-evidence/
+
+# JobsDB Python bytecode
+scripts/jobsdb/__pycache__/

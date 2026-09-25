@@ -248,3 +248,23 @@ tasks.named<BootRun>("bootRun") {
     systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
     resolveNodePath()?.let { environment("PLAYWRIGHT_NODEJS_PATH", it) }
 }
+// JobsDB has its own subprocess/profile. Other platform tasks above remain unchanged.
+tasks.register<Exec>("jobsdbSetup") {
+    group = "application"
+    description = "Install pinned JobsDB Python runtime into .jobsdb/venv"
+    commandLine("bash", "scripts/jobsdb/setup.sh")
+}
+tasks.register<JavaExec>("jobsdb") {
+    group = "application"
+    description = "Isolated JobsDB Scrapling CLI; --args='help'"
+    dependsOn(tasks.compileJava)
+    classpath = sourceSets.main.get().output.classesDirs + configurations.runtimeClasspath.get()
+    mainClass.set("com.getjobs.jobsdb.JobsDbMain")
+    systemProperty("jobsdb.root", layout.projectDirectory.asFile.absolutePath)
+    standardInput = System.`in`
+}
+tasks.register<Exec>("jobsdbTest") {
+    group = "verification"
+    description = "JobsDB browser, ledger and CLI contracts; intercepted fixture traffic only"
+    commandLine(".jobsdb/venv/bin/python", "-m", "unittest", "discover", "-s", "scripts/jobsdb", "-v")
+}
