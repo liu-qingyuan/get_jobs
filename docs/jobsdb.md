@@ -35,7 +35,7 @@ bash gradlew --no-daemon jobsdb --console=plain --args='history'
 
 上面的职位 ID 仅为格式示例，真实 ID 从 search 输出选择。搜索支持 1–5 页，写 `.jobsdb/search.json`。prepare 不提交；apply 仍保留现有 `SUBMIT 职位ID` 确认合同。缺少简历或问题答案时暂停，不编造内容。仅处理英文 Quick Apply；外部 ATS 跳过。
 
-**本次完成浏览器接入，不等于批量无人值守投递已实现。**用户最终要求是一次配置后自动批量运行；批量调度、简历/答案配置和匹配规则是后续工作，本次不通过删除确认步骤来伪装已完成。
+首版只完成浏览器接入；后续新增独立 `batch` 命令实现配置驱动批次，见下文。原逐岗审核入口保持不变。
 
 ## 数据与错误合同
 
@@ -58,3 +58,21 @@ bash gradlew --no-daemon jobsdbTest --console=plain
 使用 Python 标准库 unittest、真实 Chrome 和全路由 HTML fixtures，不发送真实申请。覆盖原申请状态机、SQLite 兼容、未知结果去重、锁、输入取消、跨会话 cookie/localStorage 保存、Scrapling 回调异常传播。独立测试 profile 在临时目录，不使用账号 profile。
 
 真实账号是否已登录、雇主动态表单和真实投递结果，须由后续账号测试证明；fixture 通过不代表投递成功。
+
+## 全自动批次
+
+新增命令（一次配置，批次内不读取 stdin）：
+
+```bash
+bash gradlew --no-daemon jobsdb --console=plain --args='batch --config .jobsdb/batch-config.json'
+```
+
+配置包含 `auto_submit_enabled: true`、`resume_path`、`resume_sha256`、`searches`（1–10 个关键词）、`pages`（1–5）、`max_candidates`（1–200）、`max_submissions`（1–50）以及 `answers`。`answers` 将真实表单的 `questionnaire.*` 名称映射到用户确认的精确选项文案；未知题、缺少选项、非支持控件都记录 NEEDS_INPUT 并继续其他岗位，不猜测。
+
+原 `apply` 仍逐岗确认；`batch` 是明确授权自动提交的独立入口。当前本地配置使用确认的月薪、IANG、学历、工作年限和英文简历，属于私有数据，不提交到 Git。新增问题的答案只能来自用户事实；补充后重跑会自动跳过已提交或 UNKNOWN 的岗位。
+
+批次依次搜索去重、读取 `jobAdDetails`（排除推荐职位污染）、按 AI/量化与早期职业规则筛选、选择内容哈希命名的简历、填写已配置问题、核对 review 附件、原子 claim、提交一次。筛选是透明规则，不是 LLM 适配器：未知粤语条件跳过；明确可选粤语保留。拒绝明显资深、超过一年必需经验、内地地点和在读学生要求。规则不能保证雇主没有隐含要求，投递报告保留原 JD 供核对。
+
+配置中的提交上限按尝试数计数（含 UNKNOWN），不是成功数。失效登录停止该批，外部 ATS/未知题/单岗错误记录并继续。结果即时保存在 `.jobsdb/batches/<UTC时间>/report.json`，附筛选依据、审核与结果截图/文本。中断后重跑不会重新提交已 claim 的岗位。批次不是常驻定时器：执行一次完整有界批次后退出，下一批再次运行同一命令。
+
+网站 profile 步骤会在事件处理器尚未可用时显示 Continue；仅该非提交步骤允许一次有界第二次点击。最终 Submit 永不重试。网站已发送文案含雇主名称时亦识别成功；若未看到积极证据则保留 UNKNOWN。

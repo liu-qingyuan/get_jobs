@@ -66,6 +66,7 @@ class BrowserTests(unittest.TestCase):
         self.detail = '<h1>Engineer</h1><a href="/job/12345678/apply/start">Quick apply</a>'
         self.start = '<button onclick="location.href=\'/job/12345678/apply/review\'">Continue</button>'
         self.success = '<h1>Your application has been submitted</h1>'
+        self.review_document = ''
         self.submissions = self.external = 0
     def tearDown(self): self.context.close()
     def route(self, route):
@@ -77,13 +78,24 @@ class BrowserTests(unittest.TestCase):
         if path.endswith('/success'):
             self.submissions += 1; body = self.success
         elif path.endswith('/review'):
-            body = '<p>Review and submit</p><button onclick="location.href=\'/job/12345678/apply/success\'">Submit application</button>'
+            body = self.review_document + '<p>Review and submit</p><button onclick="location.href=\'/job/12345678/apply/success\'">Submit application</button>'
+        elif path.endswith('/profile'): body = self.profile
         elif path.endswith('/start'): body = self.start
         else: body = self.detail
         route.fulfill(content_type='text/html', body=body)
     def flow(self):
         self.page.goto(self.url)
         return jobsdb.Flow(self.page,self.url,lambda p: None)
+    def test_quick_apply_with_different_accessible_name(self):
+        self.detail = '<a data-automation="job-detail-apply" aria-label="Apply for Engineer at Employer" href="/job/12345678/apply/start"><span>Quick apply</span></a>'
+        self.assertEqual('REVIEW', self.flow().open())
+        self.assertEqual(0, self.submissions)
+
+    def test_labelled_external_apply_is_not_followed(self):
+        self.detail = '<a data-automation="job-detail-apply" aria-label="Apply for Engineer" href="https://external.test/apply"><span>Quick apply</span></a>'
+        self.assertEqual('SKIPPED', self.flow().open())
+        self.assertEqual(0, self.external)
+
     def test_prepare_then_exactly_one_submit(self):
         flow = self.flow()
         self.assertEqual('REVIEW',flow.open())
@@ -100,6 +112,55 @@ class BrowserTests(unittest.TestCase):
         self.page.locator('body').evaluate("e=>e.insertAdjacentHTML('afterbegin','<input aria-invalid=\"true\">')")
         self.assertEqual('NEEDS_INPUT',flow.submit())
         self.assertEqual(0,self.submissions)
+    def test_automatic_prepare_selects_configured_resume_without_stdin(self):
+        self.review_document = '<p>English_abcd.docx</p>'
+        self.start = """<label><input type="radio" name="document-select" value="old" checked>old.pdf</label>
+        <label><input type="radio" name="document-select" value="new">English_abcd.docx</label>
+        <input id="resume-fileFile" type="file">
+        <label><input type="radio" name="coverLetter-method" value="none">Don't include a cover letter</label>
+        <button onclick="if(document.querySelector('[value=new]').checked) location.href='/job/12345678/apply/review'">Continue</button>"""
+        flow=self.flow()
+        self.assertEqual('REVIEW', flow.prepare_automatic(Path('/tmp/English_abcd.docx'), {}))
+        self.assertEqual(0,self.submissions)
+
+    def test_automatic_questions_use_exact_configured_answers(self):
+        self.review_document='<p>English_abcd.docx</p>'
+        self.start="""<select name="questionnaire.salary"><option value="">Choose</option><option value="20">$20K</option></select>
+        <label><input type="radio" name="questionnaire.visa">IANG</label>
+        <button onclick="if(document.querySelector('select').value==='20' && document.querySelector('input').checked) location.href='/job/12345678/apply/review'">Continue</button>"""
+        flow=self.flow()
+        self.assertEqual('REVIEW',flow.prepare_automatic(Path('/tmp/English_abcd.docx'),{'questionnaire.salary':'$20K','questionnaire.visa':'IANG'}))
+        self.assertEqual(0,self.submissions)
+
+    def test_automatic_unknown_question_never_submits(self):
+        self.start='<input name="questionnaire.unknown"><button>Continue</button>'
+        flow=self.flow()
+        self.assertEqual('NEEDS_INPUT',flow.prepare_automatic(Path('/tmp/English_abcd.docx'),{}))
+        self.assertIn('Unconfigured',flow.reason)
+        self.assertEqual(0,self.submissions)
+
+    def test_automatic_review_rejects_wrong_attachment(self):
+        self.start='<input name="questionnaire.unknown"><button>Continue</button>'
+        self.detail='<a href="/job/12345678/apply/review">Quick apply</a>'
+        flow=self.flow()
+        self.assertEqual('NEEDS_INPUT',flow.prepare_automatic(Path('/tmp/English_abcd.docx'),{}))
+        self.assertIn('resume absent',flow.reason)
+        self.assertEqual(0,self.submissions)
+
+    def test_automatic_profile_retries_only_non_submitting_continue(self):
+        self.detail='<a href="/job/12345678/apply/profile">Quick apply</a>'
+        self.review_document='<p>English_abcd.docx</p>'
+        self.profile="""<p>Your Jobsdb Profile is part of your application. Make sure it's up-to-date.</p>
+        <script>let n=0</script><button onclick="if(++n===2) location.href='/job/12345678/apply/review'">Continue</button>"""
+        self.assertEqual('REVIEW',self.flow().prepare_automatic(Path('/tmp/English_abcd.docx'),{}))
+        self.assertEqual(0,self.submissions)
+
+    def test_live_employer_named_success(self):
+        self.success='<h1>Your application has been sent to Auspicious Bullion Limited</h1>'
+        flow=self.flow(); self.assertEqual('REVIEW', flow.open())
+        self.assertEqual('SUBMITTED', flow.submit())
+        self.assertEqual(1,self.submissions)
+
     def test_unknown_does_not_resubmit(self):
         self.success='<h1>Something went wrong</h1>'
         flow=self.flow(); self.assertEqual('REVIEW',flow.open())
