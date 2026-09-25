@@ -76,3 +76,5 @@ bash gradlew --no-daemon jobsdb --console=plain --args='batch --config .jobsdb/b
 配置中的提交上限按尝试数计数（含 UNKNOWN），不是成功数。失效登录停止该批，外部 ATS/未知题/单岗错误记录并继续。结果即时保存在 `.jobsdb/batches/<UTC时间>/report.json`，附筛选依据、审核与结果截图/文本。中断后重跑不会重新提交已 claim 的岗位。批次不是常驻定时器：执行一次完整有界批次后退出，下一批再次运行同一命令。
 
 网站 profile 步骤会在事件处理器尚未可用时显示 Continue；仅该非提交步骤允许一次有界第二次点击。最终 Submit 永不重试。网站已发送文案含雇主名称时亦识别成功；若未看到积极证据则保留 UNKNOWN。
+
+雇主多选题的 `answers` 值使用精确标签数组，例如 `"questionnaire.<observed-id>": ["Python"]`；单选题仍使用字符串。题目 ID 和标签必须来自实际页面，答案必须来自已确认信息或简历。多选题会清除非配置选项；未知标签、重复标签、空数组和类型不匹配会停止该岗位，不提交。语言熟练度等未确认事实仍需补充。

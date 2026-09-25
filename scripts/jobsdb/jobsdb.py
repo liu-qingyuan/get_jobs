@@ -191,6 +191,21 @@ class Flow:
                     if name not in answers: return self._needs('Unconfigured employer question: '+name)
                     group = self.page.locator('[name='+json.dumps(name)+']')
                     first = group.first
+                    if first.get_attribute('type') == 'checkbox':
+                        selected = answers[name]
+                        if not isinstance(selected, list) or not selected or any(not isinstance(label,str) or not label for label in selected) or len(set(selected)) != len(selected):
+                            return self._needs('Checkbox answers require unique exact labels: '+name)
+                        items=group.all()
+                        if any(item.get_attribute('type') != 'checkbox' for item in items):
+                            return self._needs('Mixed question controls: '+name)
+                        labels=[item.evaluate('(e)=>[...e.labels].map(l=>l.innerText.trim())') for item in items]
+                        if any(sum(label in options for options in labels)!=1 for label in selected):
+                            return self._needs('Unavailable checkbox answer: '+name)
+                        for item,options in zip(items,labels):
+                            item.set_checked(any(label in options for label in selected))
+                        continue
+                    if not isinstance(answers[name],str):
+                        return self._needs('Single-choice question requires one exact label: '+name)
                     if first.evaluate('(e)=>e.tagName') == 'SELECT':
                         if group.count()!=1: return self._needs('Ambiguous select: '+name)
                         try: first.select_option(label=answers[name])

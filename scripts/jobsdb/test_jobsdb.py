@@ -132,6 +132,28 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual('REVIEW',flow.prepare_automatic(Path('/tmp/English_abcd.docx'),{'questionnaire.salary':'$20K','questionnaire.visa':'IANG'}))
         self.assertEqual(0,self.submissions)
 
+    def test_automatic_checkbox_answers_clear_stale_choices(self):
+        self.review_document='<p>English_abcd.docx</p>'
+        self.start="""<label><input type="checkbox" name="questionnaire.languages" value="python">Python</label>
+        <label><input type="checkbox" name="questionnaire.languages" value="java" checked>Java</label>
+        <button onclick="if(document.querySelector('[value=python]').checked && !document.querySelector('[value=java]').checked) location.href='/job/12345678/apply/review'">Continue</button>"""
+        flow=self.flow()
+        self.assertEqual('REVIEW',flow.prepare_automatic(Path('/tmp/English_abcd.docx'),{'questionnaire.languages':['Python']}))
+        self.assertEqual(0,self.submissions)
+
+    def test_automatic_checkbox_unknown_or_ambiguous_answers_stop(self):
+        for answer in [['Rust'], ['Python','Python'], 'Python', []]:
+            with self.subTest(answer=answer):
+                self.start='<label><input type="checkbox" name="questionnaire.lang">Python</label><button>Continue</button>'
+                flow=self.flow()
+                self.assertEqual('NEEDS_INPUT',flow.prepare_automatic(Path('/tmp/cv.docx'),{'questionnaire.lang':answer}))
+                self.assertFalse(self.page.locator('input').is_checked())
+                self.assertEqual(0,self.submissions)
+        self.start='<label><input type="checkbox" name="questionnaire.lang">Python</label><label><input type="checkbox" name="questionnaire.lang">Python</label><button>Continue</button>'
+        flow=self.flow()
+        self.assertEqual('NEEDS_INPUT',flow.prepare_automatic(Path('/tmp/cv.docx'),{'questionnaire.lang':['Python']}))
+        self.assertIn('Unavailable checkbox',flow.reason)
+
     def test_automatic_unknown_question_never_submits(self):
         self.start='<input name="questionnaire.unknown"><button>Continue</button>'
         flow=self.flow()

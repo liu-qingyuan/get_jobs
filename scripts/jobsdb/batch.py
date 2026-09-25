@@ -51,8 +51,11 @@ def load_config(path):
         if type(value) is not int or not 1<=value<=maximum: raise ValueError('Invalid '+field)
     if not isinstance(config.get('searches'),list) or not config['searches'] or len(config['searches'])>10 or any(not isinstance(s,str) or not s.strip() for s in config['searches']):
         raise ValueError('searches requires 1-10 nonempty terms')
-    if not isinstance(config.get('answers'),dict) or any(not k.startswith('questionnaire.') or not isinstance(v,str) or not v for k,v in config['answers'].items()):
-        raise ValueError('answers must map questionnaire names to exact labels')
+    def valid_answer(value):
+        if isinstance(value,str):return bool(value.strip())
+        return isinstance(value,list) and bool(value) and all(isinstance(label,str) and label.strip() for label in value) and len(set(value))==len(value)
+    if not isinstance(config.get('answers'),dict) or any(not isinstance(k,str) or not k.startswith('questionnaire.') or not valid_answer(v) for k,v in config['answers'].items()):
+        raise ValueError('answers must map questionnaire names to an exact label or unique checkbox labels')
     # Never accidentally pick the old default document; name binds immutable bytes.
     upload=jobsdb.DATA/'resumes'/'upload'/(resume.stem+'_'+digest[:12]+resume.suffix)
     upload.parent.mkdir(parents=True,exist_ok=True)

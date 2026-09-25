@@ -77,3 +77,18 @@ class ConfigTests(unittest.TestCase):
             p=Path(tmp);(p/'cv.docx').write_bytes(b'changed')
             (p/'config.json').write_text(json.dumps({'auto_submit_enabled':True,'resume_path':str(p/'cv.docx'),'resume_sha256':'wrong'}))
             with self.assertRaisesRegex(ValueError,'SHA256'):load_config(p/'config.json')
+
+    def test_checkbox_config_accepts_only_unique_nonempty_labels(self):
+        import json,hashlib,tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import batch,jobsdb
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);cv=p/'cv.docx';cv.write_bytes(b'fixture')
+            config={'auto_submit_enabled':True,'resume_path':str(cv),'resume_sha256':hashlib.sha256(b'fixture').hexdigest(),'searches':['AI'],'pages':1,'max_candidates':1,'max_submissions':1,'answers':{'questionnaire.lang':['Python']}}
+            path=p/'config.json'
+            with patch.object(jobsdb,'DATA',p):
+                path.write_text(json.dumps(config));self.assertEqual(['Python'],batch.load_config(path)['answers']['questionnaire.lang'])
+                for value in [[],['Python','Python'],[''],['Python',7],{}]:
+                    config['answers']['questionnaire.lang']=value;path.write_text(json.dumps(config))
+                    with self.assertRaises(ValueError):batch.load_config(path)
