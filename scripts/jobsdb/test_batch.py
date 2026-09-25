@@ -16,6 +16,12 @@ class ScreeningRegressionTests(unittest.TestCase):
             with self.subTest(desc=desc):
                 self.assertNotEqual('',screen('AI Engineer',desc,'Hong Kong'))
 
+class LocationRegressionTests(unittest.TestCase):
+    def test_actual_workplace_overrides_platform_location(self):
+        self.assertIn('location',screen('Data Scientist (Computer Science or Equivalent) (深圳 Role)', 'This role is based in Shenzhen Office. Hong Kong Employment & MPF', 'Hong Kong SAR'))
+        self.assertIn('location',screen('AI Engineer', 'This role is based in Shenzhen Office. Hong Kong Employment & MPF', 'Hong Kong SAR'))
+        self.assertEqual('',screen('Junior AI Engineer', 'Based in Hong Kong; collaborate with our Shenzhen team.', 'Hong Kong SAR'))
+
 class BatchTests(unittest.TestCase):
     def test_batch_skips_duplicate_continues_unknown_and_submits_once(self):
         import tempfile,json

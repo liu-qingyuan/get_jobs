@@ -14,8 +14,12 @@ def screen(title, description, location):
         return 'not an AI or quantitative role'
     if re.search(r'\bsenior\b|\blead\b|\bhead\b|\bprincipal\b|\bmanager\b|\bVP\b|資深|资深|高級|高级|主管|總監|总监',title,re.I):
         return 'senior role'
-    if re.search(r'Shenzhen|深圳|Shanghai|上海|Beijing|北京|Guangzhou|廣州|广州|Mainland|內地|内地',location,re.I):
+    outside=r'Shenzhen|深圳|Shanghai|上海|Beijing|北京|Guangzhou|廣州|广州|Mainland|內地|内地|Singapore|新加坡'
+    if re.search(outside, location+' '+title, re.I):
         return 'location outside Hong Kong'
+    workplace = re.search(r'(?:based|located|work(?:ing)?|location|office)\s*(?:is\s+)?(?:in|at|:)?\s*(?:'+outside+r')|(?:工作地[點点]|辦公地[點点]|办公地[点點]|駐|驻)\s*[:：]?\s*(?:'+outside+r')', description, re.I)
+    if workplace:
+        return 'location outside Hong Kong in job description'
     if not re.search(r'Hong Kong|Kowloon|New Territories|Central|Wan Chai|Eastern|Southern|Sham Shui Po|Yau Tsim Mong|Wong Tai Sin|Kwun Tong|Kwai Tsing|Tsuen Wan|Tuen Mun|Yuen Long|North District|Tai Po|Sha Tin|Sai Kung|Islands|香港|九龍|九龙|新界',location,re.I):
         return 'location not confirmed in Hong Kong'
     if re.search(r'currently (?:enrolled|pursuing|studying)|must be (?:a )?(?:current )?student|在讀學生|在读学生',description,re.I):
