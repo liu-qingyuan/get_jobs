@@ -23,6 +23,9 @@ public class StartupRunner implements ApplicationRunner {
     @Value("${server.port:9527}")
     private int backendPort;
 
+    @Value("${browser.auto-start:true}")
+    private boolean autoStartBrowser;
+
     private static final int FRONTEND_PORT = 6866;
     private static final String FRONTEND_URL = "http://localhost:" + FRONTEND_PORT;
     private static final String BACKEND_URL = "http://localhost:";
@@ -32,6 +35,10 @@ public class StartupRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) throws Exception {
+        if (!autoStartBrowser) {
+            log.info("只读维护启动：跳过自动打开管理页和初始化招聘平台浏览器");
+            return;
+        }
         String urlToOpen = determineUrlToOpen();
         if (urlToOpen != null) {
             openBrowser(urlToOpen);

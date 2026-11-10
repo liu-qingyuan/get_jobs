@@ -1,6 +1,9 @@
 # 求职上下文
-- 国内平台：原有 Spring Boot 管理页面和投递任务，本次不改。
-- JobsDB：Java JobsDbMain 转发到 scripts/jobsdb/jobsdb.py；Scrapling + Chrome 自动 CF，独立持久会话，不启动 Spring/前端。
-- 数据：沿用 .jobsdb/applications.db；UNKNOWN 提交前原子 claim，未知结果不重试。
-- 保留 prepare/apply 审核合同；batch 读取一次配置后自动搜索、筛选、填表和提交；未知题报告并继续，真实批次验收见 issue #3。
-- 安装、登录、测试见 docs/jobsdb.md；接缝决策见 ADR 0002。
+- 统一工作台：当前副本 Spring/Next.js 的 `/workbench`；默认 `browser.auto-start=false`，不会随管理启动自动打开招聘浏览器。原 `get_jobs/` 的文件、进程、数据保持不动。
+- 个人资料：工作台本地 `.workbench/`，按通用、港区、国内、网站区分来源和确认状态；旧 JobsDB JSON 仅预览导入，不自动认定或覆盖历史。
+- 简历：地区 × 语言分别维护，岗位版另存，审核后用哈希与资料快照绑定任务；不自动翻译同步或捏造经验。
+- 国内平台：复用复制到本副本的 Java 管理页面和审核机制；JobsDB 保留独立 Python CLI、`.jobsdb/` 会话、锁和账本。工作台不从 HTTP 启动批次/apply。
+- 官网/简历 AI：仅显式启动已批准任务，交给配置的通用外部执行器；工作台管理事件、人工阻塞、回执，执行器未配置不能伪装可执行。
+- UNKNOWN：真正点击提交前必须原子占位且收到确认；缺回执、未核实的执行中断不重投。执行退出 0 不是提交证明。
+- 实验项目：仅待补强卡片，项目计划和建议目录不构成执行授权，也不能直接写入已完成经历。
+- 设计/使用：`docs/workbench-v1-design.md`、`docs/workbench.md` 和 ADR 0003；原 JobsDB 安装/登录/fixture 测试见 `docs/jobsdb.md`，ADR 0002。

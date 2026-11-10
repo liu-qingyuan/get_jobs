@@ -65,6 +65,7 @@ export default function Sidebar() {
   }, [])
 
   const envGroup = [
+    { href: '/workbench', icon: BiBriefcase, label: '求职工作台', color: 'text-emerald-300' },
     { href: '/env-config', icon: BiEnvelope, label: '环境配置', color: 'text-cyan-300' },
     { href: '/ai-config', icon: BiBrain, label: 'AI配置', color: 'text-purple-300' },
   ]
@@ -150,7 +151,7 @@ export default function Sidebar() {
       <nav className="p-4 space-y-4 overflow-y-auto h-[calc(100vh-280px)]">
         {/* 环境配置分组 */}
         <div>
-          <div className="px-4 py-2 text-white dark:text-waterloo text-xs uppercase tracking-wide">环境配置</div>
+          <div className="px-4 py-2 text-white dark:text-waterloo text-xs uppercase tracking-wide">工作台与环境</div>
           <div className="space-y-2">
             {envGroup.map((item, index) => {
               const Icon = item.icon

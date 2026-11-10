@@ -9,9 +9,9 @@ import jobsdb
 
 
 def screen(title, description, location):
-    """Return exclusion reason, or empty string for an early-career AI/quant candidate."""
-    if not re.search(r'\bAI\b|artificial intelligence|machine learning|data scien|quant|量化|人工智能|机器学习|機器學習',title,re.I):
-        return 'not an AI or quantitative role'
+    """Screen target titles without models; retain existing eligibility checks and quant searches."""
+    if not re.search(r'\bAI\b|\bLLM\b|\bRAG\b|artificial intelligence|large language|machine learning|data scien|algorithm|embodied|robotic|quant|量化|人工智能|机器学习|機器學習|大模型|算法|具身|机器人|機器人',title,re.I):
+        return 'not an AI, algorithm, embodied or quantitative role'
     if re.search(r'\bsenior\b|\blead\b|\bhead\b|\bprincipal\b|\bmanager\b|\bVP\b|資深|资深|高級|高级|主管|總監|总监',title,re.I):
         return 'senior role'
     outside=r'Shenzhen|深圳|Shanghai|上海|Beijing|北京|Guangzhou|廣州|广州|Mainland|內地|内地|Singapore|新加坡'

@@ -70,5 +70,9 @@ AGENTS.md
 .jobsdb/
 .jobsdb-evidence/
 
+# Unified workbench private profiles, resumes and task bundles
+.workbench/
+
 # JobsDB Python bytecode
 scripts/jobsdb/__pycache__/
+scripts/workbench/__pycache__/
