@@ -55,10 +55,11 @@ dependencies {
     compileOnly(lombok)
     annotationProcessor(lombok)
 
-    // 本工程没有 src/test，测试相关依赖（spring-boot-starter-test、junit-platform-launcher、
-    // lombok 的 test 配置）和 tasks.test 的 useJUnitPlatform() 已一并移除。
-    // 以后要加 Java 测试，把它们连同 src/test 一起加回来。
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
+
+tasks.test { useJUnitPlatform() }
 
 // 显示已过时 API 的详细告警，便于定位并修复
 tasks.withType<JavaCompile> {
@@ -247,4 +248,43 @@ tasks.named<BootRun>("bootRun") {
     // 让 playwright-java 用 patchright 的 driver，而不是自带的 driver-bundle
     systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
     resolveNodePath()?.let { environment("PLAYWRIGHT_NODEJS_PATH", it) }
+}
+// Explicit management entry; preparing the driver does not open a recruitment browser.
+tasks.register<BootRun>("workbench") {
+    group = "application"
+    description = "Start the local unified workbench without opening recruitment browsers"
+    dependsOn(tasks.classes, installPatchrightDriver)
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("com.getjobs.GetJobsApplication")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    systemProperty("browser.auto-start", "false")
+    systemProperty("playwright.cli.dir", patchrightDriverDir.get().asFile.absolutePath)
+    resolveNodePath()?.let { environment("PLAYWRIGHT_NODEJS_PATH", it) }
+    doFirst {
+        file("db").mkdirs()
+        if (!file("db/getjobs.db").isFile && args?.none { it.startsWith("--spring.datasource.url=") } != false) {
+            throw GradleException("首次启动请依照 docs/workbench.md 准备官方空库 db/getjobs.db；不要复制或覆盖原目录的账号数据库")
+        }
+    }
+}
+
+// JobsDB has its own subprocess/profile. Other platform tasks above remain unchanged.
+tasks.register<Exec>("jobsdbSetup") {
+    group = "application"
+    description = "Install pinned JobsDB Python runtime into .jobsdb/venv"
+    commandLine("bash", "scripts/jobsdb/setup.sh")
+}
+tasks.register<JavaExec>("jobsdb") {
+    group = "application"
+    description = "Isolated JobsDB Scrapling CLI; --args='help'"
+    dependsOn(tasks.compileJava)
+    classpath = sourceSets.main.get().output.classesDirs + configurations.runtimeClasspath.get()
+    mainClass.set("com.getjobs.jobsdb.JobsDbMain")
+    systemProperty("jobsdb.root", layout.projectDirectory.asFile.absolutePath)
+    standardInput = System.`in`
+}
+tasks.register<Exec>("jobsdbTest") {
+    group = "verification"
+    description = "JobsDB browser, ledger and CLI contracts; intercepted fixture traffic only"
+    commandLine(".jobsdb/venv/bin/python", "-m", "unittest", "discover", "-s", "scripts/jobsdb", "-v")
 }

@@ -108,7 +108,6 @@ public class PlaywrightManager {
     private static final double LOAD_STATE_TIMEOUT = 10_000;
 
     // Boss 登录态 Cookie：出现任意一个即视为已登录
-    private static final Set<String> BOSS_LOGIN_COOKIES = Set.of("bst", "wt2", "zp_at", "geek_zp_token");
 
     // 持久化上下文的用户数据目录，登录态直接落在这里
     private static final Path USER_DATA_DIR = Paths.get(System.getProperty("user.dir"), "browser-data");
@@ -284,6 +283,9 @@ public class PlaywrightManager {
         runOnPlaywright(this::initInternal);
     }
 
+    @org.springframework.beans.factory.annotation.Value("${browser.auto-start:true}")
+    private boolean autoStartPlatforms;
+
     private void initInternal() {
         if (isInitialized()) {
             return;
@@ -378,6 +380,14 @@ public class PlaywrightManager {
             }
             if (!startupPages.isEmpty()) {
                 log.info("✓ 已关闭 {} 个启动空白页", startupPages.size());
+            }
+
+            // Maintenance/manual-login mode opens only blank managed pages. The
+            // explicit login endpoint owns the sole requested navigation.
+            if (!autoStartPlatforms) {
+                setupLoginMonitoring(bossPage);
+                log.info("手动登录模式：浏览器已就绪，跳过所有平台自动导航");
+                return;
             }
 
             // 各平台初始化必须串行：它们共享同一个 BrowserContext 和同一条 Playwright 连接，
@@ -573,18 +583,7 @@ public class PlaywrightManager {
      * 检查Boss是否已登录
      */
     private boolean checkIfLoggedIn() {
-        // 最可靠的信号是登录态 Cookie：不受页面渲染、跳转、加载速度影响。
-        // DOM 探测（头像、登录入口）只作兜底 —— 页面一慢就会误判成未登录，
-        // 而 /api/boss/start 是拿这个结果做准入的，误判会直接导致"请先登录"。
-        try {
-            for (Cookie cookie : context.cookies(BOSS_URL)) {
-                if (BOSS_LOGIN_COOKIES.contains(cookie.name)
-                        && cookie.value != null && !cookie.value.isBlank()) {
-                    return true;
-                }
-            }
-        } catch (Exception ignored) {}
-
+        // Cookies may be expired or rejected by the server; require visible account UI.
         // 更稳健的登录判断：优先检测用户头像/昵称是否可见；备用检测登录入口是否可见且包含“登录”文本
         try {
             Locator userLabel = bossPage.locator("li.nav-figure span.label-text").first();
@@ -1029,13 +1028,18 @@ public class PlaywrightManager {
                 for (int i = 0; i < maxSeconds; i++) {
                     boolean loggedIn = false;
                     try {
-                        loggedIn = checkIf51jobLoggedIn();
+                        loggedIn = callOnPlaywright(() -> {
+                            boolean authenticated = checkIf51jobLoggedIn();
+                            if (authenticated) {
+                                on51jobLoginSuccess();
+                            }
+                            return authenticated;
+                        });
                     } catch (Exception ignored) {
                     }
 
                     if (loggedIn) {
                         // 交由统一回调处理登录成功逻辑（包含状态更新与保存 Cookie）
-                        on51jobLoginSuccess();
                         log.info("后台等待检测到 51job 登录成功，用时约 {} 秒", i);
                         return;
                     }
@@ -1835,7 +1839,8 @@ public class PlaywrightManager {
      * 检查Playwright是否已初始化
      */
     public boolean isInitialized() {
-        return playwright != null && context != null && bossPage != null && !browserClosed;
+        return playwright != null && context != null && bossPage != null
+                && !browserClosed && !bossPage.isClosed();
     }
 
     /**
@@ -1846,8 +1851,23 @@ public class PlaywrightManager {
      * 发起任务前先过一遍这里。
      */
     public synchronized void ensureReady() {
+        runOnPlaywright(this::ensureReadyInternal);
+    }
+
+    private void ensureReadyInternal() {
         if (isInitialized()) {
-            return;
+            try {
+                // Pump pending close/disconnect events on the owning thread. Non-null
+                // handles and cached login flags alone do not establish liveness.
+                bossPage.waitForTimeout(1);
+                if (isInitialized()) {
+                    return;
+                }
+            } catch (RuntimeException closedConnection) {
+                browserClosed = true;
+                log.warn("浏览器连接探测失败，重新初始化: {}",
+                        closedConnection.getClass().getSimpleName());
+            }
         }
         log.warn("浏览器不可用（已关闭或未初始化），正在重新初始化...");
         // 旧对象已经失效，先清干净再重建，避免 init() 里的 isInitialized() 短路
@@ -1917,49 +1937,8 @@ public class PlaywrightManager {
         if (previousStatus == null || previousStatus != isLoggedIn) {
             loginStatus.put(platform, isLoggedIn);
 
-            // Boss平台：在设置未登录状态时，顺带引导到登录页并切换二维码扫码
-            if ("boss".equals(platform) && !isLoggedIn) {
-                try {
-                    if (bossPage != null) {
-                        String currentUrl = null;
-                        try { currentUrl = bossPage.url(); } catch (Exception ignored) {}
-
-                        // 避免重复导航：若当前已在登录页则不再二次跳转
-                        if (currentUrl == null || !currentUrl.contains("/web/user/")) {
-                            bossPage.navigate(BOSS_URL + "/web/user/?ka=header-login");
-                            try { Thread.sleep(800); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                        }
-
-                        // 尝试切换到二维码登录（点击“APP扫码登录”按钮），优先使用新版选择器
-                        try {
-                            Locator qrSwitch = bossPage.locator(".btn-sign-switch.ewm-switch").first();
-                            if (isVisibleQuick(qrSwitch)) {
-                                qrSwitch.click();
-                            } else {
-                                // 兜底：按文本匹配内部提示
-                                Locator tip = bossPage.getByText("APP扫码登录").first();
-                                if (isVisibleQuick(tip)) {
-                                    tip.click();
-                                    log.info("已点击包含文本的二维码登录切换提示（APP扫码登录）");
-                                } else {
-                                    // 兼容旧版选择器
-                                    Locator legacy = bossPage.locator("li.sign-switch-tip").first();
-                                    if (isVisibleQuick(legacy)) {
-                                        legacy.click();
-                                        log.info("已通过旧版选择器切换二维码登录（li.sign-switch-tip）");
-                                    } else {
-                                        log.info("未找到二维码登录切换按钮，保持当前登录页");
-                                    }
-                                }
-                            }
-                        } catch (Exception e) {
-                            log.debug("切换二维码登录失败: {}", e.getMessage());
-                        }
-                    }
-                } catch (Exception e) {
-                    log.debug("设置Boss未登录状态时执行登录引导失败: {}", e.getMessage());
-                }
-            }
+            // Status observation is read-only. Explicit login owns navigation;
+            // monitoring must not navigate or click after an access restriction.
 
             // 通知所有监听器（触发SSE推送）
             LoginStatusChange change = new LoginStatusChange(platform, isLoggedIn, System.currentTimeMillis());

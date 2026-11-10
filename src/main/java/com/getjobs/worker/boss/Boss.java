@@ -100,22 +100,113 @@ public class Boss {
         // 不在页面初始化阶段入库，仅用于后续点击卡片时按需入库
     }
 
-    /**
-     * 执行投递
-     */
-    public int execute() {
-        for (String cityCode : config.getCityCode()) {
-            if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
-                progressCallback.accept("用户取消投递", 0, 0);
-                break;
-            }
-            postJobByCity(cityCode);
-            if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
-                progressCallback.accept("用户取消投递", 0, 0);
-                break;
-            }
+    // One task owns the latch. No automatic recovery or restricted-page retry.
+    private String stopReason;
+    private String reviewedTarget;
+    private boolean reviewedProcessed;
+    private final Set<String> scannedSearches = new HashSet<>();
+    private final Set<String> scannedJobs = new HashSet<>();
+    private final Map<String, String> detailBodies = new HashMap<>();
+
+    private IllegalStateException stop(String reason) {
+        if (stopReason == null) stopReason = reason;
+        return new IllegalStateException(stopReason);
+    }
+
+    private void checkAccess(Page current) {
+        if (stopReason != null) throw stop(stopReason);
+        if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get()))
+            throw stop("用户停止：后续访问与发送已终止");
+        try {
+            String url = current.url();
+            if (url != null && url.contains("/403")) throw stop("访问受限：403 页面");
+            if (isSecurityVerifyUrl(url)) throw stop("验证码/安全校验：任务已停止，不自动继续");
+            if (url != null && (url.contains("/web/user/") || url.contains("/web/passport/")))
+                throw stop("登录失效或身份校验：任务已停止");
+            String body = current.locator("body").innerText(new Locator.InnerTextOptions().setTimeout(2000));
+            if (body.contains("访问受限") || body.contains("限制访问") || body.replace("1.智能体安全核心研发：负责Agent全链路安全能力建设，实现工具调用安全沙箱、动态权限管控、多Agent交互审计、异常行为检测阻断、Agent劫持防护，保障智能体执行安全。", "").replace("4. 负责威胁检测引擎研发，⽀持⼊侵检测、异常行为分析、资产识别及攻击链关联分析；", "").replace("实现行为熔断系统，实时检测异常行为，并以温和、建设性的方式介入——从不阻止交易，但始终在关键时刻提供正确的数据。", "").contains("异常行为")
+                    || body.contains("请勿频繁") || body.contains("访问过于频繁"))
+                throw stop("访问受限：页面限制提示");
+            Locator challenge = current.locator(".geetest_panel, .geetest_holder, .captcha-container, iframe[src*='captcha'], iframe[src*='verify']");
+            if ((challenge.count() > 0 && challenge.first().isVisible()) || body.contains("安全验证") || body.contains("安全校验") || body.contains("请完成验证")
+                    || body.contains("滑动验证") || body.contains("拖动滑块") || body.contains("验证码"))
+                throw stop("验证码/安全校验：任务已停止，不自动继续");
+            Locator login = current.locator("li.nav-sign, .sign-form, .login-dialog, .login-layer");
+            if ((login.count() > 0 && login.first().isVisible()) || body.contains("登录已失效")
+                    || body.contains("登录已过期") || body.contains("请先登录") || body.contains("请登录后使用"))
+                throw stop("登录失效：任务已停止");
+            if (stopReason != null) throw stop(stopReason); // response events can run during DOM reads
+        } catch (RuntimeException e) {
+            if (stopReason != null) throw stop(stopReason);
+            throw stop("页面解析异常：已停止，不自动重试");
         }
-        return resultList.size();
+    }
+
+    private void observeResponse(Response response) {
+        try {
+            String host = java.net.URI.create(response.url()).getHost();
+            if (host == null || !(host.equals("zhipin.com") || host.endsWith(".zhipin.com"))) return;
+            int status = response.status();
+            if (status == 401 || status == 403 || status == 429) {
+                stop("HTTP " + status + "：访问受限或登录失效，任务已停止");
+            } else if (response.url().contains("/wapi/") && response.url().contains(".json")) {
+                JSONObject body = new JSONObject(response.text());
+                String responsePath = java.net.URI.create(response.url()).getPath();
+                // This optional analyzer explicitly reports that it has never been used.
+                // Exact captured response only; never exempt auth/rate limits or send APIs.
+                boolean unusedOptionalAnalyzer = status == 200
+                        && "/wapi/zpitem/web/competitive/jobDetail.json".equals(responsePath)
+                        && body.optInt("code", -1) == 600053
+                        && "该职位还未使用竞争力分析器, 请重试".equals(body.optString("message"))
+                        && body.optJSONObject("zpData") != null
+                        && body.getJSONObject("zpData").isEmpty();
+                if (body.has("code") && body.optInt("code", -1) != 0 && !unusedOptionalAnalyzer)
+                    stop("平台接口异常：code=" + body.optInt("code", -1)
+                            + " path=" + responsePath + "，任务已停止");
+                if (response.url().contains("/wapi/zpgeek/job/detail.json") && body.optInt("code", -1) == 0) {
+                    JSONObject info = body.getJSONObject("zpData").getJSONObject("jobInfo");
+                    detailBodies.put(info.getString("encryptId"), body.toString());
+                }
+            }
+        } catch (RuntimeException e) {
+            stop("平台响应解析异常：任务已停止");
+        }
+    }
+
+    public int execute() {
+        var context = page.context();
+        java.util.function.Consumer<Response> listener = this::observeResponse;
+        java.util.function.Consumer<com.microsoft.playwright.Route> route = r -> {
+            String host = java.net.URI.create(r.request().url()).getHost();
+            boolean bossRequest = host != null && (host.equals("zhipin.com") || host.endsWith(".zhipin.com"));
+            if (bossRequest && (stopReason != null || (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get()))))
+                r.abort();
+            else r.fallback();
+        };
+        context.onResponse(listener);
+        try {
+            context.route("**/*", route);
+            checkAccess(page);
+            // A revoked/expired/used approval must not trigger another candidate scan.
+            if (!Boolean.TRUE.equals(config.getDebugger())) {
+                if (Boolean.TRUE.equals(config.getSendImgResume()))
+                    throw stop("单岗文本审核不包含图片附件发送");
+                try { reviewedTarget = ReviewedApplication.reviewedTarget(ReviewedApplication.APPROVAL); }
+                catch (Exception e) { throw stop("单岗审核门禁：" + e.getMessage()); }
+            }
+            for (String cityCode : config.getCityCode()) {
+                checkAccess(page);
+                postJobByCity(cityCode);
+                if (reviewedProcessed) break;
+            }
+            checkAccess(page);
+            if (reviewedTarget != null && !reviewedProcessed)
+                throw stop("未找到已审核岗位：停止，不自动重新扫描");
+            return resultList.size();
+        } finally {
+            context.offResponse(listener);
+            context.unroute("**/*", route);
+        }
     }
 
     /**
@@ -228,33 +319,39 @@ public class Boss {
                 return;
             }
 
-            int postCount = 0;
             // 使用 URLEncoder 对关键词进行编码
             String encodedKeyword = URLEncoder.encode(keyword, StandardCharsets.UTF_8);
 
             String url = searchUrl + (searchUrl.contains("?") ? "&" : "?") + "query=" + encodedKeyword;
-            // 单个关键词失败不该让整个投递任务中止，下面整段都包在 try 里
+            if (reviewedProcessed) return;
+            if (!scannedSearches.add(url)) continue;
+            checkAccess(page);
+            // Any uncertainty terminates the whole task, not just this keyword.
             try {
-            // 进列表页 + 等列表渲染，整段带重试
-            openJobListWithRetry(keyword, url, cityCode);
+            // Navigate once; errors terminate the whole task.
+            openJobListOnce(keyword, url, cityCode);
 
             // 1. 基于 footer 出现滚动到底，确保加载全部岗位
             int lastCount = -1;
             int stableTries = 0;
-            int staleHits = 0;
             // 上限 300 轮：原来写的是 5000，而且 stableTries 只触发强制触底、从不退出循环，
             // 一旦 footer 选择器匹配不到就会空转几千轮，每轮一次 evaluate + count，
             // 能把 playwright 线程占死几十分钟 —— 整个应用跟着卡住、投递任务也永远结束不了。
             boolean loadedAll = false;
             for (int i = 0; i < 300; i++) {
+                checkAccess(page);
+                // The reviewed card is enough; do not preload the rest of the candidate set.
+                if (reviewedTarget != null && page.locator("a[href*='" +
+                        java.net.URI.create(reviewedTarget).getPath() + "']").count() > 0) {
+                    loadedAll = true;
+                    break;
+                }
                 // 停止检查：滚动加载过程中也要及时响应
                 if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
                     progressCallback.accept("用户取消投递", 0, 0);
                     return;
                 }
-                // 滚动加载期间 Boss 会频繁增删 frame，Playwright 派发这些事件时可能
-                // 引用到已销毁的 frame（Object doesn't exist: frame@...），异常会顺着
-                // 当时在飞的那个调用抛出来。这类异常和调用本身无关，跳过这一轮继续滚就行。
+                // A failed DOM read is uncertainty, not an empty candidate set.
                 try {
                     // footer 可见不能立刻就当作"加载完了"：窗口最大化时首屏很短，
                     // 第一轮 footer 就是可见的，会导致只拿到首屏 15 个岗位就退出
@@ -295,22 +392,14 @@ public class Boss {
                         break;
                     }
                 } catch (Exception e) {
-                    if (!isStaleObjectError(e)) {
-                        throw e;
-                    }
-                    staleHits++;
-                    if (staleHits > 20) {
-                        log.warn("【{}】滚动期间反复出现失效对象异常({}次)，停止继续加载", keyword, staleHits);
-                        break;
-                    }
-                    PlaywrightUtil.sleep(1);
+                    checkAccess(page);
+                    throw stop("列表解析异常：已停止，不把失败当空列表");
                 }
             }
-            if (!loadedAll) {
-                log.warn("【{}】滚动到达 300 轮上限仍未确认加载完毕，按当前已加载的岗位继续", keyword);
-            }
+            if (!loadedAll) throw stop("列表加载未确认：达到滚动上限，任务已停止");
             // 统计最终岗位数量
             int loadedCount = countJobCards();
+            checkAccess(page);
             log.info("【{}】岗位已全部加载，总数:{}", keyword, loadedCount);
             progressCallback.accept("岗位加载完成：" + keyword, 0, loadedCount);
 
@@ -322,41 +411,45 @@ public class Boss {
             Locator cards = page.locator("//ul[contains(@class, 'rec-job-list')]//li[contains(@class, 'job-card-box')]");
             int count = cards.count();
             for (int i = 0; i < count; i++) {
+                if (reviewedProcessed) return;
                 // 检查是否需要停止
                 if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
                     progressCallback.accept("用户取消投递", i, count);
                     return;
                 }
 
-                // 重新获取卡片，避免元素过期
-                cards = page.locator("//ul[contains(@class, 'rec-job-list')]//li[contains(@class, 'job-card-box')]");
-                // 在点击卡片时同步等待岗位详情接口返回，随后解析并入库
-                Response detailResp = null;
-                try {
-                    if (i == 0 && count > 1) {
-                        // 第一个卡片默认展开不会触发请求：先切到第二个，再切回第一个，并在返回第一个时监听响应
-                        final Locator secondCard = cards.nth(1);
-                        secondCard.click();
-                        PlaywrightUtil.sleep(1);
-                        final Locator firstCard = cards.nth(0);
-                        detailResp = page.waitForResponse(r -> {
-                            try {
-                                return r.url() != null && r.url().contains("/wapi/zpgeek/job/detail.json")
-                                        && "GET".equalsIgnoreCase(r.request().method());
-                            } catch (Throwable ignore) { return false; }
-                        }, firstCard::click);
-                    } else {
-                        final Locator cardToClick = cards.nth(i);
-                        detailResp = page.waitForResponse(r -> {
-                            try {
-                                return r.url() != null && r.url().contains("/wapi/zpgeek/job/detail.json")
-                                        && "GET".equalsIgnoreCase(r.request().method());
-                            } catch (Throwable ignore) { return false; }
-                        }, cardToClick::click);
+                checkAccess(page);
+                cards = page.locator(JOB_LIST_SELECTOR);
+                Locator card = cards.nth(i);
+                String href = card.locator("a[href*='/job_detail/']").first().getAttribute("href");
+                if (href == null || href.isBlank()) throw stop("岗位卡片解析异常：缺少岗位链接");
+                String candidate = java.net.URI.create(BOSS_HOME_URL).resolve(href).toString().split("\\?", 2)[0];
+                if (!scannedJobs.add(candidate)) continue;
+                if (reviewedTarget != null && !reviewedTarget.equals(candidate)) continue;
+                // The first card can already be selected by the page. Reuse its
+                // observed response only if the visible detail link binds the same job.
+                String detailBody = detailBodies.get(extractEncryptId(candidate));
+                Locator currentDetail = page.locator("a.more-job-btn");
+                String currentHref = currentDetail.count() == 1 ? currentDetail.getAttribute("href") : null;
+                boolean selected = currentHref != null && candidate.equals(
+                        java.net.URI.create(BOSS_HOME_URL).resolve(currentHref).toString().split("\\?", 2)[0]);
+                if (detailBody == null || !selected) {
+                    try {
+                        checkAccess(page);
+                        Response detailResp = page.waitForResponse(r -> {
+                            observeResponse(r);
+                            return stopReason != null || (r.url().contains("/wapi/zpgeek/job/detail.json")
+                                    && "GET".equalsIgnoreCase(r.request().method()));
+                        }, new Page.WaitForResponseOptions().setTimeout(5000), card::click);
+                        observeResponse(detailResp);
+                        checkAccess(page);
+                        detailBody = detailResp.text();
+                    } catch (Exception e) {
+                        checkAccess(page);
+                        throw stop("岗位详情响应缺失：任务已停止，不访问下一岗位");
                     }
-                } catch (Throwable ignore) {
                 }
-                PlaywrightUtil.sleep(1);
+                checkAccess(page);
 
                 // 统一从请求返回的 JSON 中获取数据并做过滤
                 String jobName = null;
@@ -368,14 +461,18 @@ public class Boss {
                 String bossCompany = null;
                 String bossJobTitle = null;
 
-                if (detailResp != null) {
+                if (detailBody != null) {
                     try {
-                        String body = detailResp.text();
+                        String body = detailBody;
+                        JSONObject responseRoot = new JSONObject(body);
+                        if (responseRoot.optInt("code", -1) != 0)
+                            throw stop("岗位详情接口异常：code=" + responseRoot.optInt("code", -1));
+                        JSONObject data = responseRoot.getJSONObject("zpData");
+                        String responseId = data.getJSONObject("jobInfo").getString("encryptId");
+                        if (!Objects.equals(extractEncryptId(candidate), responseId))
+                            throw stop("岗位详情身份不匹配：任务已停止");
                         // 保存原始 JSON 便于调试
                         appendRawJson(body);
-                        // 解析并入库（仅在点击卡片触发时执行）
-                        processJobDetailJsonAndInsert(body);
-
                         // 从 JSON 构建用于投递与过滤的字段
                         org.json.JSONObject root = new org.json.JSONObject(body);
                         org.json.JSONObject zpData = root.optJSONObject("zpData");
@@ -404,10 +501,18 @@ public class Boss {
                         if (brand != null) {
                             bossCompany = brand.optString("brandName", "");
                         }
-                    } catch (Throwable e) {
-                        log.debug("点击卡片后解析岗位详情用于过滤失败：{}", e.getMessage());
+                    } catch (Exception e) {
+                        checkAccess(page);
+                        throw stop("岗位详情解析异常：任务已停止，不构造空岗位");
                     }
                 }
+                if (jobName == null || jobName.isBlank() || bossCompany == null || bossCompany.isBlank()
+                        || jobDesc == null || jobDesc.isBlank())
+                    throw stop("岗位详情解析异常：缺少名称、公司或描述");
+                checkAccess(page);
+                // Persist only after required identity/content fields have validated.
+                processJobDetailJsonAndInsert(detailBody);
+                if (reviewedTarget != null) reviewedProcessed = true;
 
                 // 过滤（全部基于 JSON 字段），并输出过滤原因
                 if (jobName != null && blackJobs != null && blackJobs.stream().anyMatch(jobName::contains)) {
@@ -442,37 +547,31 @@ public class Boss {
                 job.setJobInfo(jobDesc != null ? jobDesc : "");
 
                 // 输出
-                progressCallback.accept("正在投递：" + jobName, i + 1, count);
+                progressCallback.accept("正在核验岗位：" + jobName, i + 1, count);
                 resumeSubmission(keyword, job);
-                postCount++;
+                if (reviewedProcessed) return;
 
-                // 为避免点击下面的卡片触发页面刷新：在点击5个卡片之后，每次点击后适度下滑
+                checkAccess(page);
+                // 仅在已核验的页面上滚动。
                 try {
                     if (i >= 5) {
                         page.evaluate("window.scrollBy(0, 140);");
                         PlaywrightUtil.sleep(1);
                     }
-                } catch (Throwable ignore) {}
+                } catch (Exception e) {
+                    checkAccess(page);
+                    throw stop("列表滚动异常：任务已停止");
+                }
 
-                // 按 wait_time 降速，别把风控刷出来
+                // 间隔不是平台允许自动化或免于限制的保证。
                 pauseBetweenJobs();
 
-                // 停顿期间可能已经被弹到安全验证页，发现了就停下来等人工过验证，
-                // 而不是继续闷头点下去（继续点只会让后面的关键词全部失败）
-                if (isSecurityVerifyUrl(safeUrl())) {
-                    log.warn("【{}】遍历过程中被跳转到安全验证页：{}", keyword, safeUrl());
-                    if (progressCallback != null) {
-                        progressCallback.accept("触发Boss安全校验，请在浏览器中手动完成验证", i + 1, count);
-                    }
-                    waitForSliderVerify(page);
-                }
+                checkAccess(page);
             }
-            log.info("【{}】岗位已投递完毕！已投递岗位数量:{}", keyword, postCount);
+            log.info("【{}】候选岗位核验结束；点击和日志不计为发送成功", keyword);
             } catch (Exception e) {
-                log.error("【{}】处理失败，跳过该关键词继续下一个：{}", keyword, e.getMessage(), e);
-                if (progressCallback != null) {
-                    progressCallback.accept("关键词[" + keyword + "]失败已跳过：" + e.getMessage(), 0, 0);
-                }
+                checkAccess(page);
+                throw stop("任务异常停止：" + e.getMessage());
             }
         }
     }
@@ -771,38 +870,20 @@ public class Boss {
     }
 
     /**
-     * 导航并重试一次。
-     * <p>
-     * Boss 页面自己会做客户端跳转，撞上时 Playwright 报 net::ERR_ABORTED；
-     * 这类失败重试一次基本就过了，不该让整个投递任务因此中止。
+     * Navigate once. A failed navigation is terminal, including ERR_ABORTED.
      */
     private void navigateTo(String url) {
-        // Boss 的 SPA 在网络不佳或被限流时，15 秒常常不够，之前实测连着两次都超时
-        Page.NavigateOptions options = new Page.NavigateOptions()
-                .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
-                .setTimeout(45_000);
+        checkAccess(page);
         try {
-            page.navigate(url, options);
-        } catch (Exception first) {
-            // 导航期间页面自己又跳了一次时，Playwright 会抛 "Object doesn't exist: request@/frame@"，
-            // 但页面其实已经到位了。先看落地 URL，别白白重试一遍。
-            if (landedOn(url)) {
-                log.debug("导航报了失效对象异常但页面已到位，忽略：{}", first.getMessage());
-                settleAfterNavigation();
-                return;
-            }
-            log.warn("导航失败，1秒后重试一次：{} | {}", url, first.getMessage());
-            PlaywrightUtil.sleep(1);
-            try {
-                page.navigate(url, options);
-            } catch (Exception second) {
-                if (!landedOn(url)) {
-                    throw second;
-                }
-                log.debug("重试同样报失效对象异常但页面已到位，忽略：{}", second.getMessage());
-            }
+            Response response = page.navigate(url, new Page.NavigateOptions()
+                    .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(15_000));
+            if (response != null) observeResponse(response);
+            checkAccess(page);
+        } catch (Exception e) {
+            checkAccess(page);
+            throw stop("导航失败：任务已停止，不自动重试");
         }
-        settleAfterNavigation();
     }
 
     /**
@@ -869,80 +950,33 @@ public class Boss {
     }
 
     /**
-     * 进入岗位列表并等列表渲染出来，整段带重试。
-     * Boss 首页/列表页在登录态下会连着跳好几次，一次失败很正常。
+     * Enter one candidate set without navigation retries.
      */
-    private void openJobListWithRetry(String keyword, String targetUrl, String cityCode) {
-        // 只重试一次：每次都要走导航(最长45秒×2) + 等列表(15秒×3)，
-        // 试三轮的话一个关键词失败要耗掉好几分钟，界面上看着就是"卡住不动"
-        RuntimeException last = null;
-        for (int attempt = 1; attempt <= 2; attempt++) {
-            try {
-                openJobList(keyword, targetUrl, cityCode);
-                waitForJobList();
-                return;
-            } catch (RuntimeException e) {
-                last = e;
-                log.warn("【{}】进入岗位列表失败（第{}/2次）：{}", keyword, attempt,
-                        e.getMessage() == null ? e.toString() : e.getMessage().split("\n")[0]);
-                if (attempt < 2) {
-                    PlaywrightUtil.sleep(3);
-                }
-            }
-        }
-        throw last;
+    private void openJobListOnce(String keyword, String targetUrl, String cityCode) {
+        openJobList(keyword, targetUrl, cityCode);
+        waitForJobList();
     }
 
-    /**
-     * 统计当前列表里的岗位卡片数量，对失效对象异常做重试。
-     */
     private int countJobCards() {
-        for (int attempt = 1; attempt <= 3; attempt++) {
-            try {
-                return page.locator(JOB_LIST_SELECTOR).count();
-            } catch (Exception e) {
-                if (!isStaleObjectError(e) || attempt == 3) {
-                    if (isStaleObjectError(e)) {
-                        log.warn("统计岗位数量始终失败，按 0 处理：{}", e.getMessage());
-                        return 0;
-                    }
-                    throw e;
-                }
-                PlaywrightUtil.sleep(1);
-            }
-        }
-        return 0;
+        checkAccess(page);
+        try { return page.locator(JOB_LIST_SELECTOR).count(); }
+        catch (Exception e) { throw stop("列表解析异常：计数失败，不按零岗位处理"); }
     }
 
-    /**
-     * 等待岗位列表容器出现，带重试。
-     * 页面在这期间可能还在跳转，一次失败不代表真的没有列表。
-     */
     private void waitForJobList() {
-        // Boss 改版频繁，推荐页和搜索结果页的容器类名不一样。
-        // 用逗号把候选选择器拼成一个，让 Playwright 一次性等"任意一个先出现"，
-        // 不要逐个 8 秒串行试 —— 那样一轮就要 48 秒，页面正常时也慢得像卡死。
-        String containers = String.join(", ",
-                "ul.rec-job-list",
-                "ul.job-list-box",
-                ".job-list-box",
-                ".search-job-result",
-                "li.job-card-box",
-                "li.job-card-wrapper");
-
-        for (int attempt = 1; attempt <= 3; attempt++) {
-            try {
-                page.waitForSelector(containers,
-                        new Page.WaitForSelectorOptions().setTimeout(15_000));
-                log.info("岗位列表容器已出现（第{}次尝试）", attempt);
-                return;
-            } catch (Exception e) {
-                log.warn("等待岗位列表失败（第{}/3次），当前页面: {}", attempt, safeUrl());
-                settleAfterNavigation();
-            }
+        checkAccess(page);
+        try {
+            page.waitForCondition(() -> {
+                checkAccess(page);
+                return page.locator("ul.rec-job-list, ul.job-list-box, .job-list-box, .search-job-result").count() > 0;
+            }, new Page.WaitForConditionOptions().setTimeout(15_000));
+            checkAccess(page);
+            if (countJobCards() == 0 && page.getByText("暂无相关职位").count() == 0)
+                throw stop("列表解析异常：未确认空结果");
+        } catch (Exception e) {
+            checkAccess(page);
+            throw stop("列表解析异常：容器未出现，不重新导航");
         }
-        dumpListPageStructure();
-        throw new IllegalStateException("岗位列表始终未出现，当前页面: " + safeUrl());
     }
 
     private String safeUrl() {
@@ -978,17 +1012,7 @@ public class Boss {
      * 落地后检查是否被弹到风控/验证页，日志里能直接看出是哪一步触发的。
      */
     private void warnIfSecurityCheck(String keyword) {
-        String url = page.url();
-        if (url == null) {
-            return;
-        }
-        if (isSecurityVerifyUrl(url)) {
-            log.warn("【{}】进入岗位列表时被跳转到验证页：{}", keyword, url);
-            if (progressCallback != null) {
-                progressCallback.accept("触发Boss安全校验，请手动完成验证", 0, 0);
-            }
-            waitForSliderVerify(page);
-        }
+        checkAccess(page);
     }
 
     /**
@@ -996,6 +1020,7 @@ public class Boss {
      */
     @SneakyThrows
     private void resumeSubmission(String keyword, Job job) {
+        checkAccess(page);
         // 若收到停止指令，直接短路返回
         if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
             log.info("停止指令已触发，跳过投递 | 公司：{} | 岗位：{}", job.getCompanyName(), job.getJobName());
@@ -1007,28 +1032,62 @@ public class Boss {
             return;
         }
 
+        // Resolve text before any external interaction: authentication/model failures
+        // must never open a conversation or silently fall back to an old greeting.
+        String message;
+        if (Boolean.TRUE.equals(config.getEnableAI())) {
+            if (job.getJobInfo() == null || job.getJobInfo().isBlank()) {
+                throw new IllegalStateException("岗位详情为空，已停止发送");
+            }
+            message = generateAiMessage(keyword, job.getJobName(), job.getJobInfo());
+        } else {
+            message = config.getSayHi();
+        }
+        if (message == null || message.isBlank()) {
+            throw new IllegalStateException("招呼语为空，已停止发送");
+        }
+
         // 1. 查找"查看更多信息"按钮（必须存在且新开页）
         Locator moreInfoBtn = page.locator("a.more-job-btn");
         if (moreInfoBtn.count() == 0) {
-            log.warn("未找到\"查看更多信息\"按钮，跳过...");
-            return;
+            throw stop("岗位详情解析异常：缺少查看更多信息链接");
         }
         // 强制用js新开tab
         String href = moreInfoBtn.first().getAttribute("href");
         if (href == null || !href.startsWith("/job_detail/")) {
-            log.warn("未获取到岗位详情链接，跳过...");
-            return;
+            throw stop("岗位详情解析异常：链接无效");
         }
         String detailUrl = "https://www.zhipin.com" + href;
-        // 2. 在新窗口打开详情页
+        // Only one exact reviewed job/text may leave the application. Query parameters
+        // are per-visit tracking tokens; approval binds the canonical job URL.
+        String canonicalUrl = detailUrl.split("\\?", 2)[0];
+        ReviewedApplication approval;
+        try {
+            if (Boolean.TRUE.equals(config.getSendImgResume())) {
+                throw new IllegalStateException("单岗文本审核不包含图片附件发送");
+            }
+            approval = ReviewedApplication.verify(ReviewedApplication.APPROVAL,
+                    canonicalUrl, job.getCompanyName(), job.getJobName(), message);
+        } catch (Exception e) {
+            throw stop("单岗审核失效或岗位/正文不匹配：已停止发送");
+        }
+        checkAccess(page);
         Page detailPage = page.context().newPage();
-        detailPage.navigate(detailUrl);
+        boolean attempted = false;
+        boolean confirmed = false;
+        try {
+        checkAccess(page);
+        Response detailNavigation = detailPage.navigate(detailUrl, new Page.NavigateOptions()
+                .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED).setTimeout(15_000));
+        if (detailNavigation != null) observeResponse(detailNavigation);
+        checkAccess(detailPage);
         PlaywrightUtil.sleep(1);
 
         // 3. 查找"立即沟通"按钮
         Locator chatBtn = detailPage.locator("a.btn-startchat, a.op-btn-chat");
         boolean foundChatBtn = false;
         for (int i = 0; i < 5; i++) {
+            checkAccess(detailPage);
             if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
                 log.info("停止指令已触发，结束查找聊天按钮 | 公司：{} | 岗位：{}", job.getCompanyName(), job.getJobName());
                 try { detailPage.close(); } catch (Exception ignore) {}
@@ -1041,14 +1100,24 @@ public class Boss {
             PlaywrightUtil.sleep(1);
         }
         if (!foundChatBtn) {
-            log.warn("未找到立即沟通按钮，跳过岗位: {}", job.getJobName());
-            // 关闭详情页
-            try {
-                detailPage.close();
-            } catch (Exception ignore) {
-            }
-            return;
+            throw stop("岗位详情解析异常：立即沟通按钮未出现");
         }
+        checkAccess(detailPage);
+        try {
+            // Revalidate expiry/revocation after navigation and immediately before claim.
+            approval = ReviewedApplication.verify(ReviewedApplication.APPROVAL,
+                    canonicalUrl, job.getCompanyName(), job.getJobName(), message);
+            approval.claim();
+        } catch (Exception e) {
+            throw stop("发送审核或尝试记录检查失败：停止且不自动重试");
+        }
+        // A pre-existing confirmation is not evidence of this attempt.
+        Locator automaticConfirmation = detailPage.getByText("已向BOSS发送消息",
+                new Page.GetByTextOptions().setExact(true));
+        boolean hadAutomaticConfirmation = automaticConfirmation.count() > 0
+                && automaticConfirmation.first().isVisible();
+        attempted = true;
+        checkAccess(detailPage);
         chatBtn.first().click();
         PlaywrightUtil.sleep(1);
 
@@ -1056,9 +1125,41 @@ public class Boss {
         Locator inputLocator = detailPage.locator("div#chat-input.chat-input[contenteditable='true'], textarea.input-area");
         boolean inputReady = false;
         for (int i = 0; i < 10; i++) {
+            checkAccess(detailPage);
             if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
                 log.info("停止指令已触发，结束等待聊天输入框 | 公司：{} | 岗位：{}", job.getCompanyName(), job.getJobName());
-                try { detailPage.close(); } catch (Exception ignore) {}
+                // An attempted contact remains open until its outcome is verified.
+                return;
+            }
+            // BOSS may send its configured greeting directly, without a chat editor.
+            // Confirm the exact platform receipt + identity, save evidence, then stop
+            // this single reviewed job without sending a second custom message.
+            if (!hadAutomaticConfirmation && automaticConfirmation.count() == 1
+                    && automaticConfirmation.first().isVisible()
+                    && canonicalUrl.equals(detailPage.url().split("\\?", 2)[0])
+                    && chatBtn.count() > 0
+                    && chatBtn.first().textContent().contains("继续沟通")) {
+                String visible = detailPage.locator("body").innerText();
+                if (!visible.contains(job.getCompanyName()) || !visible.contains(job.getJobName()))
+                    throw stop("平台确认身份不匹配：停止并保留尝试记录");
+                checkAccess(detailPage);
+                try {
+                    var evidenceDir = java.nio.file.Path.of("target", "boss-attempts");
+                    var evidenceId = extractEncryptId(canonicalUrl);
+                    java.nio.file.Files.createDirectories(evidenceDir);
+                    detailPage.screenshot(new Page.ScreenshotOptions()
+                            .setPath(evidenceDir.resolve(evidenceId + ".png")));
+                    java.nio.file.Files.writeString(evidenceDir.resolve(evidenceId + ".txt"),
+                            "Time: " + java.time.Instant.now() + "\nURL: " + canonicalUrl
+                                    + "\nCompany: " + job.getCompanyName() + "\nJob: " + job.getJobName()
+                                    + "\nType: platform_automatic_greeting\nVisible platform text:\n" + visible);
+                } catch (Exception e) {
+                    throw stop("平台确认留证失败：停止并保留尝试记录，不自动重试");
+                }
+                checkAccess(detailPage);
+                resultList.add(job);
+                confirmed = true;
+                log.info("平台已确认首次联系（自动招呼，无附件）：{} | {}", job.getCompanyName(), job.getJobName());
                 return;
             }
             if (inputLocator.count() > 0 && inputLocator.first().isVisible()) {
@@ -1067,29 +1168,16 @@ public class Boss {
             }
             PlaywrightUtil.sleep(1);
         }
-        if (!inputReady) {
-            log.warn("聊天输入框未出现，跳过: {}", job.getJobName());
-            // 关闭详情页
-            try {
-                detailPage.close();
-            } catch (Exception ignore) {
-            }
-            return;
-        }
+        if (!inputReady) throw stop("沟通结果未知：已保留尝试标记，停止且不自动重试");
 
-        // 5. AI智能生成打招呼语
-        String aiMessage = null;
-        if (config.getEnableAI()) {
-            String jd = job.getJobInfo();
-            if (jd != null && !jd.isEmpty()) {
-                aiMessage = generateAiMessage(keyword, job.getJobName(), jd);
-            }
-        }
-        String message = isValidString(aiMessage) ? aiMessage : config.getSayHi();
+        String sentReceipt = "已发送\n\n" + message;
+        boolean hadSentReceipt = detailPage.locator("body").innerText().contains(sentReceipt);
 
         // 6. 输入打招呼语
         Locator input = inputLocator.first();
+        checkAccess(detailPage);
         input.click();
+        checkAccess(detailPage);
         Object tagObj = input.evaluate("el => el.tagName.toLowerCase()");
         if (tagObj instanceof String && ((String) tagObj).equals("textarea")) {
             input.fill(message);
@@ -1100,67 +1188,60 @@ public class Boss {
 
         // 7. 点击发送按钮（div.send-message 或 button.btn-send）
         Locator sendText = detailPage.locator("div.send-message, button[type='send'].btn-send, button.btn-send");
-        boolean sendSuccess = false;
         if (sendText.count() > 0) {
+            checkAccess(detailPage);
             sendText.first().click();
+            checkAccess(detailPage);
             PlaywrightUtil.sleep(1);
-            sendSuccess = true;
+            // Preserve the visible platform outcome for independent verification.
+            // A click is only an attempt, never proof of delivery.
             try {
-                detailPage.locator("i.icon-close").first().click();
+                String visible = detailPage.locator("body").innerText();
+                // The platform may first render "发送中". Observe only; never resend.
+                for (int receiptPoll = 0; receiptPoll < 20
+                        && !hadSentReceipt && !visible.contains(sentReceipt); receiptPoll++) {
+                    checkAccess(detailPage);
+                    detailPage.waitForTimeout(500);
+                    checkAccess(detailPage);
+                    visible = detailPage.locator("body").innerText();
+                }
+                boolean freshSentReceipt = !hadSentReceipt && visible.contains(sentReceipt)
+                        && canonicalUrl.equals(detailPage.url().split("\\?", 2)[0])
+                        && visible.contains(job.getCompanyName()) && visible.contains(job.getJobName());
+                String evidenceId = extractEncryptId(detailUrl);
+                java.nio.file.Path evidenceDir = java.nio.file.Path.of("target", "boss-attempts");
+                java.nio.file.Files.createDirectories(evidenceDir);
+                detailPage.screenshot(new Page.ScreenshotOptions()
+                        .setPath(evidenceDir.resolve(evidenceId + ".png")));
+                java.nio.file.Files.writeString(evidenceDir.resolve(evidenceId + ".txt"),
+                        "Time: " + java.time.Instant.now() + "\nURL: " + canonicalUrl
+                                + "\nCompany: " + job.getCompanyName() + "\nJob: " + job.getJobName()
+                                + "\nVisible platform text:\n" + visible);
+                checkAccess(detailPage);
+                if (freshSentReceipt) {
+                    resultList.add(job);
+                    confirmed = true;
+                    log.info("平台已确认首次联系（审核正文，无附件）：{} | {}", job.getCompanyName(), job.getJobName());
+                    return;
+                }
             } catch (Exception e) {
-                log.error("发送文本小窗口关闭失败！");
+                log.warn("平台结果留证失败，发送结果仍待核验");
             }
         } else {
             log.warn("未找到发送按钮，自动跳过！岗位：{}", job.getJobName());
         }
 
-        // 8. 发送图片简历（可选）
-        boolean imgResume = false;
-        if (Boolean.TRUE.equals(config.getSendImgResume())) {
-            imgResume = sendImageResume(detailPage);
-        }
-
-        log.info("投递完成 | 公司：{} | 岗位：{} | 薪资：{} | 招呼语：{} | 图片简历：{}", job.getCompanyName(), job.getJobName(), job.getSalary(), message, imgResume ? "已发送" : "未发送");
-
-        // 9. 关闭新打开的详情页
-        try {
-            detailPage.close();
-        } catch (Exception ignore) {
-        }
-        PlaywrightUtil.sleep(1);
-
-        // 10. 更新数据库投递状态 & 成功投递加入结果
-        if (sendSuccess) {
-            // 从详情链接提取 encrypt_id，并映射到 encrypt_user_id
-            String encryptId = extractEncryptId(detailUrl);
-            String encryptUserId = encryptId != null ? encryptIdToUserId.get(encryptId) : null;
-            if (encryptId != null && encryptUserId != null) {
-                try {
-        bossService.updateDeliveryStatus(encryptId, encryptUserId, "已投递");
-                    log.info("投递成功 | 公司：{} | 岗位：{} | encryptId：{} | encryptUserId：{}", job.getCompanyName(), job.getJobName(), encryptId, encryptUserId);
-                } catch (Exception e) {
-                    log.warn("更新投递状态为已投递失败：{}", e.getMessage());
-                }
-            } else {
-                log.debug("未能找到 encryptId/encryptUserId 用于更新投递状态，detailUrl: {}", detailUrl);
-            }
-            resultList.add(job);
-        } else {
-            // 若发生发送失败，也进行状态更新
-            String encryptId = extractEncryptId(detailUrl);
-            String encryptUserId = encryptId != null ? encryptIdToUserId.get(encryptId) : null;
-            if (encryptId != null && encryptUserId != null) {
-                try {
-        bossService.updateDeliveryStatus(encryptId, encryptUserId, "投递失败");
-                    log.warn("投递失败 | 公司：{} | 岗位：{} | encryptId：{} | encryptUserId：{}", job.getCompanyName(), job.getJobName(), encryptId, encryptUserId);
-                } catch (Exception e) {
-                    log.warn("更新投递状态为投递失败异常：{}", e.getMessage());
-                }
+        // No authoritative platform receipt exists here. Never increment success or
+        // overwrite durable history with failure for an ambiguous attempt.
+        throw stop("发送结果待平台核验：已保留尝试标记，任务停止且不自动重试");
+        } finally {
+            // Close only this detail tab after durable platform proof; retain ambiguous attempts.
+            if (!attempted || confirmed) {
+                try { detailPage.close(); } catch (Exception ignored) { }
             }
         }
     }
 
-    
 
     /**
      * 注册页面响应监听：拦截 /wapi/zpgeek/job/detail.json 请求并解析写库
@@ -1469,13 +1550,14 @@ public class Boss {
 
         try {
             String result = aiService.sendRequest(requestMessage);
-            if (result == null) {
-                return config.getSayHi();
+            if (result == null || result.isBlank()
+                    || result.toLowerCase(Locale.ROOT).contains("false")) {
+                throw new IllegalStateException("AI未返回有效招呼语，已停止发送");
             }
-            return result.toLowerCase().contains("false") ? config.getSayHi() : result;
+            return result;
         } catch (Exception e) {
-            log.warn("AI请求失败，使用原有打招呼语: {}", e.getMessage());
-            return config.getSayHi();
+            log.warn("AI请求失败，已停止发送；未使用备用招呼语");
+            throw new IllegalStateException("AI请求失败，请检查认证、模型权限或额度；未发送", e);
         }
     }
 
@@ -1539,7 +1621,11 @@ public class Boss {
                     : ThreadLocalRandom.current().nextInt(min, waitTime + 1);
         }
         log.debug("岗位间停顿 {} 秒（wait_time={}，debugger={}）", seconds, waitTime, config.getDebugger());
-        PlaywrightUtil.sleep(seconds);
+        for (int i = 0; i < seconds; i++) {
+            checkAccess(page);
+            page.waitForTimeout(1000); // pump response events; do not hide restrictions during sleep
+        }
+        checkAccess(page);
     }
 
     /**
@@ -1557,54 +1643,6 @@ public class Boss {
                 || url.contains("/web/passport/zp/verify")
                 || url.contains("/web/passport/zp/security")
                 || url.contains("security-check");
-    }
-
-    private void waitForSliderVerify(Page page) {
-        // 最多等待5分钟（防呆，防止死循环）
-        long start = System.currentTimeMillis();
-        while (true) {
-            String url = page.url();
-            if (isSecurityVerifyUrl(url)) {
-                progressCallback.accept("请手动完成Boss直聘滑块验证，通过后在控制台回车继续...", 0, 0);
-                System.out.println("\n【滑块验证】请手动完成Boss直聘滑块验证，通过后在控制台回车继续…");
-                try {
-                    System.in.read();
-                } catch (Exception e) {
-                    log.error("等待滑块验证输入异常: {}", e.getMessage());
-                }
-                PlaywrightUtil.sleep(1);
-                // 验证通过后页面url会变，循环再检测一次
-                continue;
-            }
-            if ((System.currentTimeMillis() - start) > 5 * 60 * 1000) {
-                throw new RuntimeException("滑块验证超时！");
-            }
-            break;
-        }
-    }
-
-
-    private boolean isLoginRequired() {
-        try {
-            Locator buttonLocator = page.locator(LOGIN_BTNS);
-            if (buttonLocator.count() > 0 && buttonLocator.textContent().contains("登录")) {
-                return true;
-            }
-        } catch (Exception e) {
-            try {
-                page.locator(PAGE_HEADER).waitFor();
-                Locator errorLoginLocator = page.locator(ERROR_PAGE_LOGIN);
-                if (errorLoginLocator.count() > 0) {
-                    errorLoginLocator.click();
-                }
-                return true;
-            } catch (Exception ex) {
-                log.info("没有出现403访问异常");
-            }
-            log.info("cookie有效，已登录...");
-            return false;
-        }
-        return false;
     }
 
 }

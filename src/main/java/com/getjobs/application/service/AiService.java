@@ -36,6 +36,9 @@ public class AiService {
      * @return AI 回复文本
      */
     public String sendRequest(String content) {
+        if ("codex".equalsIgnoreCase(System.getenv("GET_JOBS_AI_PROVIDER"))) {
+            return CodexClient.generate(content);
+        }
         // 读取并校验配置
         var cfg = configService.getAiConfigs();
         String baseUrl = cfg.get("BASE_URL");

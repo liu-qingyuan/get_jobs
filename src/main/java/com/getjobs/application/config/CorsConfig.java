@@ -1,6 +1,8 @@
 package com.getjobs.application.config;
 
 import org.springframework.context.annotation.Bean;
+import org.springframework.beans.factory.annotation.Value;
+import com.getjobs.application.workbench.WorkbenchLocalOnlyFilter;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -13,11 +15,11 @@ import org.springframework.web.filter.CorsFilter;
 public class CorsConfig {
 
     @Bean
-    public CorsFilter corsFilter() {
+    public CorsFilter corsFilter(@Value("${server.port:9527}") int backendPort) {
         CorsConfiguration config = new CorsConfiguration();
 
-        // 允许所有域名跨域
-        config.addAllowedOriginPattern("*");
+        // Personal profiles are local-only, including the Next.js development UI.
+        config.setAllowedOrigins(WorkbenchLocalOnlyFilter.trustedOrigins(backendPort));
 
         // 允许所有请求头
         config.addAllowedHeader("*");
