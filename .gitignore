@@ -50,6 +50,12 @@ cookies/
 .env
 chromedriver
 *.jpg
+!docs/public/images/aliPay.jpg
+!docs/public/images/wechatpay.jpg
+# 运行时上传的个人图片简历，绝不能提交
+/data/boss/resume/
+# 兼容旧版手动放置的图片简历，防止误提交个人文件
+/src/main/resources/resume*
 
 # Database files
 db/
@@ -76,3 +82,8 @@ AGENTS.md
 # JobsDB Python bytecode
 scripts/jobsdb/__pycache__/
 scripts/workbench/__pycache__/
+
+# VitePress Documentation
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/

@@ -13,6 +13,11 @@ final class ReviewedApplication {
     private final Path claim;
     private ReviewedApplication(Path claim) { this.claim = claim; }
 
+    static void requireSupportedOptions(BossConfig config) {
+        if (Boolean.TRUE.equals(config.getSendImgResume()) || Boolean.TRUE.equals(config.getAllowRepeatChat()))
+            throw new IllegalStateException("单岗文本审核不授权图片附件或重复沟通；请先关闭这些选项");
+    }
+
     static ReviewedApplication verify(Path approval, String url, String company, String job, String message) throws Exception {
         if (!Files.isRegularFile(approval)) throw new IllegalStateException("没有已审核的单岗发送记录");
         JSONObject a = new JSONObject(Files.readString(approval));

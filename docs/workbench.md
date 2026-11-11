@@ -1,6 +1,6 @@
 # 统一求职工作台 V1
 
-入口：`http://127.0.0.1:9527/workbench`。统一版本在 `get_jobs_jobsdb/`；原 `get_jobs/` 不修改，私有账号、Cookie 和数据库不自动搬迁。
+入口：`http://127.0.0.1:9527/workbench`。主副本是 `get_jobs_jobsdb/`，上游同步的隔离工作树是 `get_jobs_upstream_sync/`（见 [同步记录](upstream-sync-36bf5f9.md)）。目录名不代表版本；运行前确认当前分支，隔离验证不切换主副本。原 `get_jobs/` 不修改，私有账号、Cookie 和数据库不自动搬迁。
 
 ## 启动
 
@@ -10,7 +10,8 @@
 2. 安装前端并启动：
 
 ```bash
-cd /Users/liuqingyuan/work/get_jobs_jobsdb
+# 先进入实际要运行的 checkout 根目录；隔离分支用 get_jobs_upstream_sync，不复用原账号数据。
+cd /Users/liuqingyuan/work/get_jobs_upstream_sync
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 cd front
 npx --yes pnpm@10.17.1 install --frozen-lockfile --ignore-scripts

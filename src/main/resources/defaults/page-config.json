@@ -1,0 +1,54 @@
+{
+  "boss_config": [
+    {
+      "debugger": 1,
+      "wait_time": 10,
+      "keywords": "[\"大模型\",\"机器学习\",\"具身智能\"]",
+      "city_code": "0",
+      "industry": "[]",
+      "job_type": "不限",
+      "experience": "[]",
+      "degree": "[]",
+      "salary": "[]",
+      "scale": "[]",
+      "stage": "[]",
+      "say_hi": "",
+      "expected_salary_min": null,
+      "expected_salary_max": null,
+      "enable_ai": 0,
+      "send_img_resume": 0,
+      "filter_dead_hr": 0,
+      "dead_status": "[]",
+      "allow_repeat_chat": 0,
+      "repeat_chat_messages": null
+    }
+  ],
+  "liepin_config": [
+    {
+      "keywords": "大模型,机器学习,具身智能",
+      "city": "",
+      "salary_code": ""
+    }
+  ],
+  "job51_config": [
+    {
+      "keywords": "[\"大模型\",\"机器学习\",\"具身智能\"]",
+      "job_area": "[]",
+      "salary": "[]"
+    }
+  ],
+  "zhilian_config": [
+    {
+      "keywords": "[\"大模型\",\"机器学习\",\"具身智能\"]",
+      "city_code": "0",
+      "salary": "0"
+    }
+  ],
+  "ai": [
+    {
+      "introduce": "",
+      "prompt": "已确认资料：%s；求职方向：%s；岗位：%s；要求：%s；原招呼语：%s。只用已确认事实写简短单岗招呼语，不虚构经验、技能、城市、薪资；明显不符只返回false。只输出正文。"
+    }
+  ],
+  "boss_blacklist": []
+}

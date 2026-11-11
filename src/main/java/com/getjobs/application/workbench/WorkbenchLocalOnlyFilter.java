@@ -21,7 +21,8 @@ public class WorkbenchLocalOnlyFilter extends OncePerRequestFilter {
         return List.of("http://localhost:" + backendPort, "http://127.0.0.1:" + backendPort,
                 "http://localhost:6866", "http://127.0.0.1:6866");
     }
-    @Override protected boolean shouldNotFilter(HttpServletRequest request) { return !request.getRequestURI().startsWith("/api/workbench"); }
+    // Guard every local-app entry, including encoded paths and future private endpoints.
+    // Matching raw URI prefixes would let the servlet's later decoding bypass the guard.
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
         boolean allowed = ADDRESSES.contains(request.getRemoteAddr()) && HOSTS.contains(request.getServerName());
         String origin = request.getHeader("Origin");
