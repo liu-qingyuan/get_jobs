@@ -10,7 +10,7 @@
 
 ## 获取本分支
 
-本轮当前在本机隔离工作树 `get_jobs_upstream_sync/`，未切换原运行目录，推送目标仍须用户确认。以下新安装示例**仅在该分支获准发布后**可用；发布前使用现有工作树，不假定远程分支存在。中性目录名不要求重命名旧目录：
+本轮使用隔离工作树 `get_jobs_upstream_sync/`，不切换原运行目录。用户已授权文档复审通过后发布到 `origin/integrate/upstream-36bf5f9`。以下新安装命令须等远程分支可用后执行，并核对交付 commit；中性目录名不要求重命名旧目录：
 
 ```bash
 git clone --branch integrate/upstream-36bf5f9 https://github.com/liu-qingyuan/get_jobs.git get_jobs_unified

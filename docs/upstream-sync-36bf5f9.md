@@ -144,7 +144,7 @@ classDiagram
 - [x] 上游测试和工作台/JobsDB 测试通过；新增针对 AI 拒绝、模型失败、未授权附件/重复发送的必要回归。
 - [x] 前端类型检查、构建和本机假资料 smoke 通过。
 - [x] 界面/文档区分“源码已同步”“fixture 通过”“真实平台待验收”，不误报线上兼容。
-- [ ] 相关固定范围双轴 review 完成，原工作树/私有资料保持不变；整合/切换另按用户授权执行。
+- [x] 相关固定范围双轴 review 完成，原工作树/私有资料保持不变；整合/切换另按用户授权执行。
 
 ## 兼容取舍与验证边界
 
@@ -166,12 +166,15 @@ classDiagram
 - 实际 localhost 请求验证原始/编码路径和首页的恶意 Host/Origin 均被拒绝；正常本机页面及保存继续可用。
 - 主副本的用户未提交 patch 与初始快照逐字节一致；原国内 Java 修改亦一致，两个 HEAD 分别仍为 `58e060b`、`5edc0e6`。
 - Broad Standards/Spec 均接受实施方向；文档中残留的宽松发送操作说明已纠正，固定 76 文件范围完成一次清理，保留 Markdown 换行语义，未新增依赖或功能。
-- Focused Closure 未完成：尝试恢复原 Standards（`26b74bfb-b1fc-4f6`）与 Spec（`2e3236b8-f526-496`）审查时，工具均返回 Agent not found。按总调用预算（失败也计入）停止，不启动替代 reviewer，不把文档构建通过当成独立审查关闭。剩余为文档修复/清理的双轴 closure，以及用户确认后的发布；当前不能标记完整交付门禁通过。
+- 上轮 Focused Closure 尝试恢复原 Standards（`26b74bfb-b1fc-4f6`）与 Spec（`2e3236b8-f526-496`）时均返回 Agent not found，已按当轮预算停止，没有启动替代 reviewer。用户随后明确授权单独重开仅文档复审，通过后发布隔离分支；本轮不重新审查或修改生产代码，不做真实登录或投递。
+- 本轮仅文档 Standards（`193f7b87-b58e-448`）与 Spec（`b32ae1f2-4951-46d`）均接受方向，Focused Closure 均无 Critical/High 阻塞：原图片/重复发送说明冲突已关闭，新指出的通知与猎聘限额保证亦已修正关闭；README 启动步骤统一为显式禁用自动浏览器的 `workbench` 入口。本轮四次审查调用结束，不追加第三轮。
+- 文档修复后的 VitePress 构建、定向合同断言、`git diff --check` 通过；生产代码与先前通过 93 项回归的版本一致，原主副本 patch 与原国内 Java patch 再次逐字节核对一致。
 
 ## Git
 
-- 本地合并提交：`c4f28936f05345dcfe211e8c92be2f4946f9737b`，父提交分别为 V1 `58e060b` 和官方 `36bf5f9`。已验证官方 ancestry、missing commits = 0，以及纳入 35 个官方提交；再次查询官方 main 仍为该目标 SHA。
-- 本轮只完成隔离分支的本地集成。无远程 upstream 时不自行建远程分支；推送目标需用户确认，原运行目录未切换，issue 在发布确认前保持 open。
+- 合并提交：`65eaf6dc700123e20eca633003e94ba2888552e3`，父提交分别为 V1 `58e060b` 和官方 `36bf5f9`。已验证官方 ancestry、missing commits = 0，以及纳入 35 个官方提交；再次查询官方 main 仍为该目标 SHA。
+- 发布前仅将两条未发布集成提交的自动本机身份更正为 V1 已公开的 Git 身份，源码树、原 V1 分支和官方历史均未改变，未修改全局 Git 配置。
+- 用户已确认文档复审通过后发布到 `origin/integrate/upstream-36bf5f9`；不推送原统一分支，不切换原运行目录。复审与远程 SHA 验证完成后才关闭 issue。
 - Branch: `integrate/upstream-36bf5f9`
 - Base branch: `codex/jobsdb`
 - Base commit: `58e060b1e967227948990da6e6c2c11680950c00`

@@ -85,7 +85,7 @@
 
 ### 1️⃣ 使用git拉取代码
 
-本轮当前在本机隔离工作树 `get_jobs_upstream_sync/`，未切换原运行目录，推送目标仍须用户确认。下列新安装命令**仅在该分支获准发布后**可用；发布前核对现有工作树，不假定远程分支存在。
+本轮在隔离工作树 `get_jobs_upstream_sync/`，不切换原运行目录。用户已授权文档复审通过后发布到 `origin/integrate/upstream-36bf5f9`；下列新安装命令须等远程分支可用后执行，并核对分支与 commit，不按目录名称判断版本。
 
 ```bash
 git clone --branch integrate/upstream-36bf5f9 https://github.com/liu-qingyuan/get_jobs.git get_jobs_unified
@@ -151,11 +151,10 @@ release 页面下载空数据库：
   > 可在 Boss 页上传 PNG/JPEG/GIF 供本地存储和预览，文件位于运行时 `data/boss/resume/`。不要把个人简历放进 `src/main/resources/`；旧资源简历已从打包中排除。
   > 本版 `sendImgResume=true` 会被发送门禁拒绝，不是开启功能的办法；上传图片也不等于已审核附件。
 
-- 猎聘 ([Liepin.java](src/main/java/liepin/Liepin.java))【默认打招呼无上限，主动发消息有上限，成功率不高，好在量大，较为推荐】
+- 猎聘 ([Liepin.java](src/main/java/com/getjobs/worker/liepin/Liepin.java))【改版源码已同步，真实平台待授权验收】
 
-  > 注意：需要在猎聘App最新版设置打招呼语 (默或者自定义皆可)，即可自动发送消息，不会被限制
-  > 只可微信扫码，请绑定微信账号
-  > 需要使用最新版猎聘手机app设置打招呼文本，只要不主动发消息，可以无限制对猎头打招呼，程序默认为该配置。
+  > 登录方式、招呼语设置与频控以当前平台和账号提示为准，由用户手动完成所需登录步骤。
+  > 不保证次数、可用性或送达；不能按历史“无限制”描述自动联系。设置招呼语、登录成功或编译通过都不构成申请授权或发送证明。
 
 - 51job ([Job.java](src/main/java/job51/Job51.java))【投递有上限，且限制搜索到的岗位数量，没什么活人】
 
@@ -172,7 +171,13 @@ release 页面下载空数据库：
 
 ### 5️⃣ 运行代码
 
-- 🏃🏻‍♂️‍➡️ 运行启动类即可[GetJobsApplication.java](src/main/java/com/getjobs/GetJobsApplication.java)
+- 先按 [本版快速开始](docs/guide/quick-start.md) 准备 Java 21、前端依赖和当前 checkout 的数据库，再使用管理入口：
+
+  ```bash
+  bash gradlew --no-daemon workbench --console=plain
+  ```
+
+  此任务显式设置 `browser.auto-start=false`，访问 `http://127.0.0.1:9527/workbench`。直接运行主类或普通 `bootRun` 不等于此维护入口，不能假定它们禁用了自动浏览器；不要用它们替代本指南。
 
 ---
 
