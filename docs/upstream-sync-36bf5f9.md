@@ -139,7 +139,7 @@ classDiagram
 
 ## 验收
 
-- [ ] 官方目标 SHA 是最终集成分支的 ancestor，官方目标相对该分支 missing commits 为 0。
+- [x] 官方目标 SHA 是最终集成分支的 ancestor，官方目标相对该分支 missing commits 为 0。
 - [x] 明确记录冲突文件与取舍；所有本地审核、回执、防重、工作台接口保留。
 - [x] 上游测试和工作台/JobsDB 测试通过；新增针对 AI 拒绝、模型失败、未授权附件/重复发送的必要回归。
 - [x] 前端类型检查、构建和本机假资料 smoke 通过。
@@ -166,9 +166,11 @@ classDiagram
 - 实际 localhost 请求验证原始/编码路径和首页的恶意 Host/Origin 均被拒绝；正常本机页面及保存继续可用。
 - 主副本的用户未提交 patch 与初始快照逐字节一致；原国内 Java 修改亦一致，两个 HEAD 分别仍为 `58e060b`、`5edc0e6`。
 - Broad Standards/Spec 均接受实施方向；文档中残留的宽松发送操作说明已纠正，固定 76 文件范围完成一次清理，保留 Markdown 换行语义，未新增依赖或功能。
+- Focused Closure 未完成：尝试恢复原 Standards（`26b74bfb-b1fc-4f6`）与 Spec（`2e3236b8-f526-496`）审查时，工具均返回 Agent not found。按总调用预算（失败也计入）停止，不启动替代 reviewer，不把文档构建通过当成独立审查关闭。剩余为文档修复/清理的双轴 closure，以及用户确认后的发布；当前不能标记完整交付门禁通过。
 
 ## Git
 
+- 本地合并提交：`c4f28936f05345dcfe211e8c92be2f4946f9737b`，父提交分别为 V1 `58e060b` 和官方 `36bf5f9`。已验证官方 ancestry、missing commits = 0，以及纳入 35 个官方提交；再次查询官方 main 仍为该目标 SHA。
 - 本轮只完成隔离分支的本地集成。无远程 upstream 时不自行建远程分支；推送目标需用户确认，原运行目录未切换，issue 在发布确认前保持 open。
 - Branch: `integrate/upstream-36bf5f9`
 - Base branch: `codex/jobsdb`
