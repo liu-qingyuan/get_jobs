@@ -3,10 +3,10 @@ import { apiUrl } from '@/lib/api'
 export type Region = 'HK' | 'MAINLAND'
 export type Language = 'zh' | 'en'
 export type TaskKind = 'APPLICATION' | 'RESUME' | 'GAP' | 'CHECK'
-export type Channel = 'OFFICIAL' | 'JOBSDB' | 'BOSS'
+export type Channel = 'OFFICIAL' | 'JOBSDB' | 'BOSS' | 'OFFERTODAY'
 export type Direction = 'AI_APPLICATION' | 'ML' | 'EMBODIED'
 export type TaskState = 'PENDING' | 'APPROVED' | 'RUNNING' | 'NEEDS_INPUT' | 'FAILED' | 'UNKNOWN' | 'SUBMITTED' | 'COMPLETED'
-export type EventType = 'PROGRESS' | 'NEEDS_INPUT' | 'FAILED' | 'SUBMITTING' | 'SUBMITTED' | 'EMPLOYER_STATUS'
+export type EventType = 'PROGRESS' | 'NEEDS_INPUT' | 'FAILED' | 'SUBMITTING' | 'SUBMITTED' | 'EMPLOYER_STATUS' | 'CONTACTED' | 'CV_DELIVERED'
 
 export interface Fact {
   id: string
@@ -54,6 +54,19 @@ export interface Task {
   url: string
   description: string
   resumeId?: string
+  initialMessage?: string
+  contactVerified?: boolean
+  platformJobId?: string
+  attemptId?: string
+  snapshot?: {
+    resume: Resume
+    initialMessage: string
+    initialMessageSha256: string
+    contactVerified: boolean
+    facts: Fact[]
+  }
+  contactReceipt?: Record<string, unknown>
+  cvReceipt?: Record<string, unknown>
   note: string
   projectPath?: string
   projectPlan?: string
@@ -69,9 +82,10 @@ export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
   tasks: Task[]
-  runtime: { agentConfigured: boolean; busy: boolean }
+  runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean }
   platforms: {
     bossUrl: string
+    offerTodayUrl: string
     jobsdbHistory: Array<{ id: string; status: string; updated_at: string }>
     jobsdbAvailable: boolean
     jobsdbError?: string
@@ -80,7 +94,13 @@ export interface WorkbenchState {
 
 export type FactInput = Pick<Fact, 'key' | 'label' | 'value' | 'scope' | 'confirmed' | 'source'> & { id?: string }
 export type TaskInput = Pick<Task, 'kind' | 'channel' | 'region' | 'language' | 'direction' | 'company' | 'title' | 'url' | 'description' | 'note'> &
-  Partial<Pick<Task, 'resumeId' | 'projectPath' | 'projectPlan'>>
+  Partial<Pick<Task, 'resumeId' | 'projectPath' | 'projectPlan' | 'initialMessage' | 'contactVerified'>>
+
+export interface OfferTodayDiscovery {
+  jobs: Array<{ url: string; title: string; company?: string; description?: string }>
+  note?: string
+  connected?: boolean
+}
 
 const root = '/api/workbench'
 

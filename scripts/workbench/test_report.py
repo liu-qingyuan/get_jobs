@@ -5,7 +5,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError
-from report import report
+from report import main, report
 
 
 class ReporterTest(unittest.TestCase):
@@ -26,6 +26,26 @@ class ReporterTest(unittest.TestCase):
                 self.assertEqual({'taskId': 'fixture-task', 'state': 'UNKNOWN'}, report(bundle, 'SUBMITTING', 'fixture claim'))
                 self.assertEqual('Bearer fixture-only', observed[0][0])
                 self.assertEqual('SUBMITTING', observed[0][1]['type'])
+            finally:
+                server.shutdown(); thread.join()
+
+    def test_offertoday_receipt_events_are_accepted_by_reporter_cli(self):
+        observed = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                observed.append(json.loads(self.rfile.read(int(self.headers['Content-Length'])))['type'])
+                data = json.dumps({'id': 'fixture-task', 'state': 'UNKNOWN'}).encode()
+                self.send_response(200); self.end_headers(); self.wfile.write(data)
+            def log_message(self, *args):
+                pass
+        with HTTPServer(('127.0.0.1', 0), Handler) as server, tempfile.TemporaryDirectory() as directory:
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            bundle = Path(directory) / 'task.json'
+            bundle.write_text(json.dumps({'callbackUrl': f'http://127.0.0.1:{server.server_port}/task', 'token': 'fixture-only'}))
+            try:
+                for event in ('CONTACTED', 'CV_DELIVERED'):
+                    self.assertEqual(0, main([str(bundle), event, 'fixture', '--evidence', '{}']))
+                self.assertEqual(['CONTACTED', 'CV_DELIVERED'], observed)
             finally:
                 server.shutdown(); thread.join()
 

@@ -34,7 +34,7 @@ def report(bundle_path, event, message, evidence="", content=""):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle")
-    parser.add_argument("event", choices=["PROGRESS", "NEEDS_INPUT", "FAILED", "SUBMITTING", "SUBMITTED", "EMPLOYER_STATUS", "DRAFT"])
+    parser.add_argument("event", choices=["PROGRESS", "NEEDS_INPUT", "FAILED", "SUBMITTING", "CONTACTED", "CV_DELIVERED", "SUBMITTED", "EMPLOYER_STATUS", "DRAFT"])
     parser.add_argument("message")
     parser.add_argument("--evidence", default="")
     parser.add_argument("--content-file", type=Path)

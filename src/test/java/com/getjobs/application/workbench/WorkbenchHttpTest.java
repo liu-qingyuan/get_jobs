@@ -35,6 +35,28 @@ class WorkbenchHttpTest {
         }
     }
 
+    @Test void offerTodayDiscoveryUsesOnlyItsScriptAndNeverCreatesOrApprovesAnApplication() throws Exception {
+        var mapper = new ObjectMapper();
+        var service = new WorkbenchService(root, root.resolve("legacy"), mapper);
+        String script = "import json,sys;assert sys.argv[1]=='discover';print(json.dumps({'jobs':["
+                + "{'url':'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv==?ref=one','title':'Fixture role','company':'Fixture'},"
+                + "{'url':'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv==?positionId=two','title':'Fixture duplicate'}],"
+                + "'private_debug_value':'never-export'}))";
+        try (var runner = new WorkbenchRunner(service, List.of(), List.of("python3", "-c", script), "http://127.0.0.1:9527/api/workbench", 15)) {
+            var http = MockMvcBuilders.standaloneSetup(new WorkbenchController(service, runner)).addFilters(new WorkbenchLocalOnlyFilter()).build();
+            http.perform(post("/api/workbench/offertoday/discover").header("Origin", "https://evil.example")).andExpect(status().isForbidden());
+            http.perform(post("/api/workbench/offertoday/discover")).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.jobs.length()").value(1))
+                    .andExpect(jsonPath("$.jobs[0].url").value("https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv=="))
+                    .andExpect(jsonPath("$.private_debug_value").doesNotExist());
+            http.perform(get("/api/workbench/state")).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.tasks.length()").value(0))
+                    .andExpect(jsonPath("$.runtime.offerTodayConfigured").value(true))
+                    .andExpect(jsonPath("$.runtime.agentConfigured").value(false))
+                    .andExpect(jsonPath("$.platforms.offerTodayUrl").value("https://www.offertoday.com/hk/recommend"));
+        }
+    }
+
     @org.springframework.web.bind.annotation.RestController
     static class ImageFixture {
         @org.springframework.web.bind.annotation.GetMapping({"/api/boss/config/resume-image", "/api/boss/config/resume-image/content"})
