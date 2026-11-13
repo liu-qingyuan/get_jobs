@@ -277,11 +277,29 @@ class InterceptedBrowserFixture(unittest.TestCase):
                                 preflight=p, contactMessageId=contact['messageId'], resumePath='/never-upload.pdf',
                                 resumeFilename='approved.pdf', resumeSha256=SHA, resumeSize=len(DATA))
 
+    def test_numeric_string_timestamp_cannot_make_old_resume_look_new(self):
+        p = self.existing()
+        self.state('''const S=window.__fixture;S.cvPersist=false;
+          const prepend=S.history.unshift.bind(S.history);
+          S.history.unshift=record=>{record.addTime=String(record.addTime);return prepend(record)};
+          function prior(e){if(e.key!=='Enter')return;document.removeEventListener('keydown',prior,true);
+            S.history.unshift({messageId:99,addTime:99,seq:100,fromSn:S.owner,toSn:S.peer,
+              mediaType:6,type:6,status:0,body:{compressiveCard:{type:10,
+                content:JSON.stringify({resumeId:'approved-id'})}}});}
+          document.addEventListener('keydown',prior,true);return true;''')
+        contact = self.send_text(p)['contact']
+        self.assertEqual('99', self.state('return window.__fixture.history.find(r=>r.messageId===99).addTime'))
+        self.assertEqual('101', self.state('return window.__fixture.history.find(r=>r.messageId===101).addTime'))
+        with self.assertRaises(BrowserBlocked):
+            self.browser.action('send_resume', jobId=JOB, title='Fixture engineer', company='Fixture co',
+                                preflight=p, contactMessageId=contact['messageId'], resumePath='/never-upload.pdf',
+                                resumeFilename='approved.pdf', resumeSha256=SHA, resumeSize=len(DATA))
+
     def test_later_resume_sequence_with_equal_contact_timestamp_is_valid(self):
         p = self.existing()
         contact = self.send_text(p)['contact']
         self.state('''const button=document.querySelector('#send-cv'),send=button.onclick;
-          button.onclick=()=>{send();window.__fixture.history.find(r=>r.messageId===102).addTime=101};return true;''')
+          button.onclick=()=>{send();window.__fixture.history.find(r=>r.messageId===102).addTime='101'};return true;''')
         result = self.browser.action('send_resume', jobId=JOB, title='Fixture engineer', company='Fixture co',
                                      preflight=p, contactMessageId=contact['messageId'], resumePath='/never-upload.pdf',
                                      resumeFilename='approved.pdf', resumeSha256=SHA, resumeSize=len(DATA))

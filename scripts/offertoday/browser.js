@@ -161,8 +161,9 @@ async page => {
           id(r.messageId) !== extra.contactMessageId && time(r.addTime) >= p.baselineTime &&
           r.fromSn === owner && r.toSn === peer && [0, 1, 2].includes(r.status));
         // Server sequence disambiguates equal timestamps; an unknown tie is not proof of a later send.
-        const afterContact = r => contact && (r.addTime > contact.addTime ||
-          (r.addTime === contact.addTime && Number.isSafeInteger(r.seq) &&
+        const contactTime = time(contact?.addTime);
+        const afterContact = r => contactTime !== null && (time(r.addTime) > contactTime ||
+          (time(r.addTime) === contactTime && Number.isSafeInteger(r.seq) &&
             Number.isSafeInteger(contact.seq) && contact.seq >= 0 && r.seq > contact.seq));
         const matches = fresh.filter(r => extra.kind === 'text' ?
           (r.mediaType === 1 && r.body?.text?.content === extra.message) :

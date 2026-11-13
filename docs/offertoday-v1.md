@@ -217,7 +217,7 @@ classDiagram
 
 ### 本轮验证记录
 
-本轮 67 项 Java（含 12 项全拦截 Boss DOM fixture）、39 项 OfferToday Python（19 项合同/工作流单元 + 20 项全路由拦截原生客户端/DOM fixture）、4 项 reporter、38 项 JobsDB，共 **148 项通过**；Java 0 failure/error/skip。TypeScript、作用域 ESLint、Next 生产构建与 bootJar 通过。真实只读 `discover` 通过原私有连接读取 10 个已加载岗位；只读详情确认 jobId、标题及公司/品牌与新读取结果一致，不翻页、不创建任务、未联系或上传。
+本轮 67 项 Java（含 12 项全拦截 Boss DOM fixture）、40 项 OfferToday Python（19 项合同/工作流单元 + 21 项全路由拦截原生客户端/DOM fixture）、4 项 reporter、38 项 JobsDB，共 **149 项通过**；Java 0 failure/error/skip。TypeScript、作用域 ESLint、Next 生产构建与 bootJar 通过。真实只读 `discover` 通过原私有连接读取 10 个已加载岗位；只读详情确认 jobId、标题及公司/品牌与新读取结果一致，不翻页、不创建任务、未联系或上传。
 
 临时 SQLite + 打包应用 + fake 执行器的 UI smoke 验证 HK 英文 PDF 审核、只读预填不自动建任务、单岗批准/启动、分开的新消息回执、CV 成功数 1 而非联系数 2、UNKNOWN 禁止重跑、无官网 AI 也能执行，重载后状态保留。独立浏览器的最终 console 为 0 error；测试专用代理仅把既有硬编码健康检查端口转发到自有临时服务，未访问原运行副本。
 
