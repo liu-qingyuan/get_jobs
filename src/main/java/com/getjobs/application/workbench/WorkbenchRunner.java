@@ -145,6 +145,40 @@ public final class WorkbenchRunner implements AutoCloseable {
         }
     }
 
+    /** Bounded, read-only material analysis. Shares the application slot but has no event token or browser authority. */
+    public synchronized ObjectNode reviewMaterials(ObjectNode input) {
+        if (closed || busy.get()) throw new WorkbenchException(409, "已有执行任务运行中或执行器已关闭");
+        var review = service.materials.prepare(input);
+        if (review.has("candidates")) return review;
+        if (command.isEmpty()) throw new WorkbenchException(409, "尚未配置 AI 执行器，不能整理材料；未确认任何事实");
+        busy.set(true);
+        Process child = null;
+        try {
+            Path directory = service.store.root.resolve("runs").resolve("material-" + UUID.randomUUID());
+            Files.createDirectories(directory);
+            Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
+            var bundle = service.materials.bundle(review).put("resultPath", result.toString());
+            Files.writeString(file, service.json.writeValueAsString(bundle));
+            try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
+            catch (UnsupportedOperationException ignored) { }
+            var arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
+            child = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("analysis.log").toFile()).start();
+            process = child; child.getOutputStream().close();
+            if (!child.waitFor(Math.min(timeoutSeconds, 120), TimeUnit.SECONDS)) {
+                terminate(child); throw new WorkbenchException(409, "材料分析超时；未确认任何事实");
+            }
+            if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 1024 * 1024)
+                throw new WorkbenchException(409, "材料分析未返回有效结果；未确认任何事实");
+            return service.materials.finish(review, service.json.readTree(Files.readString(result)));
+        } catch (WorkbenchException e) { throw e; }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new WorkbenchException(409, "材料分析中断；未确认任何事实"); }
+        catch (Exception e) { throw new WorkbenchException(409, "材料分析失败，请检查已配置的本机命令；未确认任何事实"); }
+        finally {
+            if (child != null && child.isAlive()) terminate(child);
+            process = null; busy.set(false);
+        }
+    }
+
     public synchronized ObjectNode checkStatus(String applicationId) {
         if (closed || command.isEmpty()) throw new WorkbenchException(409, "请先配置并启动官网 AI 执行器");
         if (busy.get()) throw new WorkbenchException(409, "已有 AI 任务执行中");

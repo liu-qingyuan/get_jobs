@@ -20,7 +20,12 @@ public class WorkbenchController {
     @GetMapping("/state") public ObjectNode state() {
         var state = service.state(); state.set("runtime", runner.runtime()); return state;
     }
+    @PostMapping("/baseline/review") public ObjectNode reviewMaterials(@RequestBody ObjectNode input) { return runner.reviewMaterials(input); }
+    @PostMapping("/baseline/reviews/{id}/confirm") public ObjectNode confirmBaseline(@PathVariable String id, @RequestBody ObjectNode input) { return service.materials.confirm(id, input); }
+    @GetMapping("/baseline") public ObjectNode baseline(@RequestParam String region, @RequestParam String language,
+            @RequestParam(defaultValue="") String site) { return service.materials.baseline(region, language, site); }
     @PostMapping("/facts") public ObjectNode fact(@RequestBody ObjectNode input) { return service.saveFact(input); }
+    @GetMapping("/facts/{id}/history") public ObjectNode factHistory(@PathVariable String id) { return service.factHistory(id); }
     @DeleteMapping("/facts/{id}") public Map<String, Boolean> delete(@PathVariable String id) { service.deleteFact(id); return Map.of("deleted", true); }
     @PostMapping("/import/preview") public ObjectNode preview() { return service.importPreview(); }
     @PostMapping("/offertoday/discover") public ObjectNode discoverOfferToday() { return runner.discoverOfferToday(); }
@@ -51,7 +56,8 @@ public class WorkbenchController {
     @ExceptionHandler(WorkbenchException.class) public ResponseEntity<Map<String,String>> known(WorkbenchException e) {
         return ResponseEntity.status(e.status).body(Map.of("error", e.getMessage()));
     }
-    @ExceptionHandler({HttpMessageNotReadableException.class, IllegalArgumentException.class, MaxUploadSizeExceededException.class})
+    @ExceptionHandler({HttpMessageNotReadableException.class, IllegalArgumentException.class, MaxUploadSizeExceededException.class,
+            org.springframework.web.bind.MissingServletRequestParameterException.class})
     public ResponseEntity<Map<String,String>> invalid(Exception e) { return ResponseEntity.badRequest().body(Map.of("error", "请求格式或附件大小无效")); }
     @ExceptionHandler(Exception.class) public ResponseEntity<Map<String,String>> unavailable(Exception e) {
         return ResponseEntity.status(503).body(Map.of("error", "工作台暂不可用，请检查本机存储或执行器；未确认的结果不会记为成功"));

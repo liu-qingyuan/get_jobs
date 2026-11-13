@@ -20,12 +20,14 @@ public final class WorkbenchService {
     final ObjectMapper json;
     final Path jobsdb;
     private final WorkbenchLegacy legacy;
+    final WorkbenchMaterials materials;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this.store = new WorkbenchStore(root, json);
         this.json = json;
         this.jobsdb = jobsdb.toAbsolutePath().normalize();
         this.legacy = new WorkbenchLegacy(this.jobsdb, json);
+        this.materials = new WorkbenchMaterials(this);
     }
 
     public ObjectNode state() {
@@ -33,6 +35,7 @@ public final class WorkbenchService {
             var result = json.createObjectNode();
             result.set("facts", store.list(c, "fact"));
             result.set("resumes", store.list(c, "resume"));
+            result.set("materials", materials.workspace(c));
             var tasks = store.list(c, "task");
             tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
             result.set("tasks", tasks);
@@ -44,6 +47,13 @@ public final class WorkbenchService {
     }
 
     public ObjectNode saveFact(ObjectNode input) {
+        var manual = input.deepCopy();
+        manual.remove(java.util.List.of("sourceId", "sourceName", "sourceSha256", "quote", "reviewId"));
+        manual.put("needsReview", false);
+        return store.write(c -> saveFact(c, manual));
+    }
+
+    ObjectNode saveFact(Connection c, ObjectNode input) throws Exception {
         String scope = text(input, "scope", 300, true);
         if (!Set.of("COMMON", "HK", "MAINLAND").contains(scope) && !scope.matches("SITE:[a-zA-Z0-9.-]+"))
             throw new WorkbenchException(400, "个人资料作用域无效");
@@ -51,16 +61,47 @@ public final class WorkbenchService {
                 .put("label", text(input, "label", 200, true)).put("value", text(input, "value", 20000, true))
                 .put("scope", scope).put("confirmed", input.path("confirmed").asBoolean(false))
                 .put("source", text(input, "source", 1000, false)).put("updatedAt", now());
+        String id = text(input, "id", 60, false);
+        var previous = id.isEmpty() ? null : store.get(c, "fact", id);
+        fact.put("id", id.isEmpty() ? id() : id);
+        boolean unchangedValue = previous != null && previous.path("key").equals(fact.path("key"))
+                && previous.path("scope").equals(fact.path("scope")) && previous.path("value").equals(fact.path("value"));
+        for (String field : java.util.List.of("sourceId", "sourceName", "sourceSha256", "quote", "reviewId", "needsReview")) {
+            if (input.has(field)) fact.set(field, input.get(field).deepCopy());
+            else if (unchangedValue && previous.has(field)) fact.set(field, previous.get(field).deepCopy());
+        }
+        if (previous != null) {
+            var oldContent = previous.deepCopy(); oldContent.remove(java.util.List.of("updatedAt", "version"));
+            var newContent = fact.deepCopy(); newContent.remove("updatedAt");
+            if (oldContent.equals(newContent)) return previous;
+            if (!previous.has("version")) saveFactVersion(c, previous.deepCopy().put("version", 1));
+        }
+        fact.put("version", previous == null ? 1 : previous.path("version").asInt(1) + 1);
+        store.save(c, "fact", fact); saveFactVersion(c, fact);
+        return fact;
+    }
+
+    private void saveFactVersion(Connection c, ObjectNode fact) throws Exception {
+        var version = fact.deepCopy().put("factId", fact.path("id").asText());
+        version.put("id", fact.path("id").asText() + ":" + fact.path("version").asInt(1));
+        store.save(c, "fact_version", version);
+    }
+
+    public ObjectNode factHistory(String id) {
         return store.write(c -> {
-            String id = text(input, "id", 60, false);
-            if (!id.isEmpty()) store.get(c, "fact", id);
-            fact.put("id", id.isEmpty() ? id() : id);
-            store.save(c, "fact", fact);
-            return fact;
+            var versions = json.createArrayNode();
+            for (var version : store.list(c, "fact_version")) if (version.path("factId").asText().equals(id)) versions.add(version);
+            if (versions.isEmpty()) versions.add(store.get(c, "fact", id));
+            var result = json.createObjectNode(); result.set("versions", versions); return result;
         });
     }
 
-    public void deleteFact(String id) { store.write(c -> { store.delete(c, "fact", id); return null; }); }
+    public void deleteFact(String id) { store.write(c -> {
+        var fact = store.get(c, "fact", id);
+        if (!fact.has("version")) saveFactVersion(c, fact.deepCopy().put("version", 1));
+        saveFactVersion(c, fact.deepCopy().put("version", fact.path("version").asInt(1) + 1).put("deleted", true).put("updatedAt", now()));
+        store.delete(c, "fact", id); return null;
+    }); }
     public ObjectNode importPreview() { return legacy.preview(); }
 
     public ObjectNode saveResume(ObjectNode input, byte[] bytes, String filename) {
@@ -96,28 +137,31 @@ public final class WorkbenchService {
         var resume = json.createObjectNode().put("id", id()).put("label", text(input, "label", 200, true))
                 .put("region", region).put("language", language).put("parentId", parent)
                 .put("jobUrl", url(text(input, "jobUrl", 3000, false), false)).put("content", content)
+                .put("contentSha256", hash(content.getBytes(StandardCharsets.UTF_8)))
                 .put("filename", filename).put("sha256", hash).put("fileKey", hash + extension)
                 .put("approved", false).put("createdAt", now());
         store.save(c, "resume", resume);
         return resume.deepCopy();
     }
 
-    public ObjectNode approveResume(String id) {
-        return store.write(c -> {
-            var resume = store.get(c, "resume", id);
-            verifyResume(resume);
-            resume.put("approved", true).put("approvedAt", now());
-            store.save(c, "resume", resume);
-            return resume;
-        });
+    public ObjectNode approveResume(String id) { return store.write(c -> approveResume(c, id)); }
+
+    ObjectNode approveResume(Connection c, String id) throws Exception {
+        var resume = store.get(c, "resume", id);
+        verifyResume(resume);
+        if (resume.path("approved").asBoolean()) return resume;
+        resume.put("contentSha256", hash(resume.path("content").asText().getBytes(StandardCharsets.UTF_8)))
+                .put("approved", true).put("approvedAt", now());
+        store.save(c, "resume", resume);
+        return resume;
     }
 
     public Path resumeFile(String id) {
         return store.write(c -> { var resume = store.get(c, "resume", id); verifyResume(resume); return file(resume); });
     }
 
-    private Path file(ObjectNode resume) { return store.root.resolve("resumes").resolve(resume.path("fileKey").asText()); }
-    private void verifyResume(ObjectNode resume) throws Exception {
+    Path file(ObjectNode resume) { return store.root.resolve("resumes").resolve(resume.path("fileKey").asText()); }
+    void verifyResume(ObjectNode resume) throws Exception {
         Path path = file(resume);
         if (!Files.isRegularFile(path) || Files.isSymbolicLink(path) || !hash(Files.readAllBytes(path)).equals(resume.path("sha256").asText()))
             throw new WorkbenchException(409, "简历文件缺失或已改变，请重新登记并审核");
@@ -180,7 +224,7 @@ public final class WorkbenchService {
             String site = task.path("url").asText().isEmpty() ? "" : "SITE:" + URI.create(task.path("url").asText()).getHost();
             for (var fact : store.list(c, "fact")) {
                 String scope = fact.path("scope").asText();
-                if (fact.path("confirmed").asBoolean() && (scope.equals("COMMON") || scope.equals(task.path("region").asText()) || scope.equalsIgnoreCase(site))) facts.add(fact.deepCopy());
+                if (fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean() && (scope.equals("COMMON") || scope.equals(task.path("region").asText()) || scope.equalsIgnoreCase(site))) facts.add(fact.deepCopy());
             }
             snapshot.set("facts", facts); task.set("snapshot", snapshot);
             task.put("state", "APPROVED"); task.remove("tokenHash");

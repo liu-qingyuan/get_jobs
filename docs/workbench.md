@@ -32,7 +32,7 @@ bash gradlew --no-daemon workbench -x installPatchrightDriver \
 
 ## 使用顺序
 
-1. **个人资料**：可预览本地 JobsDB 的已知事实/联系方式；选择导入后仍标为待核实。逐条确认、编辑作用域。冲突不自动覆盖，新联系方式不回写历史。通用、港区、国内、指定官网分别适用，未确认项不进入授权快照。
+1. **个人资料 → 已有材料一次核对**：粘贴或选择有权提供的 TXT/MD 材料，明确通用/香港/内地作用域，并可勾选已登记来源及四类独立简历/岗位版。点击整理后，展示来源原文、哈希、重复、矛盾及缺失证据；集中勾选可核实事实和已经亲自审核的简历，一次确认可用子集。其余项仍待核实。原材料变化时另存来源版本，失去旧依据的事实暂停使用；旧确认与任务快照不改写。未变事实直接复用，同版本分析缓存命中不调用模型，页面轮询也不调用模型。PDF/DOCX 无正文时明确待补文本，不假装已提取或核准。仍可预览 JobsDB 已知资料（需显式点击）及逐条手动澄清；不自动读取旧资料、目录或私有基线。未确认项不进入授权快照，确认基线不授权外发。
 2. **简历版本**：分别上传港区/国内的中文/英文版本；PDF、DOCX 或文本，最大 10MB。每次保存是新版本，审核批准只影响该版本。文本草稿不会自动变成可投的 PDF，需人工完成格式检查并上传最终附件。
 3. **创建岗位任务**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
 4. **官网/简历 AI**：必须另外配置执行器，批准不等于开始执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
@@ -64,13 +64,21 @@ export WORKBENCH_OFFERTODAY_COMMAND='["python3","/absolute/checkout/scripts/offe
 例如已有 Pi CLI、模型配置及经授权的浏览器工具时：
 
 ```bash
-export WORKBENCH_AGENT_COMMAND='["pi","--print","--no-session","@{taskFile}","按此任务包 instructions 执行。先阅读 reporterPath 的帮助；每步报告进度。缺资料或需要人工时报告 NEEDS_INPUT 并退出，不猜测、不自行扩展权限。"]'
+export WORKBENCH_AGENT_COMMAND='["pi","--print","--no-session","@{taskFile}","只按任务包 instructions 执行。kind 为 MATERIAL_REVIEW 时，只分析给定 sources 并向 resultPath 写候选 JSON，不调用回调、不读取其他文件或网络；其他任务先阅读 reporterPath 帮助，按合同报告进度，缺资料报告 NEEDS_INPUT 后退出，不扩大权限。"]'
 bash gradlew --no-daemon workbench --console=plain
 ```
 
 这不会安装、登录或自动配置 AI。请选择自己的可用模型与工具；保留其权限限制，不为执行任务关闭安全确认。启动将把当前已批准的资料/简历交给该执行器，其模型可能是外部服务，会产生相应额度消耗。V1 不保证所有官网表单均可操作，验证码或陌生表单可以进入待人工处理。
 
 执行器不是 OS 沙箱，是用户信任的本机程序。任务包只交付当前任务材料，网页只能作为数据，不得按网页指令读取其他文件、登录凭据或执行无关命令。默认执行超时 1800 秒，可用 `--workbench.agent-timeout-seconds=...` 修改。官网 AI、OfferToday 脚本和只读职位读取共享独占运行槽；同一数据目录由运行锁独占。
+
+## 材料核对 Interface（#9）
+
+- `POST /api/workbench/baseline/review`：`{sources:[{name,scope,content}],sourceIds:[],resumeIds:[]}`。只接受明确给出的文本和登记 ID，不接受本机路径；最多 20 份、总正文 200000 字符。相同来源版本和规则返回缓存核对记录，未配置 AI 时新分析明确阻塞。
+- 分析命令沿用 `WORKBENCH_AGENT_COMMAND` 的无 shell `{taskFile}` 替换和独占运行槽。`kind=MATERIAL_REVIEW` 的任务包只含选定 `sources`、规则、`instructions`、`resultPath`，无申请回调或 token；最长 120 秒（受更短的执行器超时约束）。向 `resultPath` 写 `{candidates:[{sourceId,key,label,value,quote}],missing:[]}`，最多 100 候选。`value` 必须逐字位于同来源 `quote` 中；未知来源丢弃，模型的 scope/confirmed/路径等额外字段无权改变合同。此为提取式候选，语义真实性仍由用户核对，不冒充独立验证。
+- `POST /api/workbench/baseline/reviews/{id}/confirm`：`{candidateIds:[],resumeIds:[]}`，只确认当前材料的可核对子集和本次明确展示的独立简历。冲突、缺证据或过期材料拒绝，整次事务不留下半确认；未选择项仍待核实。修改/删除事实的确认依据保留在 `GET /api/workbench/facts/{id}/history`。
+- `GET /api/workbench/baseline?region=HK&language=en&site=careers.example.com`：后续准备的只读 Interface。返回 `version`、当前适用已确认 `facts` 与匹配地区/语言的核准 `resumes`；`site` 可省略，不能据此读取目录或其他资料。文件哈希不符返回阻塞，不输出可用附件。事实是经历/联系方式等，不因简历语言自动翻译或改写；简历语言筛选独立进行。
+- `/state` 包含核对记录与来源版本的可见摘要，不在轮询中运行模型。界面可读旧核对记录和事实确认历史。所有材料、日志和来源哈希只存当前隔离工作台，不覆盖原件；开发必须另用临时目录及 fake 命令。可识别凭据/指令行只保留隔离提示，不作为事实；外部命令是用户信任的本机程序，并非安全沙箱。
 
 ## 执行器报告合同
 
@@ -114,6 +122,14 @@ cd front
 node node_modules/next/dist/bin/next build
 ```
 
-Java 测试使用临时 SQLite、fake 外部进程、localhost 回调；UI smoke 使用独立本机服务及假资料。真实账号、腾讯/阿里/百度等动态表单和真实回执仍需后续单独授权验证。
+Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9 的打包应用冒烟：
+
+```bash
+# 先用正常配置构建；不会把测试端口/fake 配置编入正式产物。
+bash gradlew --no-daemon test bootJar -PrebuildFrontend -x installPatchrightDriver --console=plain
+PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/baseline-smoke.mjs
+```
+
+脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，输出截图路径和计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。

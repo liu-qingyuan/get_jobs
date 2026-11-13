@@ -17,6 +17,11 @@ export interface Fact {
   confirmed: boolean
   source: string
   updatedAt: string
+  version?: number
+  sourceId?: string
+  sourceSha256?: string
+  quote?: string
+  needsReview?: boolean
 }
 
 export interface Resume {
@@ -29,6 +34,7 @@ export interface Resume {
   content: string
   filename: string
   sha256: string
+  contentSha256?: string
   approved: boolean
   createdAt: string
 }
@@ -78,10 +84,45 @@ export interface Task {
   updatedAt: string
 }
 
+export interface MaterialSource {
+  id: string
+  name: string
+  scope: 'COMMON' | Region
+  sha256: string
+  version: number
+  filtered?: boolean
+}
+
+export interface MaterialCandidate {
+  id: string
+  key: string
+  label: string
+  value: string
+  quote: string
+  sourceId: string
+  sourceName: string
+  sourceSha256: string
+  scope: Fact['scope']
+  status: 'NEEDS_REVIEW' | 'CHANGED' | 'REUSED' | 'DUPLICATE' | 'CONFLICT' | 'UNVERIFIED'
+  previousValue?: string
+}
+
+export interface MaterialReview {
+  id: string
+  createdAt: string
+  confirmedAt?: string
+  stale: boolean
+  sources: MaterialSource[]
+  resumes: Resume[]
+  candidates: MaterialCandidate[]
+  missing: string[]
+}
+
 export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
   tasks: Task[]
+  materials: { sources: MaterialSource[]; reviews: MaterialReview[] }
   runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean }
   platforms: {
     bossUrl: string
