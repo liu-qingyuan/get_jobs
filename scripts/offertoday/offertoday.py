@@ -152,6 +152,36 @@ def discover(adapter):
     return {'jobs': jobs, 'note': 'Only currently loaded public jobs; no automatic pagination.'}
 
 
+def read_candidates(bundle_file):
+    """One already-reserved, read-only page. No reporter, application task or automatic browser attachment."""
+    bundle = json.loads(Path(bundle_file).read_text(encoding='utf-8'))
+    if not isinstance(bundle, dict) or bundle.get('kind') != 'CANDIDATE_READ':
+        raise BrowserBlocked('Not a read-only candidate bundle')
+    source, limits = bundle.get('source', {}), bundle.get('limits', {})
+    if (source.get('channel') != 'OFFERTODAY' or limits.get('modelTokens') != 0 or limits.get('outbound') != 0
+            or type(limits.get('candidates')) is not int or not 1 <= limits['candidates'] <= 40
+            or type(limits.get('seconds')) is not int or not 1 <= limits['seconds'] <= 120):
+        raise BrowserBlocked('Read-only scope limits are invalid')
+    target = urlsplit(source.get('url', ''))
+    if (target.scheme != 'https' or target.netloc != 'www.offertoday.com' or target.fragment
+            or not re.fullmatch(r'/hk/(?:search|recommend)[^/]*(?:/.*)?', target.path)):
+        raise BrowserBlocked('Not a permitted HK read-only list')
+    result_path = Path(bundle.get('resultPath', ''))
+    if not result_path.is_absolute() or result_path.parent.resolve() != Path(bundle_file).resolve().parent or result_path.is_symlink():
+        raise BrowserBlocked('Read-only result must stay alongside its task bundle')
+    try:
+        browser = ExistingBrowserAdapter(*_connection())
+        result = browser.action('candidate_page', sourceUrl=source['url'], maxJobs=limits['candidates'], cursor=source.get('cursor', ''))
+        if not isinstance(result.get('jobs'), list) or len(result['jobs']) > limits['candidates']:
+            raise BrowserBlocked('Read-only candidate result exceeded its limit')
+    except BrowserBlocked as exc:
+        result = {'exception': str(exc)[:200]}
+    with result_path.open('x', encoding='utf-8') as stream:
+        json.dump(result, stream, ensure_ascii=False)
+    result_path.chmod(0o600)
+    return {'status': 'read-only', 'resultPath': str(result_path)}
+
+
 def connect():
     workspace = Path(os.environ.get('OFFERTODAY_BROWSER_WORKDIR') or ROOT).expanduser().resolve()
     session = os.environ.get('OFFERTODAY_BROWSER_SESSION') or 'offertoday-current'
@@ -345,12 +375,16 @@ def main(argv=None):
     sub.add_parser('discover')
     run_parser = sub.add_parser('run')
     run_parser.add_argument('taskFile', type=Path)
+    read_parser = sub.add_parser('read-candidates')
+    read_parser.add_argument('taskFile', type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == 'connect':
             result = connect()
         elif args.command == 'discover':
             result = discover(ExistingBrowserAdapter(*_connection()))
+        elif args.command == 'read-candidates':
+            result = read_candidates(args.taskFile)
         else:
             result = run(args.taskFile)
         print(json.dumps(result, ensure_ascii=False))

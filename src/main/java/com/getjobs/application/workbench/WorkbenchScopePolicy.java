@@ -179,7 +179,43 @@ final class WorkbenchScopePolicy {
         return cost;
     }
 
-    private ObjectNode assess(Connection c, ObjectNode input) throws Exception {
+    /** Reserves the full read-only page envelope before a trusted Adapter starts. No materials or send capability leave here. */
+    ObjectNode reserveDiscovery(int version, ObjectNode source, int slots, int seconds, int tokens) {
+        return store.write(c -> {
+            var request = discoveryRequest(version, source);
+            request.putObject("cost").put("candidates", slots).put("seconds", seconds).put("modelTokens", tokens).put("outbound", 0);
+            var decision = assess(c, request, true, false);
+            if (decision.path("allowed").asBoolean()) {
+                var used = usage(c);
+                for (String meter : METERS) used.put(meter, used.path(meter).asLong() + decision.path("cost").path(meter).asLong());
+                store.save(c, "scope_usage", used);
+                var authorization = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", version)
+                        .put("status", "CONSUMED").put("createdAt", now()).put("consumedAt", now());
+                authorization.set("request", request); authorization.set("reasons", decision.path("reasons"));
+                store.save(c, "scope_authorization", authorization);
+                decision.put("authorizationId", authorization.path("id").asText());
+            }
+            return decision;
+        });
+    }
+
+    ObjectNode discoveryCandidate(Connection c, int version, ObjectNode target, String observedDescription) throws Exception {
+        var request = discoveryRequest(version, target);
+        return assess(c, request, false, true, observedDescription);
+    }
+    private ObjectNode discoveryRequest(int version, ObjectNode target) {
+        var request = object().put("scopeVersion", version).put("action", "DISCOVER");
+        var copy = target.deepCopy();
+        copy.put("company", target.path("company").asText("只读来源"));
+        copy.put("title", target.path("title").asText("只读岗位列表"));
+        copy.put("transformation", "ORIGINAL").put("resumeId", "");
+        request.set("target", copy); return request;
+    }
+    private ObjectNode assess(Connection c, ObjectNode input) throws Exception { return assess(c, input, false, false); }
+    private ObjectNode assess(Connection c, ObjectNode input, boolean sourceRead, boolean reserved) throws Exception {
+        return assess(c, input, sourceRead, reserved, "");
+    }
+    private ObjectNode assess(Connection c, ObjectNode input, boolean sourceRead, boolean reserved, String observedDescription) throws Exception {
         var decision = object().put("allowed", false).put("source", "SCOPE_POLICY");
         var reasons = decision.putArray("reasons"); var codes = decision.putArray("reasonCodes");
         var scope = latest(c);
@@ -191,7 +227,7 @@ final class WorkbenchScopePolicy {
         String action = text(input, "action", 50, true);
         var cost = cost(action, input.path("cost")); decision.set("cost", cost);
         var used = usage(c);
-        for (String meter : METERS) if (cost.path(meter).asLong() > scope.path("budgets").path(meter).asLong() - used.path(meter).asLong())
+        for (String meter : METERS) if (!reserved && cost.path(meter).asLong() > scope.path("budgets").path(meter).asLong() - used.path(meter).asLong())
             deny(reasons, codes, "BUDGET_EXHAUSTED", "累计预算不足：" + meter);
         if (!ACTIONS.contains(action) || !contains(scope.path("actions"), action)) deny(reasons, codes, "ACTION_DENIED", "此范围未允许动作：" + action);
         if (!(input.path("target") instanceof ObjectNode target)) throw new WorkbenchException(400, "请指定单个岗位目标");
@@ -202,7 +238,12 @@ final class WorkbenchScopePolicy {
             deny(reasons, codes, "SOURCE_DENIED", "范围未授权非标准来源端口");
         String channel = text(target, "channel", 50, true);
         if (OfferTodayTarget.isHost(link) && !channel.equals("OFFERTODAY")) deny(reasons, codes, "CHANNEL_DENIED", "OfferToday 不能借用其他渠道授权");
-        if (channel.equals("OFFERTODAY")) try { OfferTodayTarget.parse(link); }
+        if (channel.equals("OFFERTODAY")) try {
+            if (sourceRead) {
+                require(host.equals("www.offertoday.com") && uri.getScheme().equals("https")
+                        && uri.getPath().matches("/hk/(?:search|recommend)[^/]*(?:/.*)?"), "只读来源不是受支持的 OfferToday 港区列表");
+            } else OfferTodayTarget.parse(link);
+        }
         catch (WorkbenchException e) { deny(reasons, codes, "CHANNEL_DENIED", e.getMessage()); }
         if (Set.of("OFFERTODAY", "JOBSDB").contains(channel) && !target.path("region").asText().equals("HK"))
             deny(reasons, codes, "CHANNEL_DENIED", "当前渠道仅支持港区");
@@ -211,11 +252,11 @@ final class WorkbenchScopePolicy {
             String plural = switch (field) { case "channel" -> "channels"; case "region" -> "regions"; case "language" -> "languages"; default -> "directions"; };
             if (!contains(scope.path(plural), text(target, field, 50, true))) deny(reasons, codes, "TARGET_DENIED", "岗位条件越界：" + field);
         }
-        String content = (text(target, "company", 200, true) + " " + text(target, "title", 300, true) + " " + text(target, "description", 30000, false)).toLowerCase(Locale.ROOT);
-        if (!scope.path("includeTerms").isEmpty() && !matches(scope.path("includeTerms"), content)) deny(reasons, codes, "SELECTION_DENIED", "岗位未命中已确认的选择词");
-        if (matches(scope.path("excludeTerms"), content)) deny(reasons, codes, "EXCLUDED", "岗位命中排除项");
+        String content = (text(target, "company", 200, true) + " " + text(target, "title", 300, true) + " " + text(target, "description", 30000, false) + " " + observedDescription).toLowerCase(Locale.ROOT);
+        if (!sourceRead && !scope.path("includeTerms").isEmpty() && !matches(scope.path("includeTerms"), content)) deny(reasons, codes, "SELECTION_DENIED", "岗位未命中已确认的选择词");
+        if (!sourceRead && matches(scope.path("excludeTerms"), content)) deny(reasons, codes, "EXCLUDED", "岗位命中排除项");
         String transformation = text(target, "transformation", 50, true);
-        if (!contains(scope.path("transformations"), transformation)) deny(reasons, codes, "TRANSFORMATION_DENIED", "材料变换未获允许；不能新增事实或跨地区/语言覆盖");
+        if (!sourceRead && !reserved && !contains(scope.path("transformations"), transformation)) deny(reasons, codes, "TRANSFORMATION_DENIED", "材料变换未获允许；不能新增事实或跨地区/语言覆盖");
         try {
             var selected = service.materials.scopeSelection(c, scope);
             if (!selected.equals(scope.path("materials"))) deny(reasons, codes, "MATERIAL_CHANGED", "事实或独立材料版本已变化，须重新确认范围");

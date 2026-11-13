@@ -77,12 +77,12 @@ document.querySelector('.js-message-input-editor').addEventListener('keydown',e=
  mediaType:1,type:1,status:0,body:{text:{content:text}}});e.currentTarget.textContent='';
 });
 </script></body></html>'''
-SEARCH_HTML = '''<!doctype html><input name="search_keyword"><div><p>Salary not company</p><div class="jobCardTitle"><a href="''' + URL + '''?ref=fixture">Fixture engineer</a></div><a href="/hk/company/example">Fixture co</a></div>'''
+SEARCH_HTML = HTML.replace('<div id="root"></div>', '''<input name="search_keyword"><div><p>Salary not company</p><div class="jobCardTitle"><a href="''' + URL + '''?ref=fixture">Fixture engineer</a></div><a href="/hk/company/example">Fixture co</a></div>''')
 LANG = '''export const s={get(atom){return atom.read()},async set(atom,value){return atom.write(value)},sub(){return()=>{}}};'''
 ENTRY = '''const S=window.__fixture;
 const cs={read:()=>S.selected,write:async id=>{S.selected=id;return id}};
 const cI={read:()=>S.selected};const aD={read:()=>({upsn:S.owner})};const dc={read:()=>S.local};
-const I={search:{get_getJobDetail:async()=>({jobId:'%s',jobName:S.title,companyName:S.company,brandName:S.company,userId:S.peer})},
+const I={search:{get_getJobDetail:async()=>({jobId:'%s',jobName:S.title,companyName:S.company,brandName:S.company,userId:S.peer,jobDesc:S.description===undefined?'Responsibilities: build and test AI applications with Python, maintain evaluation pipelines and document delivery. Requirements: demonstrable programming projects and clear technical communication.':S.description})},
  chat:{getHistoryMsgs:async()=>({hasMore:false,pageSize:30,resultList:S.history.slice(0,30)})},
  account:{getAttachList:async()=>({resume:S.attachments.map(({bytes,...meta})=>meta)}),
  getDownloadAttach:async({encryptAttachId})=>{const a=S.attachments.find(x=>x.encryptAttachId===encryptAttachId);return new Blob([new Uint8Array(a.bytes)])}}};
@@ -134,14 +134,41 @@ class InterceptedBrowserFixture(unittest.TestCase):
     def test_discovery_uses_company_anchor_not_salary(self):
         self.assertEqual(discover(self.browser)['jobs'], [{'url':URL,'title':'Fixture engineer', 'company':'Fixture co','description':''}])
 
+    def test_candidate_page_reads_native_full_details_without_opening_chat_or_picker(self):
+        result = self.browser.action('candidate_page', sourceUrl='https://www.offertoday.com/hk/search?q=fixture', maxJobs=2, cursor='')
+        self.assertEqual(1, len(result['jobs']))
+        self.assertTrue(result['jobs'][0]['descriptionComplete'])
+        self.assertGreater(len(result['jobs'][0]['description']), 120)
+        self.assertEqual('', self.state('return window.__fixture.selected'))
+        self.assertEqual('[]', self.state('return JSON.stringify(window.__fixture.sends)'))
+        self.assertEqual(0, self.state('return window.__fixture.uploadCount'))
+        self.assertTrue(self.state('return document.querySelector("#picker").hidden'))
+
+    def test_candidate_page_marks_missing_full_jd_and_blocks_unknown_version_without_actions(self):
+        self.state("window.__fixture.description='Card-only text';return true;")
+        result = self.browser.action('candidate_page', sourceUrl='https://www.offertoday.com/hk/search?q=fixture', maxJobs=1, cursor='')
+        self.assertFalse(result['jobs'][0]['descriptionComplete'])
+        self.assertEqual('Card-only text', result['jobs'][0]['description'])
+        self.state("document.querySelector('script[type=module]').remove();return true;")
+        with self.assertRaisesRegex(BrowserBlocked, 'version'):
+            self.browser.action('candidate_page', sourceUrl='https://www.offertoday.com/hk/search?q=fixture', maxJobs=1, cursor='')
+        self.assertEqual('[]', self.state('return JSON.stringify(window.__fixture.sends)'))
+        self.assertEqual(0, self.state('return window.__fixture.uploadCount'))
+
+    def test_candidate_page_keeps_unsaved_draft_and_does_not_navigate(self):
+        self.state("document.querySelector('.js-message-input-editor').textContent='Unsent user draft';return true;")
+        with self.assertRaisesRegex(BrowserBlocked, 'draft'):
+            self.browser.action('candidate_page', sourceUrl='https://www.offertoday.com/hk/recommend', maxJobs=1, cursor='')
+        self.assertEqual('/hk/search', self.state('return location.pathname'))
+        self.assertEqual('Unsent user draft', self.state('return document.querySelector(".js-message-input-editor").textContent'))
+
     def test_invented_auth_and_receipt_attributes_cannot_authorize_preflight(self):
         self.cli('run-code', '''async page => { await page.route('**/*',r=>r.fulfill({status:200,contentType:'text/html',body:'<main data-authenticated-user="true"><h1>Fixture engineer</h1><div data-company>Fixture co</div><div data-message-id="fake" data-delivery-state="acknowledged"></div></main>'})); await page.goto(''' + json.dumps(URL) + '''); return true; }''')
         with self.assertRaises(BrowserBlocked):
             self.preflight()
 
     def test_current_page_draft_blocks_navigation_without_discarding_it(self):
-        self.state('''const draft=document.createElement('div');draft.className='js-message-input-editor';
-          draft.contentEditable='true';draft.textContent='user unsent draft';document.body.append(draft);return true;''')
+        self.state('''document.querySelector('.js-message-input-editor').textContent='user unsent draft';return true;''')
         with self.assertRaises(BrowserBlocked):
             self.preflight()
         self.assertIn('/hk/search', self.state('return location.pathname'))

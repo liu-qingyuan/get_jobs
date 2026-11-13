@@ -23,8 +23,21 @@ const base = `http://127.0.0.1:${port}`
 await mkdir(join(root, 'src/main/resources/dist'), { recursive: true })
 const fake = join(root, 'fake-ai.py')
 await writeFile(fake, `import json,sys,pathlib
-b=json.load(open(sys.argv[1])); assert b['kind']=='MATERIAL_REVIEW'
+b=json.load(open(sys.argv[-1]))
 assert 'token' not in b and 'callbackUrl' not in b
+if b['kind']=='CANDIDATE_READ':
+    assert 'materials' not in b and 'resumePath' not in b and b['limits']['outbound']==0
+    offer=b['source']['channel']=='OFFERTODAY'
+    jd='Responsibilities: build and test AI search applications with Python, maintain evaluation and data pipelines. Requirements: demonstrable programming projects and clear technical communication.'
+    jobs=[{'url':'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv==' if offer else 'https://careers.example.test/jobs/opaque-A?utm_source=fixture',
+      'company':'Synthetic OfferToday Co' if offer else 'Synthetic Official Co','title':'AI engineer','description':jd,'descriptionComplete':True}]
+    if not offer:
+        marker=pathlib.Path(${JSON.stringify(join(root, 'official-read-marker'))})
+        if marker.exists(): jobs[0].update(description='Card only on rediscovery',descriptionComplete=False)
+        marker.write_text('read')
+        jobs.append({'url':'https://careers.example.test/jobs/short','company':'Synthetic Incomplete Co','title':'AI engineer','description':'Card only','descriptionComplete':False})
+    json.dump({'jobs':jobs,'nextUrl':'','cursor':''},open(b['resultPath'],'w')); sys.exit(0)
+assert b['kind']=='MATERIAL_REVIEW'
 p=pathlib.Path(${JSON.stringify(join(root, 'calls'))}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')
 c=[]
 for s in b['sources']:
@@ -44,7 +57,7 @@ const log = await open(join(root, 'server.log'), 'w')
 const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java'
 const server = spawn(java, ['-jar', jar, `--server.port=${port}`, '--server.address=127.0.0.1', '--browser.auto-start=false',
   `--spring.datasource.url=jdbc:sqlite:${join(root, 'empty-legacy.db')}`, `--workbench.data-dir=${join(root, 'state')}`,
-  `--workbench.jobsdb-dir=${join(root, 'empty-jobsdb')}`, '--workbench.offertoday-command=[]',
+  `--workbench.jobsdb-dir=${join(root, 'empty-jobsdb')}`, `--workbench.offertoday-command=${JSON.stringify(['python3', fake])}`,
   `--workbench.agent-command=${JSON.stringify(['python3', fake, '{taskFile}'])}`, `--logging.file.name=${join(root, 'application.log')}`,
 ], { cwd: root, stdio: ['ignore', log.fd, log.fd] })
 let browser, page
@@ -159,7 +172,47 @@ try {
   assert.equal((await (await fetch(`${base}/api/workbench/state`)).json()).tasks.length, 0)
   assert.deepEqual(failures, [])
   await page.screenshot({ path: join(root, 'scope.png'), fullPage: true })
-  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, confirmedFacts: 1, confirmedResumes: 1, tasks: 0, scopeVersions: 5, outbound: 0 }))
+  // #11: one explicit turn reads both roles, without creating applications or using any real site/session.
+  await scopePanel.getByLabel('OfferToday HK', { exact: true }).check()
+  await scopePanel.getByLabel('来源精确域名（每行一个）').fill('careers.example.test\nwww.offertoday.com')
+  await scopePanel.getByLabel('岗位排除词（任一命中；每行一个）').fill('')
+  await scopePanel.getByRole('button', { name: '变更范围（新版本）', exact: true }).click()
+  await scopePanel.getByText('当前范围 v6 · 有效', { exact: true }).waitFor()
+  await page.getByRole('tab', { name: '候选与发现', exact: true }).click()
+  const discovery = page.getByRole('region', { name: '只读候选发现', exact: true })
+  await discovery.getByRole('button', { name: '载入当前范围来源', exact: true }).click()
+  await discovery.getByRole('button', { name: '一次启动范围内只读发现', exact: true }).click()
+  const candidates = page.getByRole('region', { name: '候选岗位队列', exact: true })
+  await candidates.getByRole('heading', { name: 'Synthetic Official Co · AI engineer', exact: true }).waitFor()
+  await candidates.getByRole('heading', { name: 'Synthetic OfferToday Co · AI engineer', exact: true }).waitFor()
+  await candidates.getByText('描述不足 · 不参与匹配', { exact: true }).waitFor()
+  assert.equal(await candidates.getByText('完整 JD · 待匹配', { exact: true }).count(), 2)
+  const initialCandidates = await (await fetch(`${base}/api/workbench/candidates`)).json()
+  const original = initialCandidates.jobs.find(job => job.channel === 'OFFICIAL' && job.status === 'READY')
+  await discovery.getByRole('button', { name: '一次启动范围内只读发现', exact: true }).click()
+  await candidates.getByText('未取得新全文；保留上次完整 JD 与原取得时间', { exact: false }).waitFor()
+  await page.reload()
+  await candidates.getByRole('heading', { name: '候选岗位（3）', exact: true }).waitFor()
+  const discovered = await (await fetch(`${base}/api/workbench/state`)).json()
+  assert.equal(discovered.candidates.jobs.length, 3)
+  assert.equal(discovered.candidates.runs[0].status, 'COMPLETED')
+  const retained = discovered.candidates.jobs.find(job => job.id === original.id)
+  assert.equal(retained.status, 'READY')
+  assert.equal(retained.description, original.description)
+  assert.equal(retained.retrievedAt, original.retrievedAt)
+  assert.equal(retained.lastReadComplete, false)
+  assert.equal(discovered.tasks.length, 0)
+  assert.equal(discovered.scope.usage.outbound, 0)
+  assert.equal(await readFile(join(root, 'calls'), 'utf8'), '1')
+  assert.deepEqual(failures, [])
+  await page.waitForFunction(() => {
+    let node = document.querySelector('[aria-label="候选岗位队列"]')
+    if (!node) return false
+    for (; node; node = node.parentElement) if (Number(getComputedStyle(node).opacity) < 0.99) return false
+    return true
+  })
+  await page.screenshot({ path: join(root, 'candidates.png'), fullPage: true })
+  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, confirmedFacts: 1, confirmedResumes: 1, tasks: 0, scopeVersions: 6, candidates: 3, fullJd: 2, outbound: 0 }))
 } catch (error) {
   console.error(`Smoke evidence: ${root}`)
   if (page) {

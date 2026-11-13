@@ -22,6 +22,7 @@ public final class WorkbenchService {
     private final WorkbenchLegacy legacy;
     final WorkbenchMaterials materials;
     final WorkbenchScopePolicy scope;
+    final WorkbenchCandidates candidates;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this.store = new WorkbenchStore(root, json);
@@ -30,6 +31,7 @@ public final class WorkbenchService {
         this.legacy = new WorkbenchLegacy(this.jobsdb, json);
         this.materials = new WorkbenchMaterials(this);
         this.scope = new WorkbenchScopePolicy(this);
+        this.candidates = new WorkbenchCandidates(this);
     }
 
     public ObjectNode state() {
@@ -39,6 +41,7 @@ public final class WorkbenchService {
             result.set("resumes", store.list(c, "resume"));
             result.set("materials", materials.workspace(c));
             result.set("scope", scope.workspace(c));
+            result.set("candidates", candidates.workspace(c));
             var tasks = store.list(c, "task");
             tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
             result.set("tasks", tasks);
@@ -404,6 +407,7 @@ public final class WorkbenchService {
 
     void recoverInterrupted() {
         store.write(c -> {
+            candidates.recover(c);
             for (var record : store.list(c, "task")) {
                 var task = (ObjectNode) record;
                 if (task.path("state").asText().equals("RUNNING")) {

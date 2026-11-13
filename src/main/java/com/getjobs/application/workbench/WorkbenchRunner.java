@@ -145,6 +145,48 @@ public final class WorkbenchRunner implements AutoCloseable {
         }
     }
 
+    /** One bounded read-only turn, including required details; no application callback, materials or claim. */
+    public synchronized ObjectNode discoverCandidates(ObjectNode input) {
+        if (closed || !busy.compareAndSet(false, true)) throw new WorkbenchException(409, "执行器已关闭或正在处理其他任务");
+        try { return service.candidates.discover(input, this::readCandidatePage); }
+        finally { busy.set(false); }
+    }
+
+    private ObjectNode readCandidatePage(ObjectNode bundle) throws Exception {
+        boolean offerToday = bundle.path("source").path("channel").asText().equals("OFFERTODAY");
+        if (offerToday ? offerTodayCommand.isEmpty() : command.isEmpty()) throw new WorkbenchException(409,
+                offerToday ? "OfferToday 未配置或没有已授权会话；不会新建登录态" : "尚未配置通用官网只读执行器");
+        Path directory = service.store.root.resolve("runs").resolve("candidates-" + UUID.randomUUID());
+        Files.createDirectories(directory);
+        Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
+        // The process deadline cannot exceed the resource envelope charged by the policy.
+        long seconds = Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong());
+        ((ObjectNode) bundle.path("limits")).put("seconds", seconds);
+        bundle.put("resultPath", result.toString());
+        Files.writeString(file, service.json.writeValueAsString(bundle));
+        try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
+        catch (UnsupportedOperationException ignored) { }
+        List<String> arguments;
+        if (offerToday) {
+            arguments = new ArrayList<>(offerTodayCommand); arguments.add("read-candidates"); arguments.add(file.toString());
+        } else arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
+        Process child = null;
+        try {
+            child = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("read.log").toFile()).start();
+            process = child; child.getOutputStream().close();
+            if (!child.waitFor(seconds, TimeUnit.SECONDS)) throw new WorkbenchException(409, "只读读取时间预算耗尽；保留断点");
+            if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024)
+                throw new WorkbenchException(409, "只读来源未返回有效结果；检查会话、版本或本机执行器日志");
+            var parsed = service.json.readTree(Files.readString(result));
+            if (!(parsed instanceof ObjectNode output)) throw new WorkbenchException(409, "只读来源结果格式无效");
+            if (output.has("exception")) throw new WorkbenchException(409, WorkbenchService.text(output, "exception", 1000, true));
+            return output;
+        } finally {
+            if (child != null && child.isAlive()) terminate(child);
+            process = null;
+        }
+    }
+
     /** Bounded, read-only material analysis. Shares the application slot but has no event token or browser authority. */
     public synchronized ObjectNode reviewMaterials(ObjectNode input) {
         if (closed || busy.get()) throw new WorkbenchException(409, "已有执行任务运行中或执行器已关闭");

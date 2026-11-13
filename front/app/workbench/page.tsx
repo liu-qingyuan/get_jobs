@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import PageHeader from '@/app/components/PageHeader'
 import MaterialBaseline from './MaterialBaseline'
 import ScopePolicyPanel from './ScopePolicy'
+import Candidates from './Candidates'
 import {
   type Channel, type EventType, type Fact, type FactInput, type Language, type OfferTodayDiscovery, type Region, type Resume,
   type Task, type TaskInput, type TaskKind, type TaskState, type WorkbenchState,
@@ -69,7 +70,7 @@ export default function WorkbenchPage() {
   const [updatedAt, setUpdatedAt] = useState('')
   const [working, setWorking] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [tab, setTab] = useState('tasks')
+  const [tab, setTab] = useState('candidates')
   const [newAlerts, setNewAlerts] = useState<string[]>([])
   const [notifications, setNotifications] = useState(false)
   const seenStates = useRef<Map<string, TaskState> | null>(null)
@@ -478,7 +479,7 @@ export default function WorkbenchPage() {
 
   return (
     <div className="space-y-5 pb-12">
-      <PageHeader icon={<BiBriefcase />} title="求职工作台" subtitle="资料先核实，简历按版本审核，岗位单次授权；结果以证据为准。"
+      <PageHeader icon={<BiBriefcase />} title="求职工作台" subtitle="一次确认范围，只读发现完整候选；匹配、备料与执行分别留痕，结果以证据为准。"
         actions={<Button variant="outline" size="sm" onClick={() => void refresh()}><BiRefresh />刷新</Button>} />
 
       {loadError && <p role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800 dark:bg-rose-950 dark:text-rose-200">读取状态失败：{loadError}。{state ? '下方为上次获取的数据。' : '尚未获取真实数据。'}</p>}
@@ -487,7 +488,7 @@ export default function WorkbenchPage() {
       {loading && <p role="status" className={small}>正在读取本地工作台状态…</p>}
       {!state ? (!loading && <p className={small}>服务不可用时不会显示虚构的投递进展，请启动后端后刷新。</p>) : <>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div className={panel}><p className={small}>任务总数</p><p className="mt-1 text-3xl font-bold">{state.tasks.length}</p><p className={small}>已提交有回执 {state.tasks.filter(task => task.state === 'SUBMITTED' && (task.channel !== 'OFFERTODAY' || !!task.cvReceipt)).length}</p></div>
+          <div className={panel}><p className={small}>只读候选</p><p className="mt-1 text-3xl font-bold">{state.candidates.jobs.length}</p><p className={small}>完整 JD {state.candidates.jobs.filter(job => job.status === 'READY').length} · 历史任务 {state.tasks.length}</p></div>
           <div className={panel}><p className={small}>待关注</p><p className="mt-1 text-3xl font-bold text-amber-700 dark:text-amber-300">{incidents.length}</p><p className={small}>失败 · 人工处理 · 结果未知</p></div>
           <div className={panel}><p className={small}>已确认资料</p><p className="mt-1 text-3xl font-bold">{state.facts.filter(fact => fact.confirmed).length}</p><p className={small}>未确认 {state.facts.filter(fact => !fact.confirmed).length} 条，不用于授权快照</p></div>
           <div className={panel}><p className={small}>执行器</p><p className="mt-2 font-semibold">官网/简历 AI：{!state.runtime.agentConfigured ? '未配置' : state.runtime.busy ? '忙碌中' : '已配置'}</p><p className={small}>OfferToday 零模型脚本：{state.runtime.offerTodayConfigured ? '已配置' : '未配置'} · {state.runtime.busy ? '执行器忙碌' : state.runtime.offerTodayConfigured ? '可显式启动' : '不可启动'}；连接在启动时核验</p></div>
@@ -503,7 +504,8 @@ export default function WorkbenchPage() {
         </section>}
 
         <Tabs value={tab} onValueChange={value => { if (value !== 'resumes') setResumeFile(null); setTab(value) }} className="space-y-4">
-          <TabsList className="h-auto flex-wrap gap-1"><TabsTrigger value="tasks">任务与进展</TabsTrigger><TabsTrigger value="resumes">简历版本</TabsTrigger><TabsTrigger value="facts">个人资料</TabsTrigger><TabsTrigger value="scope">求职范围</TabsTrigger><TabsTrigger value="platforms">平台入口</TabsTrigger></TabsList>
+          <TabsList className="h-auto flex-wrap gap-1"><TabsTrigger value="candidates">候选与发现</TabsTrigger><TabsTrigger value="tasks">手工任务与历史</TabsTrigger><TabsTrigger value="resumes">简历版本</TabsTrigger><TabsTrigger value="facts">个人资料</TabsTrigger><TabsTrigger value="scope">求职范围</TabsTrigger><TabsTrigger value="platforms">平台入口</TabsTrigger></TabsList>
+          <TabsContent value="candidates"><Candidates state={state} working={!!working} act={act} showScope={() => setTab('scope')} /></TabsContent>
           <TabsContent value="scope"><ScopePolicyPanel state={state} working={!!working} act={act} /></TabsContent>
           <TabsContent value="tasks" className="space-y-4">
             <section ref={newTaskNode} className={panel} aria-labelledby="new-task-title">

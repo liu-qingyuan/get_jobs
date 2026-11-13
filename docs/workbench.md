@@ -34,11 +34,12 @@ bash gradlew --no-daemon workbench -x installPatchrightDriver \
 
 1. **个人资料 → 已有材料一次核对**：粘贴或选择有权提供的 TXT/MD 材料，明确通用/香港/内地作用域，并可勾选已登记来源及四类独立简历/岗位版。点击整理后，展示来源原文、哈希、重复、矛盾及缺失证据；集中勾选可核实事实和已经亲自审核的简历，一次确认可用子集。其余项仍待核实。原材料变化时另存来源版本，失去旧依据的事实暂停使用；旧确认与任务快照不改写。未变事实直接复用，同版本分析缓存命中不调用模型，页面轮询也不调用模型。PDF/DOCX 无正文时明确待补文本，不假装已提取或核准。仍可预览 JobsDB 已知资料（需显式点击）及逐条手动澄清；不自动读取旧资料、目录或私有基线。未确认项不进入授权快照，确认基线不授权外发。
 2. **简历版本**：分别上传港区/国内的中文/英文版本；PDF、DOCX 或文本，最大 10MB。每次保存是新版本，审核批准只影响该版本。文本草稿不会自动变成可投的 PDF，需人工完成格式检查并上传最终附件。
-3. **求职范围**：在新页签一次选定精确来源、渠道、地区/语言/方向、岗位选择词和排除词、已确认事实、独立核准简历、变换、动作、累计预算和有效期。默认只读发现/匹配/准备，无外发和项目执行许可。先保存再用同一代表性岗位预检，查看当前范围版本、策略来源和所有拒绝原因。可暂停、恢复、变更、撤销及回读历史；这些操作均产生新版本，旧未执行授权不复活。新版本补充额度应提高累计上限，不清零已耗量。范围本身尚不启动候选队列或执行器（由后续 Tickets 接入）；不将 Boss/JobsDB 原批次显示成已受控接通。
-4. **创建岗位任务**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
-5. **官网/简历 AI**：必须另外配置执行器，批准不等于开始执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
-6. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
-7. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
+3. **求职范围**：在新页签一次选定精确来源、渠道、地区/语言/方向、岗位选择词和排除词、已确认事实、独立核准简历、变换、动作、累计预算和有效期。默认只读发现/匹配/准备，无外发和项目执行许可。先保存再用同一代表性岗位预检，查看当前范围版本、策略来源和所有拒绝原因。可暂停、恢复、变更、撤销及回读历史；这些操作均产生新版本，旧未执行授权不复活。新版本补充额度应提高累计上限，不清零已耗量。保存范围本身不启动执行器；默认候选主屏可另行显式启动只读发现，不将 Boss/JobsDB 原批次显示成已受控接通。
+4. **候选与发现（默认主屏）**：一次填写获准官网入口和 OfferToday 港区列表，设置本次页面、每页候选槽/秒数/官网模型上限后启动。在同一独占槽读取两种来源及必要详情；完整候选显示规范链接、平台身份、全文 JD、取得时间。描述不足/失效/范围拒绝不会进入匹配。达到页面或累计资源上限、连接/版本例外时保留进度；可按当前范围继续，不清零计量。官网必须配置支持 `CANDIDATE_READ` 的可信通用执行器；OfferToday 复用已授权连接，不创建登录态，不点 Chat/Apply、不上传/发送。技术通过不代表真实覆盖或匹配质量已验收。
+5. **手工任务与历史（次要入口）**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
+6. **官网/简历 AI**：必须另外配置执行器，批准不等于开始执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
+7. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
+8. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
 
 JobsDB 页只读显示最近 100 条原账本并保留 CLI 交接。**工作台不通过 HTTP 直接启动 Boss/JobsDB 的交互式 apply 或批次**；一个岗位的批准不是整个批次的授权。OfferToday 是另行受控的单岗脚本路径，使用原审核/回执合同，不触及 Boss/JobsDB 批次。原平台配置、在线简历和 Cookie 不会因工作台资料更新自动改写。
 
@@ -46,11 +47,11 @@ JobsDB 页只读显示最近 100 条原账本并保留 CLI 交接。**工作台�
 
 **OfferToday 已实现基于实站控件和已验证原生客户端的单岗脚本；真实发送验收仍未授权或进行。** 审核、启动、文件字节校验与分阶段回执通过隔离测试；未知页面或站点版本会阻塞，不保证每种实站变体可执行。验证边界见 issue #6 和下文设计记录。
 
-在平台入口或任务渠道中选择 OfferToday。先在普通 Chrome 登录，并通过官方 Playwright 扩展只共享所需标签页，不必重新登录或复制登录态。工作台的职位读取必须手动点击，仅取当前已加载的最多 40 个不同岗位，不自动翻页；选择后只是填入待审表单，不会创建或发送申请。
+在平台入口或任务渠道中选择 OfferToday。先在普通 Chrome 登录，并通过官方 Playwright 扩展只共享所需标签页，不必重新登录或复制登录态。平台页保留的旧「读取当前职位」仅取已加载卡片，选择后填入待审表单；默认候选页的新只读发现按当前范围和预算读取列表及必要详情，不会创建或发送申请。两者都不猜测未加载的远端分页。
 
 OfferToday 只使用港区已审核 PDF/DOCX 附件，中文与英文版本继续独立。首条消息默认空白，须逐岗确认；核对平台实际联系方式与最新偏好及线上资料后，批准固定消息哈希、附件和适用事实。脚本启动不调用模型，也不等于已发送。缺资料、验证码、未知控件、不可控制的自动招呼或旧附件无法核验时等待人工。
 
-源码 checkout 存在随附脚本时自动配置脚本前缀；可用 `WORKBENCH_OFFERTODAY_COMMAND` 的 JSON 参数数组覆盖，显式 `[]` 禁用。它是参数前缀，Runner 追加 `discover` 或 `run taskFile`，不是 shell，也不含 `{taskFile}` 模板。例如：
+源码 checkout 存在随附脚本时自动配置脚本前缀；可用 `WORKBENCH_OFFERTODAY_COMMAND` 的 JSON 参数数组覆盖，显式 `[]` 禁用。它是参数前缀，Runner 追加 `discover`、`read-candidates taskFile` 或 `run taskFile`，不是 shell，也不含 `{taskFile}` 模板。例如：
 
 ```bash
 export WORKBENCH_OFFERTODAY_COMMAND='["python3","/absolute/checkout/scripts/offertoday/offertoday.py"]'
@@ -65,7 +66,7 @@ export WORKBENCH_OFFERTODAY_COMMAND='["python3","/absolute/checkout/scripts/offe
 例如已有 Pi CLI、模型配置及经授权的浏览器工具时：
 
 ```bash
-export WORKBENCH_AGENT_COMMAND='["pi","--print","--no-session","@{taskFile}","只按任务包 instructions 执行。kind 为 MATERIAL_REVIEW 时，只分析给定 sources 并向 resultPath 写候选 JSON，不调用回调、不读取其他文件或网络；其他任务先阅读 reporterPath 帮助，按合同报告进度，缺资料报告 NEEDS_INPUT 后退出，不扩大权限。"]'
+export WORKBENCH_AGENT_COMMAND='["pi","--print","--no-session","@{taskFile}","只按任务包 instructions 执行。kind 为 MATERIAL_REVIEW 时，只分析给定 sources 并向 resultPath 写候选 JSON，不调用回调、不读取其他文件或网络；kind 为 CANDIDATE_READ 时，只在 source 与 limits 授权范围内读列表/必要完整详情，不登录、不联系、不上传、不点 Chat/Apply；遵守 instructions 并只向 resultPath 写只读岗位结果，无法执行资源上限或网站未知则返回 exception；其他任务先阅读 reporterPath 帮助，按合同报告进度，缺资料报告 NEEDS_INPUT 后退出，不扩大权限。"]'
 bash gradlew --no-daemon workbench --console=plain
 ```
 
@@ -94,6 +95,14 @@ bash gradlew --no-daemon workbench --console=plain
 - `POST /api/workbench/scope/authorizations/{id}/result`：为已消费动作追加一次 `{outcome:CONTACTED|SUCCEEDED|UNKNOWN|FAILED,evidence}`，可在撤销/到期后保存迟到证据，但不覆盖旧结果或任务回执，不授权下一阶段。已消费外发目标永久参与此序列的防重；只有同范围版本、同规范化岗位链接、同渠道/地区/语言/方向/所选简历/变换且已有 `CONTACTED` 结果的首次联系可进入一次附件阶段。版本变化后不能继续旧外发链。
 
 本票不接管旧人工任务，不替代单岗冻结与 claim，不清除 UNKNOWN 或执行真实副作用。后续消费者仍须接入原执行 Module，在每次不可逆动作前复核并消费授权、取得 claim，再收集真实回执；不能将单岗冻结授权用于旧批次。局部八图以 `liu-qingyuan/get_jobs#10` 发布合同为准，逻辑状态不要求同名 Java 类/持久枚举。
+
+## 候选读取 Interface（#11）
+
+- `GET /api/workbench/candidates` 和 `/state.candidates`：`jobs/runs`。候选状态为 `READY/INCOMPLETE/EXPIRED/REFUSED`，包含 `url/channel/platformJobId?`、来源列表、地区/语言/方向、全文、取得时间、范围版本及合并次数；同身份后续只返回卡片时保留已取得全文、原来源及原取得时间，单列 `lastSeenAt/lastReadComplete` 并在主屏提示未取得新全文；旧全文与本次新卡片描述共同核验当前范围，不丢弃任一侧排除词；`lastReadDescription` 保留并展示本次卡片描述，不冒充新全文。这是只读资料，不是申请、匹配或送达证明。
+- `POST /api/workbench/candidates/discover`：`{scopeVersion,sources:[{channel,url,region,language,direction}],maxPages?,jobsPerPage?,secondsPerPage?,modelTokensPerPage?}`。只支持 `OFFICIAL/OFFERTODAY`，最多 10 个固定来源；本次页面 1–20（默认 2），每页槽位 1–40（默认 5）、秒数 1–120（默认 30）、官网模型 token 1–100000（默认 1000）。详情属于本页资源；每页开始前按整页上限原子消费，重复/失败/不足不退款，OfferToday 不消费模型额度。每个候选再按真实内容重核范围，不接受模型额外 actions/confirmed/路径。仅剥离 `utm_* / ref / referrer / source / trackingid / gclid / fbclid` 推广参数，其余 opaque 查询身份保留；不改变旧申请防重。
+- 返回轮次为 `DISCOVERING → COMPLETED` 或 `CHECKPOINT`，附逐来源游标与可见事件；来源没有更多已知只读页面才标记结束，不承诺全站覆盖。`{scopeVersion,runId,...本次资源上限}` 继续旧断点；来源不变、当前范围重新核验、累计预算不重置。进程中断后保留已存完整页、恢复 CHECKPOINT，不自动重试或启动其他渠道。
+- 官网命令收到 `kind=CANDIDATE_READ`、`source`（本页 URL 和 cursor）、`limits`（四个计量）、`instructions/resultPath`；没有材料、申请任务、回调 token 或 claim。可信命令必须能限制实际模型消耗/读取来源，否则返回 `{exception:原因}`；本机程序不是沙箱。只写 `{jobs:[{url,title,company,description,descriptionComplete,available?}],nextUrl?,cursor?,note?}`，每页不超过已授候选槽，结果最大 2MB。完整 JD 需正向 `descriptionComplete` 且至少 120 字符，超过 30000 字符拒绝；仅标题/卡片不冒充完整描述。下一页仍按当前精确来源/渠道重核，未授权不启动进程。
+- OfferToday 使用现有已附着会话，固定已知原生客户端版本，独立 `candidate_page` 只调用公开 `get_getJobDetail`，不打开聊天/附件选择器。`jobDesc` 非已支持全文 schema 时保留 INCOMPLETE，不猜测字段或使用投递按钮探查；只遍历当前已加载卡片的有界游标，尚未加载的远端分页不猜测。没会话、版本变化、身份不符或当前有未保存草稿/弹窗均为可见例外。真实只读采样另需授权。
 
 ## 执行器报告合同
 
@@ -137,7 +146,7 @@ cd front
 node node_modules/next/dist/bin/next build
 ```
 
-Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9 的打包应用冒烟：
+Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9–#11 的打包应用冒烟：
 
 ```bash
 # 先用正常配置构建；不会把测试端口/fake 配置编入正式产物。
@@ -145,6 +154,6 @@ bash gradlew --no-daemon test bootJar -PrebuildFrontend -x installPatchrightDriv
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/baseline-smoke.mjs
 ```
 
-脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史；共 5 个范围版本、0 任务、0 外发。输出 `baseline.png`、`scope.png` 的临时证据目录与计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
+脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；共 6 个范围版本、3 候选（2 完整 JD）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png` 的临时证据目录与计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。

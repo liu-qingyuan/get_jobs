@@ -77,6 +77,18 @@ class DiscoveryCLITest(unittest.TestCase):
                 self.assertEqual(0, main(['discover']))
                 browser.assert_called_once_with(existing, 'fixture-only')
 
+    def test_bounded_candidate_command_uses_only_read_operation_and_writes_result_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); task = root / 'read.json'; result = root / 'result.json'
+            task.write_text(json.dumps({'kind':'CANDIDATE_READ','source':{'channel':'OFFERTODAY',
+                'url':'https://www.offertoday.com/hk/search?q=fixture','cursor':''},
+                'limits':{'candidates':2,'seconds':10,'modelTokens':0,'outbound':0},'resultPath':str(result)}))
+            with patch('offertoday._connection', return_value=(root, 'fixture-only')), patch('offertoday.ExistingBrowserAdapter') as browser, patch('builtins.print'):
+                browser.return_value.action.return_value = {'jobs':[], 'cursor':'', 'nextUrl':''}
+                self.assertEqual(0, main(['read-candidates', str(task)]))
+                browser.return_value.action.assert_called_once_with('candidate_page', sourceUrl='https://www.offertoday.com/hk/search?q=fixture', maxJobs=2, cursor='')
+                self.assertEqual([], json.loads(result.read_text())['jobs'])
+
     def test_connect_explicitly_attaches_extension_and_writes_private_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

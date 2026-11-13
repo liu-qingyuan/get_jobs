@@ -164,12 +164,27 @@ export interface ScopeWorkspace {
   }>
 }
 
+export interface CandidateJob {
+  id: string; channel: Channel; region: Region; language: Language; direction: Direction
+  company: string; title: string; url: string; description: string; platformJobId?: string
+  status: 'READY' | 'INCOMPLETE' | 'EXPIRED' | 'REFUSED'
+  scopeVersion: number; sourceUrl: string; retrievedAt: string; firstSeenAt: string; discoveries: number; reasons: string[]
+  descriptionComplete: boolean; lastReadComplete: boolean; lastSeenAt: string; lastReadDescription?: string
+}
+export interface CandidateRun {
+  id: string; status: 'DISCOVERING' | 'CHECKPOINT' | 'COMPLETED'; scopeVersion: number; pagesRead: number; updatedAt: string
+  events: Array<{ code: string; channel: string; sourceUrl: string; message: string; at: string }>
+  sources: Array<{ channel: Channel; url: string; nextUrl: string; cursor: string; done: boolean }>
+}
+export interface CandidateWorkspace { jobs: CandidateJob[]; runs: CandidateRun[] }
+
 export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
   tasks: Task[]
   materials: { sources: MaterialSource[]; reviews: MaterialReview[] }
   scope: ScopeWorkspace
+  candidates: CandidateWorkspace
   runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean }
   platforms: {
     bossUrl: string

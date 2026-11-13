@@ -18,8 +18,29 @@ async page => {
     password: new URL(location.href).password, port: location.port, pathname: location.pathname }));
   if (here.protocol !== 'https:' || here.hostname !== 'www.offertoday.com' ||
       here.username || here.password || here.port) return blocked('Current tab is not HTTPS OfferToday');
-  if (input.operation === 'discover') {
-    if (!jobPattern.test(here.pathname) && !/^\/hk\/(?:recommend|search)[^/]*(?:\/|$)/i.test(here.pathname))
+  const candidateRead = input.operation === 'candidate_page';
+  if (candidateRead) {
+    let source;
+    try { source = await page.evaluate(value => { const u = new URL(value); return { origin: u.origin, username: u.username,
+      password: u.password, hash: u.hash, pathname: u.pathname, href: u.href }; }, input.sourceUrl); }
+    catch (_) { return blocked('Invalid read-only source'); }
+    if (source.origin !== origin || source.username || source.password || source.hash ||
+        !/^\/hk\/(?:recommend|search)[^/]*(?:\/|$)/.test(source.pathname) ||
+        !Number.isInteger(input.maxJobs) || input.maxJobs < 1 || input.maxJobs > 40 ||
+        !/^(?:|0|[1-9][0-9]{0,2})$/.test(input.cursor || '')) return blocked('Read-only source or limits are invalid');
+    const unsaved = await page.evaluate(() => [...document.querySelectorAll('[contenteditable="true"], [role="dialog"], [aria-modal="true"]')]
+      .some(el => el.getClientRects().length && (el.matches('[contenteditable="true"]') ? !!el.textContent.trim() : true)));
+    if (unsaved) return blocked('Current page has a draft or dialog; read-only discovery will not discard it');
+    if (page.url() !== source.href) {
+      try { await page.goto(source.href, { waitUntil: 'domcontentloaded', timeout: budget(10000) }); }
+      catch (_) { return blocked('Read-only list could not be loaded'); }
+    }
+    if (page.url() !== source.href) return blocked('Read-only list redirected to an unapproved source');
+    const known = await page.evaluate(() => [...document.scripts].some(s => new URL(s.src || location.href).pathname === '/static/js/index.BKzheqN_.js'));
+    if (!known) return blocked('OfferToday read-only client version is not recognized');
+  }
+  if (input.operation === 'discover' || candidateRead) {
+    if (!candidateRead && !jobPattern.test(here.pathname) && !/^\/hk\/(?:recommend|search)[^/]*(?:\/|$)/i.test(here.pathname))
       return blocked('Open a HK job, recommendation or search page first');
     const observed = await page.evaluate(() => {
       const text = node => (node?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 30000);
@@ -45,7 +66,31 @@ async page => {
       seen.add(url);
       if (!card.title || !card.company) return blocked('Loaded job has incomplete public title/company');
       jobs.push({ url, title: card.title, company: card.company, description: card.description });
-      if (jobs.length === 40) break;
+      if (jobs.length === (candidateRead ? 200 : 40)) break;
+    }
+    if (candidateRead) {
+      const offset = Number(input.cursor || 0), selected = jobs.slice(offset, offset + input.maxJobs);
+      if (!jobs.length && !observed.search) return blocked('No recognized read-only job list');
+      const detailed = await page.evaluate(async ({ selected, origin }) => {
+        const entry = await import('/static/js/index.BKzheqN_.js');
+        if (typeof entry.I?.search?.get_getJobDetail !== 'function') return null;
+        const records = [];
+        for (const card of selected) {
+          const jobId = card.url.split('/').pop();
+          const job = await entry.I.search.get_getJobDetail({ encryptJobId: jobId });
+          // Only the public detail reader is used: never chat state, account attachments or Chat/Apply.
+          if (location.origin !== origin || job?.jobId !== jobId || job.jobName !== card.title ||
+              ![job.companyName, job.brandName].includes(card.company)) return null;
+          const description = typeof job.jobDesc === 'string' ? job.jobDesc.replace(/<[^>]*>/g, ' ').trim() : '';
+          records.push({ ...card, description: description.slice(0, 30000),
+            descriptionComplete: description.length >= 120 && description.length <= 30000, available: job.isClosed !== true });
+        }
+        return records;
+      }, { selected, origin }).catch(() => null);
+      if (!detailed) return blocked('OfferToday public detail Interface or identity is unrecognized');
+      return { status: 'ok', jobs: detailed, nextUrl: '',
+        cursor: offset + selected.length < jobs.length ? String(offset + selected.length) : '',
+        note: 'Read-only loaded list and native public details; no Chat/Apply, login, upload or send. No guessed pagination beyond loaded cards.' };
     }
     return jobs.length || observed.search ? { status: 'ok', jobs } : blocked('No recognized loaded job or search view');
   }

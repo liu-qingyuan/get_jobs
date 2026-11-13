@@ -20,6 +20,8 @@ public class WorkbenchController {
     @GetMapping("/state") public ObjectNode state() {
         var state = service.state(); state.set("runtime", runner.runtime()); return state;
     }
+    @GetMapping("/candidates") public ObjectNode candidates() { return service.candidates.workspace(); }
+    @PostMapping("/candidates/discover") public ObjectNode discoverCandidates(@RequestBody ObjectNode input) { return runner.discoverCandidates(input); }
     @GetMapping("/scope") public ObjectNode scope() { return service.scope.workspace(); }
     @PostMapping("/scope") public ObjectNode saveScope(@RequestBody ObjectNode input) { return service.scope.save(input); }
     @PostMapping("/scope/{version}/{operation:pause|resume|revoke}") public ObjectNode changeScope(@PathVariable int version, @PathVariable String operation) { return service.scope.change(version, operation); }
