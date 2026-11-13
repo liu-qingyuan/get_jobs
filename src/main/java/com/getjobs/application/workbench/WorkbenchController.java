@@ -20,6 +20,13 @@ public class WorkbenchController {
     @GetMapping("/state") public ObjectNode state() {
         var state = service.state(); state.set("runtime", runner.runtime()); return state;
     }
+    @GetMapping("/scope") public ObjectNode scope() { return service.scope.workspace(); }
+    @PostMapping("/scope") public ObjectNode saveScope(@RequestBody ObjectNode input) { return service.scope.save(input); }
+    @PostMapping("/scope/{version}/{operation:pause|resume|revoke}") public ObjectNode changeScope(@PathVariable int version, @PathVariable String operation) { return service.scope.change(version, operation); }
+    @PostMapping("/scope/authorizations/{id}/result") public ObjectNode scopeResult(@PathVariable String id, @RequestBody ObjectNode input) { return service.scope.result(id, input); }
+    @PostMapping("/scope/preview") public ObjectNode previewScope(@RequestBody ObjectNode input) { return service.scope.preview(input); }
+    @PostMapping("/scope/authorize") public ObjectNode authorizeScope(@RequestBody ObjectNode input) { return service.scope.authorize(input); }
+    @PostMapping("/scope/authorizations/{id}/consume") public ObjectNode consumeScope(@PathVariable String id) { return service.scope.consume(id); }
     @PostMapping("/baseline/review") public ObjectNode reviewMaterials(@RequestBody ObjectNode input) { return runner.reviewMaterials(input); }
     @PostMapping("/baseline/reviews/{id}/confirm") public ObjectNode confirmBaseline(@PathVariable String id, @RequestBody ObjectNode input) { return service.materials.confirm(id, input); }
     @GetMapping("/baseline") public ObjectNode baseline(@RequestParam String region, @RequestParam String language,

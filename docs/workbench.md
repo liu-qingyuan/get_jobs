@@ -34,10 +34,11 @@ bash gradlew --no-daemon workbench -x installPatchrightDriver \
 
 1. **个人资料 → 已有材料一次核对**：粘贴或选择有权提供的 TXT/MD 材料，明确通用/香港/内地作用域，并可勾选已登记来源及四类独立简历/岗位版。点击整理后，展示来源原文、哈希、重复、矛盾及缺失证据；集中勾选可核实事实和已经亲自审核的简历，一次确认可用子集。其余项仍待核实。原材料变化时另存来源版本，失去旧依据的事实暂停使用；旧确认与任务快照不改写。未变事实直接复用，同版本分析缓存命中不调用模型，页面轮询也不调用模型。PDF/DOCX 无正文时明确待补文本，不假装已提取或核准。仍可预览 JobsDB 已知资料（需显式点击）及逐条手动澄清；不自动读取旧资料、目录或私有基线。未确认项不进入授权快照，确认基线不授权外发。
 2. **简历版本**：分别上传港区/国内的中文/英文版本；PDF、DOCX 或文本，最大 10MB。每次保存是新版本，审核批准只影响该版本。文本草稿不会自动变成可投的 PDF，需人工完成格式检查并上传最终附件。
-3. **创建岗位任务**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
-4. **官网/简历 AI**：必须另外配置执行器，批准不等于开始执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
-5. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
-6. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
+3. **求职范围**：在新页签一次选定精确来源、渠道、地区/语言/方向、岗位选择词和排除词、已确认事实、独立核准简历、变换、动作、累计预算和有效期。默认只读发现/匹配/准备，无外发和项目执行许可。先保存再用同一代表性岗位预检，查看当前范围版本、策略来源和所有拒绝原因。可暂停、恢复、变更、撤销及回读历史；这些操作均产生新版本，旧未执行授权不复活。新版本补充额度应提高累计上限，不清零已耗量。范围本身尚不启动候选队列或执行器（由后续 Tickets 接入）；不将 Boss/JobsDB 原批次显示成已受控接通。
+4. **创建岗位任务**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
+5. **官网/简历 AI**：必须另外配置执行器，批准不等于开始执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
+6. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
+7. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
 
 JobsDB 页只读显示最近 100 条原账本并保留 CLI 交接。**工作台不通过 HTTP 直接启动 Boss/JobsDB 的交互式 apply 或批次**；一个岗位的批准不是整个批次的授权。OfferToday 是另行受控的单岗脚本路径，使用原审核/回执合同，不触及 Boss/JobsDB 批次。原平台配置、在线简历和 Cookie 不会因工作台资料更新自动改写。
 
@@ -79,6 +80,20 @@ bash gradlew --no-daemon workbench --console=plain
 - `POST /api/workbench/baseline/reviews/{id}/confirm`：`{candidateIds:[],resumeIds:[]}`，只确认当前材料的可核对子集和本次明确展示的独立简历。冲突、缺证据或过期材料拒绝，整次事务不留下半确认；未选择项仍待核实。修改/删除事实的确认依据保留在 `GET /api/workbench/facts/{id}/history`。
 - `GET /api/workbench/baseline?region=HK&language=en&site=careers.example.com`：后续准备的只读 Interface。返回 `version`、当前适用已确认 `facts` 与匹配地区/语言的核准 `resumes`；`site` 可省略，不能据此读取目录或其他资料。文件哈希不符返回阻塞，不输出可用附件。事实是经历/联系方式等，不因简历语言自动翻译或改写；简历语言筛选独立进行。
 - `/state` 包含核对记录与来源版本的可见摘要，不在轮询中运行模型。界面可读旧核对记录和事实确认历史。所有材料、日志和来源哈希只存当前隔离工作台，不覆盖原件；开发必须另用临时目录及 fake 命令。可识别凭据/指令行只保留隔离提示，不作为事实；外部命令是用户信任的本机程序，并非安全沙箱。
+
+## 范围策略 Interface（#10）
+
+- `POST /api/workbench/scope`：用户一次确认新范围或变更。字段为 `channels`（`OFFICIAL/OFFERTODAY/BOSS/JOBSDB`）、`hosts`（小写精确域名，无通配符/路径/端口）、`regions`、`languages`、`directions`、`includeTerms`、`excludeTerms`、`factIds`、`resumeIds`、`transformations`（`ORIGINAL/REORDER/REPHRASE`）、`actions`、`budgets`、`expiresAt`。数组最多 100 项。选择词任一命中公司/标题/JD 即符合，排除词任一命中即拒绝，均为不区分大小写子串，不执行正则/指令。允许变换不得新增主张或覆盖其他地区/语言版本。事实必须当前已确认，简历必须独立核准并通过附件哈希校验；仅上传新简历不会自动替换所选不可变版本。
+- `actions` 省略时为 `DISCOVER/MATCH/PREPARE`，外发须明确选择 `APPLY/CONTACT/SEND_CV`。`PROJECT_EXECUTE` 和成果入库不支持，不得借用其他动作权限。`budgets` 的 `candidates/modelTokens/seconds/outbound` 必须全部为 0–1000000000 的整数，`expiresAt` 是未来 90 天内的 ISO instant。已有范围时必须提供当前 `expectedVersion`，陈旧编辑拒绝；固定材料由服务端读取，模型的额外 confirmed/source/actions 字段不能改变既存范围。
+- `GET /api/workbench/scope`（也包含在 `/state.scope`）：返回 `current/history/usage/authorizations`。当前 `status` 是用户生命周期，`effectiveStatus` 还反映到期、材料变化或所有允许动作均预算不足；历史版本仅追溯，不能作为当前许可。预算累计属于此工作台范围序列，新版本/暂停/重启均不清零。
+- `POST /api/workbench/scope/{version}/pause|resume|revoke`：仅接受当前版本。每次生成新版本；已撤销不可恢复，只能重新确认，过期/材料变化的暂停范围须重新设置。
+- `POST /api/workbench/scope/preview`：`{scopeVersion,action,target,cost?}`。`target` 包括单个 `url/channel/region/language/direction/company/title/description/resumeId/transformation`；发现/匹配可不选简历；若携带简历，也须为所选且适用的版本（包括岗位专属链接）。备料/外发必须选择适用简历。返回 `allowed/reasons/reasonCodes/source=SCOPE_POLICY/scopeVersion/cost`；不保存授权、不扣量、不执行。来源精确匹配且不接受非标准端口，OfferToday 不得换成官网渠道。
+- `POST /api/workbench/scope/authorize`：同一输入，允许时额外返回不可变 `authorization`（`id/scopeVersion/request/materials/source/status=FROZEN`）。服务端固定单目标、成本与仅适用的事实/所选简历，不将其他地区/网站事实交给消费者。不是人工逐岗批准，不启动任务，不获取 claim。
+- `POST /api/workbench/scope/authorizations/{id}/consume`：只按冻结 ID 消费，调用者不能替换目标或材料。事务内重查当前范围版本/状态/有效期、全部所选材料、目标去重及所有预算，允许才记 `CONSUMED` 并扣量；并发不会超支。拒绝返回 `allowed=false` 和原因，重复消费返回 409。冻结不预留预算，因此消费者必须检查**本次消费**成功，不能依赖早先的预检或冻结结果。
+- `cost` 代表本次**所授最大资源**，不是执行后自述的消耗；四个计量可提高不能绕过动作底线：每动作至少 1 秒，发现至少 1 候选，匹配/备料至少 1 token，每个不可逆阶段至少 1 次外发。消费后不因失败退款。可信编排消费者负责把实际 Adapter 的候选数、token 和时限约束在申请的额度内，本票不运行 Adapter；不能由模型自行宣布免费。网站读取或模型结果不是修改范围的用户授权。
+- `POST /api/workbench/scope/authorizations/{id}/result`：为已消费动作追加一次 `{outcome:CONTACTED|SUCCEEDED|UNKNOWN|FAILED,evidence}`，可在撤销/到期后保存迟到证据，但不覆盖旧结果或任务回执，不授权下一阶段。已消费外发目标永久参与此序列的防重；只有同范围版本、同规范化岗位链接、同渠道/地区/语言/方向/所选简历/变换且已有 `CONTACTED` 结果的首次联系可进入一次附件阶段。版本变化后不能继续旧外发链。
+
+本票不接管旧人工任务，不替代单岗冻结与 claim，不清除 UNKNOWN 或执行真实副作用。后续消费者仍须接入原执行 Module，在每次不可逆动作前复核并消费授权、取得 claim，再收集真实回执；不能将单岗冻结授权用于旧批次。局部八图以 `liu-qingyuan/get_jobs#10` 发布合同为准，逻辑状态不要求同名 Java 类/持久枚举。
 
 ## 执行器报告合同
 
@@ -130,6 +145,6 @@ bash gradlew --no-daemon test bootJar -PrebuildFrontend -x installPatchrightDriv
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/baseline-smoke.mjs
 ```
 
-脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，输出截图路径和计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
+脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史；共 5 个范围版本、0 任务、0 外发。输出 `baseline.png`、`scope.png` 的临时证据目录与计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。

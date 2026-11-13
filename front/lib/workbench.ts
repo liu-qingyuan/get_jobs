@@ -118,11 +118,58 @@ export interface MaterialReview {
   missing: string[]
 }
 
+export type ScopeAction = 'DISCOVER' | 'MATCH' | 'PREPARE' | 'APPLY' | 'CONTACT' | 'SEND_CV'
+export type ScopeMeter = 'candidates' | 'modelTokens' | 'seconds' | 'outbound'
+export interface ScopeConfig {
+  expectedVersion?: number
+  channels: string[]
+  hosts: string[]
+  regions: string[]
+  languages: string[]
+  directions: string[]
+  includeTerms: string[]
+  excludeTerms: string[]
+  factIds: string[]
+  resumeIds: string[]
+  transformations: string[]
+  actions: ScopeAction[]
+  budgets: Record<ScopeMeter, number>
+  expiresAt: string
+}
+export interface ScopePolicy extends ScopeConfig {
+  id: string
+  version: number
+  status: 'ACTIVE' | 'PAUSED' | 'REVOKED'
+  effectiveStatus?: string
+  source: 'USER_SCOPE'
+  createdAt: string
+  materials: { facts: Fact[]; resumes: Resume[] }
+}
+export interface ScopeDecision {
+  allowed: boolean
+  source: 'SCOPE_POLICY'
+  scopeVersion?: number
+  reasons: string[]
+  reasonCodes: string[]
+  cost?: Record<ScopeMeter, number>
+}
+export interface ScopeWorkspace {
+  current?: ScopePolicy
+  history: ScopePolicy[]
+  usage: Record<ScopeMeter, number>
+  authorizations: Array<{
+    id: string; scopeVersion: number; status: 'FROZEN' | 'CONSUMED'; source: 'SCOPE_POLICY'
+    request: { action: ScopeAction; target: { title: string; url: string } }
+    result?: { outcome: string; evidence: string }
+  }>
+}
+
 export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
   tasks: Task[]
   materials: { sources: MaterialSource[]; reviews: MaterialReview[] }
+  scope: ScopeWorkspace
   runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean }
   platforms: {
     bossUrl: string

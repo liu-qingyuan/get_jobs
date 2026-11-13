@@ -205,6 +205,38 @@ final class WorkbenchMaterials {
         });
     }
 
+    /** Immutable, explicitly selected material versions for a scope; ownership stays with the materials Module. */
+    ObjectNode scopeSelection(Connection c, ObjectNode input) throws Exception {
+        var selected = object(); var facts = selected.putArray("facts"); var resumes = selected.putArray("resumes");
+        for (String id : ids(input, "factIds")) {
+            var fact = store.get(c, "fact", id);
+            require(fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean(), "范围只能引用当前已确认事实");
+            facts.add(fact);
+        }
+        for (String id : ids(input, "resumeIds")) {
+            var resume = store.get(c, "resume", id);
+            require(resume.path("approved").asBoolean(), "范围只能引用独立核准的简历版本");
+            service.verifyResume(resume); resumes.add(resume);
+        }
+        return selected;
+    }
+
+    ObjectNode scopeContext(Connection c, ObjectNode scope, JsonNode target) throws Exception {
+        var selected = scopeSelection(c, scope); var context = object();
+        var facts = context.putArray("facts"); var resumes = context.putArray("resumes");
+        String site = java.net.URI.create(target.path("url").asText()).getHost();
+        for (var fact : selected.path("facts")) if (applicable(fact.path("scope").asText(), target.path("region").asText(), site)) facts.add(fact);
+        for (var resume : selected.path("resumes")) if (scopeResumeApplies(resume, target)) resumes.add(resume);
+        return context;
+    }
+
+    boolean scopeResumeApplies(JsonNode resume, JsonNode target) {
+        return resume.path("id").asText().equals(target.path("resumeId").asText().trim())
+                && resume.path("region").asText().equals(target.path("region").asText().trim())
+                && resume.path("language").asText().equals(target.path("language").asText().trim())
+                && (resume.path("jobUrl").asText().isEmpty() || targetKey(resume.path("jobUrl").asText()).equals(targetKey(target.path("url").asText().trim())));
+    }
+
     ObjectNode workspace(Connection c) throws Exception {
         var sources = store.list(c, "material");
         sources.forEach(s -> ((ObjectNode) s).remove("content"));

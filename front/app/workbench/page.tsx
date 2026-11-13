@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import PageHeader from '@/app/components/PageHeader'
 import MaterialBaseline from './MaterialBaseline'
+import ScopePolicyPanel from './ScopePolicy'
 import {
   type Channel, type EventType, type Fact, type FactInput, type Language, type OfferTodayDiscovery, type Region, type Resume,
   type Task, type TaskInput, type TaskKind, type TaskState, type WorkbenchState,
@@ -502,7 +503,8 @@ export default function WorkbenchPage() {
         </section>}
 
         <Tabs value={tab} onValueChange={value => { if (value !== 'resumes') setResumeFile(null); setTab(value) }} className="space-y-4">
-          <TabsList className="h-auto flex-wrap gap-1"><TabsTrigger value="tasks">任务与进展</TabsTrigger><TabsTrigger value="resumes">简历版本</TabsTrigger><TabsTrigger value="facts">个人资料</TabsTrigger><TabsTrigger value="platforms">平台入口</TabsTrigger></TabsList>
+          <TabsList className="h-auto flex-wrap gap-1"><TabsTrigger value="tasks">任务与进展</TabsTrigger><TabsTrigger value="resumes">简历版本</TabsTrigger><TabsTrigger value="facts">个人资料</TabsTrigger><TabsTrigger value="scope">求职范围</TabsTrigger><TabsTrigger value="platforms">平台入口</TabsTrigger></TabsList>
+          <TabsContent value="scope"><ScopePolicyPanel state={state} working={!!working} act={act} /></TabsContent>
           <TabsContent value="tasks" className="space-y-4">
             <section ref={newTaskNode} className={panel} aria-labelledby="new-task-title">
               <h2 id="new-task-title" className="text-lg font-semibold">新建任务</h2>

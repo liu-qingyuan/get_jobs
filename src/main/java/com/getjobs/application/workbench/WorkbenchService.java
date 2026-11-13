@@ -21,6 +21,7 @@ public final class WorkbenchService {
     final Path jobsdb;
     private final WorkbenchLegacy legacy;
     final WorkbenchMaterials materials;
+    final WorkbenchScopePolicy scope;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this.store = new WorkbenchStore(root, json);
@@ -28,6 +29,7 @@ public final class WorkbenchService {
         this.jobsdb = jobsdb.toAbsolutePath().normalize();
         this.legacy = new WorkbenchLegacy(this.jobsdb, json);
         this.materials = new WorkbenchMaterials(this);
+        this.scope = new WorkbenchScopePolicy(this);
     }
 
     public ObjectNode state() {
@@ -36,6 +38,7 @@ public final class WorkbenchService {
             result.set("facts", store.list(c, "fact"));
             result.set("resumes", store.list(c, "resume"));
             result.set("materials", materials.workspace(c));
+            result.set("scope", scope.workspace(c));
             var tasks = store.list(c, "task");
             tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
             result.set("tasks", tasks);
@@ -251,7 +254,7 @@ public final class WorkbenchService {
         });
     }
 
-    private void duplicate(Connection c, ObjectNode task) throws Exception {
+    void duplicate(Connection c, ObjectNode task) throws Exception {
         if (!task.path("kind").asText().equals("APPLICATION")) return;
         if (legacy.attempted(task.path("url").asText())) throw new WorkbenchException(409, "JobsDB 原账本已有此岗位的提交记录，禁止重复申请");
         for (var other : store.list(c, "task")) {
@@ -459,7 +462,7 @@ public final class WorkbenchService {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
         catch (Exception e) { throw new IllegalStateException("无法校验材料", e); }
     }
-    private static String targetKey(String value) {
+    static String targetKey(String value) {
         String offerToday = OfferTodayTarget.identity(value);
         if (offerToday != null) return offerToday;
         URI uri = URI.create(value).normalize();
