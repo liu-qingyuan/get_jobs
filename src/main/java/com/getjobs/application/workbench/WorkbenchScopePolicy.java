@@ -237,6 +237,47 @@ final class WorkbenchScopePolicy {
         var request = object().put("scopeVersion", version).put("action", action); request.set("target", target);
         return assess(c, request, false, reserved, target.path("lastReadDescription").asText());
     }
+    ObjectNode executionDecision(Connection c, int version, ObjectNode target, String action, String taskId, boolean reserved) throws Exception {
+        var request = object().put("scopeVersion", version).put("action", action); request.set("target", target);
+        return assess(c, request, false, reserved, target.path("lastReadDescription").asText(), false, taskId);
+    }
+
+    /** Reserve the complete executor envelope even if preflight fails without a send. */
+    ObjectNode reserveExecutionResources(Connection c, ObjectNode task, ObjectNode record, long seconds, long tokens) throws Exception {
+        String action = task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
+        var decision = executionDecision(c, record.path("scopeVersion").asInt(), (ObjectNode) record.path("target"), action, task.path("id").asText(), false);
+        require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
+        var used = usage(c); var scope = latest(c);
+        require(seconds <= scope.path("budgets").path("seconds").asLong() - used.path("seconds").asLong()
+                && tokens <= scope.path("budgets").path("modelTokens").asLong() - used.path("modelTokens").asLong(), "累计预算不足：单岗执行时间/模型上限；请补充后恢复");
+        used.put("seconds", used.path("seconds").asLong() + seconds).put("modelTokens", used.path("modelTokens").asLong() + tokens);
+        store.save(c, "scope_usage", used);
+        var reservation = object().put("id", id()).put("taskId", task.path("id").asText()).put("scopeVersion", record.path("scopeVersion").asInt()).put("source", "SCOPE_POLICY").put("createdAt", now());
+        reservation.putObject("limits").put("seconds", seconds).put("modelTokens", tokens);
+        store.save(c, "scope_execution_resource", reservation); return reservation;
+    }
+
+    /** Called inside the task claim transaction, never with caller-supplied task identity. */
+    ObjectNode claimExecution(Connection c, ObjectNode task, ObjectNode record, String action) throws Exception {
+        var request = object().put("scopeVersion", record.path("scopeVersion").asInt()).put("action", action);
+        request.set("target", record.path("target"));
+        request.putObject("cost").put("outbound", 1);
+        var decision = assess(c, request, false, false, record.path("target").path("lastReadDescription").asText(), false, task.path("id").asText());
+        require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
+        var used = usage(c);
+        for (String meter : METERS) used.put(meter, used.path(meter).asLong() + decision.path("cost").path(meter).asLong());
+        store.save(c, "scope_usage", used);
+        var grant = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", record.path("scopeVersion").asInt())
+                .put("taskId", task.path("id").asText()).put("status", "CONSUMED").put("createdAt", now()).put("consumedAt", now());
+        grant.set("request", request); store.save(c, "scope_authorization", grant); return grant;
+    }
+    void executionResult(Connection c, String id, String outcome, String evidence) throws Exception {
+        var grant = store.get(c, "scope_authorization", id);
+        if (!grant.has("result")) {
+            grant.set("result", object().put("outcome", outcome).put("evidence", evidence).put("at", now()).put("source", "consumer"));
+            store.save(c, "scope_authorization", grant);
+        }
+    }
     ObjectNode reservePreparation(int version, ObjectNode target, int seconds, int tokens) {
         var request = object().put("scopeVersion", version).put("action", "PREPARE"); request.set("target", target);
         request.putObject("cost").put("seconds", seconds).put("modelTokens", tokens).put("candidates", 0).put("outbound", 0);
@@ -268,6 +309,9 @@ final class WorkbenchScopePolicy {
         return assess(c, input, sourceRead, reserved, observedDescription, false);
     }
     private ObjectNode assess(Connection c, ObjectNode input, boolean sourceRead, boolean reserved, String observedDescription, boolean currentMatch) throws Exception {
+        return assess(c, input, sourceRead, reserved, observedDescription, currentMatch, "scope-target");
+    }
+    private ObjectNode assess(Connection c, ObjectNode input, boolean sourceRead, boolean reserved, String observedDescription, boolean currentMatch, String taskId) throws Exception {
         var decision = object().put("allowed", false).put("source", "SCOPE_POLICY");
         var reasons = decision.putArray("reasons"); var codes = decision.putArray("reasonCodes");
         var scope = latest(c);
@@ -277,7 +321,10 @@ final class WorkbenchScopePolicy {
         if (!scope.path("status").asText().equals("ACTIVE")) deny(reasons, codes, "INACTIVE", "范围已暂停或撤销");
         if (!Instant.parse(scope.path("expiresAt").asText()).isAfter(Instant.now())) deny(reasons, codes, "EXPIRED", "范围已到期");
         String action = text(input, "action", 50, true);
-        var cost = cost(action, input.path("cost")); decision.set("cost", cost);
+        var cost = cost(action, input.path("cost"));
+        // Only internal task-bound execution may use its already charged time/model envelope.
+        if (OUTBOUND.contains(action)) for (var task : store.list(c, "task")) if (task.path("id").asText().equals(taskId) && task.has("executionResourceId")) cost.put("seconds", 0);
+        decision.set("cost", cost);
         var used = usage(c);
         for (String meter : METERS) if (!reserved && cost.path(meter).asLong() > scope.path("budgets").path(meter).asLong() - used.path(meter).asLong())
             deny(reasons, codes, "BUDGET_EXHAUSTED", "累计预算不足：" + meter);
@@ -321,7 +368,7 @@ final class WorkbenchScopePolicy {
             }
         } catch (WorkbenchException e) { deny(reasons, codes, "MATERIAL_CHANGED", "所选事实或材料不可用：" + e.getMessage()); }
         if (OUTBOUND.contains(action)) {
-            try { service.duplicate(c, object().put("id", "scope-target").put("kind", "APPLICATION").put("url", link)); }
+            try { service.duplicate(c, object().put("id", taskId).put("kind", "APPLICATION").put("url", link)); }
             catch (WorkbenchException e) { deny(reasons, codes, "DUPLICATE", e.getMessage()); }
             boolean contacted = false;
             for (var prior : store.list(c, "scope_authorization")) {

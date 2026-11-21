@@ -9,13 +9,15 @@ from urllib.request import Request
 from urllib.error import HTTPError, URLError
 
 
-def report(bundle_path, event, message, evidence="", content=""):
+def report(bundle_path, event, message, evidence="", content="", *, action=""):
     bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
     endpoint = bundle["callbackUrl"]
     url = urlsplit(endpoint)
     if url.scheme != "http" or url.hostname not in {"localhost", "127.0.0.1", "::1"} or url.username or url.password:
         raise ValueError("Task callback must be local HTTP")
     payload = {"type": event, "message": message, "evidence": evidence}
+    if action:
+        payload["action"] = action
     if content:
         payload["content"] = content
     request = Request(endpoint, data=json.dumps(payload, ensure_ascii=False).encode(), method="POST",
@@ -37,11 +39,12 @@ def main(argv=None):
     parser.add_argument("event", choices=["PROGRESS", "NEEDS_INPUT", "FAILED", "SUBMITTING", "CONTACTED", "CV_DELIVERED", "SUBMITTED", "EMPLOYER_STATUS", "DRAFT"])
     parser.add_argument("message")
     parser.add_argument("--evidence", default="")
+    parser.add_argument("--action", choices=["APPLY", "CONTACT", "SEND_CV"], default="")
     parser.add_argument("--content-file", type=Path)
     args = parser.parse_args(argv)
     try:
         content = args.content_file.read_text(encoding="utf-8") if args.content_file else ""
-        result = report(args.bundle, args.event, args.message, args.evidence, content)
+        result = report(args.bundle, args.event, args.message, args.evidence, content, action=args.action)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (OSError, ValueError, KeyError, HTTPError, URLError):

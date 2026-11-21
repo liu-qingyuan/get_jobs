@@ -77,6 +77,8 @@ export interface Task {
   projectPath?: string
   projectPlan?: string
   state: TaskState
+  approvalSource?: 'SCOPE_POLICY'
+  packageId?: string
   events: TaskEvent[]
   employerStatus?: string
   employerCheckedAt?: string
@@ -201,6 +203,13 @@ export interface PreparationPackage {
   snapshot?: { resume: Resume; facts: Fact[]; initialMessage: string; initialMessageSha256: string; contactVerified?: boolean; contactFacts?: Fact[] }
 }
 
+export interface WorkflowCycle {
+  id: string; status: 'RUNNING' | 'CHECKPOINT' | 'PAUSED' | 'EXCEPTION' | 'PREPARED' | 'COMPLETED'
+  scopeVersion: number; stage?: string; updatedAt?: string
+  events: Array<{ code: string; message: string; at: string }>
+  entries: Array<{ candidateId: string; status: string; reason?: string; packageId?: string; taskId?: string; execution?: Task }>
+}
+
 export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
@@ -209,6 +218,7 @@ export interface WorkbenchState {
   scope: ScopeWorkspace
   candidates: CandidateWorkspace
   preparations: { packages: PreparationPackage[] }
+  workflow: { cycles: WorkflowCycle[] }
   runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean }
   platforms: {
     bossUrl: string

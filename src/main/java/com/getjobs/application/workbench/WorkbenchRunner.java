@@ -21,7 +21,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     private volatile Process process;
     private FileChannel lockChannel;
     private FileLock lock;
-    private boolean closed;
+    private volatile boolean closed;
 
     public WorkbenchRunner(WorkbenchService service, List<String> command, String callback, long timeoutSeconds) {
         this(service, command, List.of(), callback, timeoutSeconds);
@@ -37,6 +37,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             lockChannel = FileChannel.open(service.store.root.resolve("runner.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             lock = lockChannel.tryLock();
             if (lock == null) throw new IllegalStateException("已有工作台使用此数据目录");
+            recoverProcessLease();
             service.recoverInterrupted();
         } catch (Exception e) {
             try { if (lock != null) lock.release(); if (lockChannel != null) lockChannel.close(); } catch (Exception ignored) { }
@@ -55,11 +56,47 @@ public final class WorkbenchRunner implements AutoCloseable {
         if (offerToday ? offerTodayCommand.isEmpty() : command.isEmpty()) throw new WorkbenchException(409,
                 offerToday ? "尚未配置 OfferToday 脚本；不能以平台入口存在冒充可执行" : "尚未配置官网 AI 执行器；可复制材料交接，但不能声称自动执行");
         if (!busy.compareAndSet(false, true)) throw new WorkbenchException(409, "已有执行任务运行中，请等待或处理人工阻塞");
+        try {
+            Process child = launch(id);
+            executor.submit(() -> {
+                try { waitForTask(id, child); }
+                finally { busy.set(false); }
+            });
+            return service.task(id);
+        } catch (RuntimeException e) { busy.set(false); throw e; }
+    }
+
+    /** Keeps the same exclusive slot across every stage and every single-job child. */
+    public synchronized ObjectNode startCycle(ObjectNode input, String cycleId) {
+        if (closed || !busy.compareAndSet(false, true)) throw new WorkbenchException(409, "执行器已关闭或正在处理其他任务");
+        try {
+            var cycle = service.workflow.begin(input, cycleId);
+            executor.submit(() -> {
+                try {
+                    service.workflow.advance(cycle.path("id").asText(), this::readCandidatePage, this::analyzeCandidates, id -> {
+                        if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止；保留安全断点");
+                        waitForTask(id, launch(id));
+                    });
+                } finally { busy.set(false); }
+            });
+            return cycle;
+        } catch (RuntimeException e) { busy.set(false); throw e; }
+    }
+
+    private void waitForTask(String id, Process child) {
+        try { if (!child.waitFor(service.task(id).path("executionSeconds").asLong(timeoutSeconds), TimeUnit.SECONDS)) stopProcess(child); }
+        catch (InterruptedException e) { stopProcess(child); Thread.currentThread().interrupt(); }
+        finally { try { releaseProcess(); } finally { service.processEnded(id); } }
+    }
+
+    private Process launch(String id) {
+        boolean offerToday = service.task(id).path("channel").asText().equals("OFFERTODAY");
+        if (offerToday ? offerTodayCommand.isEmpty() : command.isEmpty()) throw new WorkbenchException(409, "此渠道尚未配置单岗执行器");
         boolean claimed = false;
         Process launched = null;
         try {
             String token = UUID.randomUUID().toString() + UUID.randomUUID();
-            var bundle = service.beginTask(id, token, callback);
+            var bundle = service.beginTask(id, token, callback, timeoutSeconds);
             claimed = true;
             Path directory = service.store.root.resolve("runs").resolve(id).resolve(UUID.randomUUID().toString());
             Files.createDirectories(directory);
@@ -75,23 +112,14 @@ public final class WorkbenchRunner implements AutoCloseable {
             } else arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
             var builder = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("executor.log").toFile());
             builder.environment().put("WORKBENCH_TASK_FILE", file.toString());
-            Process child = builder.start(); launched = child; process = child;
+            Process child = spawn(builder, bundle.path("task").has("packageId")); launched = child;
             child.getOutputStream().close();
-            executor.submit(() -> {
-                try {
-                    if (!child.waitFor(timeoutSeconds, TimeUnit.SECONDS)) terminate(child);
-                } catch (InterruptedException e) { terminate(child); Thread.currentThread().interrupt(); }
-                finally {
-                    try { service.processEnded(id); }
-                    finally { process = null; busy.set(false); }
-                }
-            });
-            return service.task(id);
-        } catch (WorkbenchException e) { busy.set(false); throw e; }
+            return child;
+        } catch (WorkbenchException e) { if (claimed) service.processEnded(id); throw e; }
         catch (Exception e) {
-            if (launched != null) { terminate(launched); service.processEnded(id); }
+            if (launched != null) { stopProcess(launched); service.processEnded(id); }
             else if (claimed) service.startFailed(id);
-            process = null; busy.set(false);
+            process = null;
             throw new WorkbenchException(409, launched == null ? "外部执行器未能启动；请检查本机命令配置，未发送申请" : "执行器启动后异常，请核实任务结果，不要重新投递");
         }
     }
@@ -106,11 +134,10 @@ public final class WorkbenchRunner implements AutoCloseable {
             Files.createDirectories(directory);
             Path output = directory.resolve("positions.json");
             var arguments = new ArrayList<>(offerTodayCommand); arguments.add("discover");
-            child = new ProcessBuilder(arguments).redirectOutput(output.toFile())
-                    .redirectError(directory.resolve("discovery.log").toFile()).start();
-            process = child;
+            child = spawn(new ProcessBuilder(arguments).redirectOutput(output.toFile())
+                    .redirectError(directory.resolve("discovery.log").toFile()));
             if (!child.waitFor(Math.min(timeoutSeconds, 45), TimeUnit.SECONDS)) {
-                terminate(child);
+                stopProcess(child);
                 throw new WorkbenchException(409, "OfferToday 读取超时；未创建申请，请检查已有浏览器连接");
             }
             if (child.exitValue() != 0) throw new WorkbenchException(409, "OfferToday 读取未完成；请先共享当前标签页，或检查本机脚本日志");
@@ -140,8 +167,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             throw new WorkbenchException(409, "OfferToday 只读任务已中断，未据此创建申请");
         } catch (Exception e) { throw new WorkbenchException(409, "OfferToday 读取失败，请检查脚本和当前标签页；未创建申请"); }
         finally {
-            if (child != null && child.isAlive()) terminate(child);
-            process = null; busy.set(false);
+            releaseProcess(); busy.set(false);
         }
     }
 
@@ -153,6 +179,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
 
     private ObjectNode readCandidatePage(ObjectNode bundle) throws Exception {
+        if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止");
         boolean offerToday = bundle.path("source").path("channel").asText().equals("OFFERTODAY");
         if (offerToday ? offerTodayCommand.isEmpty() : command.isEmpty()) throw new WorkbenchException(409,
                 offerToday ? "OfferToday 未配置或没有已授权会话；不会新建登录态" : "尚未配置通用官网只读执行器");
@@ -172,8 +199,8 @@ public final class WorkbenchRunner implements AutoCloseable {
         } else arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
         Process child = null;
         try {
-            child = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("read.log").toFile()).start();
-            process = child; child.getOutputStream().close();
+            child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("read.log").toFile()));
+            child.getOutputStream().close();
             if (!child.waitFor(seconds, TimeUnit.SECONDS)) throw new WorkbenchException(409, "只读读取时间预算耗尽；保留断点");
             if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024)
                 throw new WorkbenchException(409, "只读来源未返回有效结果；检查会话、版本或本机执行器日志");
@@ -182,8 +209,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             if (output.has("exception")) throw new WorkbenchException(409, WorkbenchService.text(output, "exception", 1000, true));
             return output;
         } finally {
-            if (child != null && child.isAlive()) terminate(child);
-            process = null;
+            releaseProcess();
         }
     }
 
@@ -209,6 +235,7 @@ public final class WorkbenchRunner implements AutoCloseable {
         } finally { busy.set(false); }
     }
     private ObjectNode analyzeCandidates(ObjectNode bundle) throws Exception {
+        if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止");
         if (command.isEmpty()) throw new WorkbenchException(409, "尚未配置匹配 AI 执行器，未生成事实或申请");
         Path directory = service.store.root.resolve("runs").resolve((bundle.path("kind").asText().equals("MATERIAL_PREPARE") ? "preparation-" : "matching-") + UUID.randomUUID());
         Files.createDirectories(directory);
@@ -222,8 +249,8 @@ public final class WorkbenchRunner implements AutoCloseable {
         var arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
         Process child = null;
         try {
-            child = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("analysis.log").toFile()).start();
-            process = child; child.getOutputStream().close();
+            child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("analysis.log").toFile()));
+            child.getOutputStream().close();
             if (!child.waitFor(seconds, TimeUnit.SECONDS)) throw new WorkbenchException(409, "匹配时间预算耗尽，未确认新事实；相同输入不自动重试");
             if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024)
                 throw new WorkbenchException(409, "匹配执行器未返回有效结果，请检查本机日志；相同输入不自动重试");
@@ -231,8 +258,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             if (!(parsed instanceof ObjectNode output)) throw new WorkbenchException(409, "匹配结果格式无效");
             return output;
         } finally {
-            if (child != null && child.isAlive()) terminate(child);
-            process = null;
+            releaseProcess();
         }
     }
 
@@ -252,10 +278,10 @@ public final class WorkbenchRunner implements AutoCloseable {
             try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
             catch (UnsupportedOperationException ignored) { }
             var arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
-            child = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("analysis.log").toFile()).start();
-            process = child; child.getOutputStream().close();
+            child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("analysis.log").toFile()));
+            child.getOutputStream().close();
             if (!child.waitFor(Math.min(timeoutSeconds, 120), TimeUnit.SECONDS)) {
-                terminate(child); throw new WorkbenchException(409, "材料分析超时；未确认任何事实");
+                stopProcess(child); throw new WorkbenchException(409, "材料分析超时；未确认任何事实");
             }
             if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 1024 * 1024)
                 throw new WorkbenchException(409, "材料分析未返回有效结果；未确认任何事实");
@@ -264,8 +290,7 @@ public final class WorkbenchRunner implements AutoCloseable {
         catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new WorkbenchException(409, "材料分析中断；未确认任何事实"); }
         catch (Exception e) { throw new WorkbenchException(409, "材料分析失败，请检查已配置的本机命令；未确认任何事实"); }
         finally {
-            if (child != null && child.isAlive()) terminate(child);
-            process = null; busy.set(false);
+            releaseProcess(); busy.set(false);
         }
     }
 
@@ -276,18 +301,105 @@ public final class WorkbenchRunner implements AutoCloseable {
         return start(task.path("id").asText());
     }
 
-    private static void terminate(Process child) {
-        child.descendants().forEach(handle -> { if (handle.isAlive()) handle.destroy(); });
-        child.destroy();
-        try { if (!child.waitFor(3, TimeUnit.SECONDS)) child.destroyForcibly(); }
-        catch (InterruptedException e) { child.destroyForcibly(); Thread.currentThread().interrupt(); }
+    /** Persist only our own exact PID/start instant; restart must release it before reusing the browser slot. */
+    private Process spawn(ProcessBuilder builder) throws Exception { return spawn(builder, true); }
+    private Process spawn(ProcessBuilder builder, boolean supervised) throws Exception {
+        String proof = "";
+        if (supervised) {
+            Files.createDirectories(service.store.root.resolve("runs"));
+            Path script = Files.createTempFile(service.store.root.resolve("runs"), "executor-", ".py");
+            try (var source = WorkbenchRunner.class.getResourceAsStream("/workbench/execute.py")) {
+                if (source == null) throw new WorkbenchException(409, "缺少受控执行资源监护脚本");
+                Files.write(script, source.readAllBytes());
+            }
+            proof = script + ".release.json";
+            var arguments = new ArrayList<>(List.of("python3", script.toString(), proof)); arguments.addAll(builder.command()); builder.command(arguments);
+        }
+        String releaseProof = proof;
+        service.store.write(c -> {
+            if (!service.store.list(c, "runner_process").isEmpty()) throw new WorkbenchException(409, "前一执行资源尚未确认释放，禁止开始下一进程");
+            service.store.save(c, "runner_process", service.json.createObjectNode().put("id", "active").put("status", "STARTING").put("supervised", supervised).put("releaseProof", releaseProof)); return null;
+        });
+        Process child = null;
+        try {
+            child = builder.start(); process = child;
+            var startedAt = child.info().startInstant();
+            if (startedAt.isEmpty() && !child.isAlive()) clearProcessLease();
+            else {
+                var record = service.json.createObjectNode().put("id", "active").put("status", "RUNNING").put("supervised", supervised).put("releaseProof", releaseProof).put("pid", child.pid())
+                        .put("startedAt", startedAt.orElseThrow().toString());
+                service.store.write(c -> { service.store.save(c, "runner_process", record); return null; });
+            }
+            return child;
+        } catch (Exception e) {
+            if (child != null) stopProcess(child);
+            clearProcessLease(); process = null; throw e;
+        }
+    }
+    private void releaseProcess() {
+        Process child = process;
+        if (child == null) return;
+        if (child.isAlive()) stopProcess(child);
+        var rows = service.store.write(c -> service.store.list(c, "runner_process"));
+        if (!rows.isEmpty()) requireRelease((ObjectNode) rows.get(0));
+        clearProcessLease(); process = null;
+    }
+    private void clearProcessLease() { service.store.write(c -> { if (!service.store.list(c, "runner_process").isEmpty()) service.store.delete(c, "runner_process", "active"); return null; }); }
+    private void recoverProcessLease() {
+        var rows = service.store.write(c -> service.store.list(c, "runner_process"));
+        if (rows.isEmpty()) return;
+        var record = rows.get(0);
+        if (!record.path("status").asText().equals("RUNNING")) throw new WorkbenchException(409, "上次进程创建中断，资源归属不明；需人工核实，不能自动复用浏览器");
+        ProcessHandle.of(record.path("pid").asLong()).filter(ProcessHandle::isAlive).ifPresent(handle -> {
+            if (!handle.info().startInstant().map(instant -> instant.toString().equals(record.path("startedAt").asText())).orElse(false))
+                throw new WorkbenchException(409, "旧执行器 PID 已复用或身份不明；不终止其他进程，需人工核实资源");
+            stopOwned(handle, (ObjectNode) record);
+        });
+        requireRelease((ObjectNode) record);
+        clearProcessLease();
+    }
+    private void stopProcess(Process child) {
+        var rows = service.store.write(c -> service.store.list(c, "runner_process"));
+        if (rows.isEmpty()) terminate(child);
+        else stopOwned(child.toHandle(), (ObjectNode) rows.get(0));
+    }
+    private void stopOwned(ProcessHandle handle, ObjectNode record) {
+        if (!record.path("supervised").asBoolean()) { terminate(handle); return; }
+        boolean interrupted = Thread.interrupted();
+        try {
+            handle.destroy();
+            handle.onExit().get(6, TimeUnit.SECONDS);
+            requireRelease(record);
+        } catch (Exception e) { throw new WorkbenchException(409, "后代执行资源尚未确认释放；保持租约，禁止下一岗位，需人工核实"); }
+        finally { if (interrupted) Thread.currentThread().interrupt(); }
+    }
+    private void requireRelease(ObjectNode record) {
+        if (!record.path("supervised").asBoolean()) return;
+        try {
+            Path proof = Path.of(record.path("releaseProof").asText());
+            if (Files.isRegularFile(proof) && !Files.isSymbolicLink(proof) && Files.size(proof) < 1024 && service.json.readTree(Files.readString(proof)).path("released").asBoolean()) return;
+        } catch (Exception ignored) { /* Missing/invalid proof is an explicit resource exception, never permission to continue. */ }
+        throw new WorkbenchException(409, "执行器或其后代未确认释放；保留租约，不能开始下一岗位");
+    }
+    private static void terminate(Process child) { terminate(child.toHandle()); }
+    private static void terminate(ProcessHandle child) {
+        var handles = new ArrayList<>(child.descendants().toList()); handles.add(child);
+        handles.forEach(handle -> { if (handle.isAlive()) handle.destroy(); });
+        boolean interrupted = Thread.interrupted();
+        try {
+            for (var handle : handles) if (handle.isAlive()) {
+                try { handle.onExit().get(3, TimeUnit.SECONDS); }
+                catch (TimeoutException e) { handle.destroyForcibly(); handle.onExit().get(3, TimeUnit.SECONDS); }
+            }
+        } catch (Exception e) { throw new WorkbenchException(409, "执行资源尚未确认释放；停止后续岗位，请核对已有执行器"); }
+        finally { if (interrupted) Thread.currentThread().interrupt(); }
     }
 
     @Override public synchronized void close() {
         if (closed) return;
         closed = true;
         Process child = process;
-        if (child != null && child.isAlive()) terminate(child);
+        if (child != null && child.isAlive()) stopProcess(child);
         executor.shutdownNow();
         try { executor.awaitTermination(5, TimeUnit.SECONDS); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); }

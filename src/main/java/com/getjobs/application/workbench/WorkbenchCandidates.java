@@ -24,7 +24,8 @@ final class WorkbenchCandidates {
         result.set("jobs", jobs); result.set("runs", store.list(c, "candidate_run")); return result;
     }
 
-    ObjectNode discover(ObjectNode input, Reader reader) {
+    ObjectNode discover(ObjectNode input, Reader reader) { return discover(input, reader, null); }
+    ObjectNode discover(ObjectNode input, Reader reader, String cycleId) {
         int pages = limit(input, "maxPages", 2, 20), slots = limit(input, "jobsPerPage", 5, 40);
         int seconds = limit(input, "secondsPerPage", 30, 120), tokens = limit(input, "modelTokensPerPage", 1000, 100000);
         int version = input.path("scopeVersion").asInt(-1);
@@ -53,7 +54,12 @@ final class WorkbenchCandidates {
                 require(!result.path("status").asText().equals("COMPLETED"), "此轮已读取完成，请启动新一轮");
             }
             result.put("scopeVersion", version).put("status", "DISCOVERING").put("updatedAt", now());
-            store.save(c, "candidate_run", result); return result;
+            store.save(c, "candidate_run", result);
+            if (cycleId != null) {
+                var cycle = store.get(c, "workflow_cycle", cycleId);
+                cycle.put("discoveryRunId", result.path("id").asText()); store.save(c, "workflow_cycle", cycle);
+            }
+            return result;
         });
         var failed = new HashSet<Integer>();
         try {

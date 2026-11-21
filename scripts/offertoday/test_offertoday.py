@@ -208,6 +208,8 @@ class ReceiptTest(unittest.TestCase):
                 state = {'SUBMITTING': getattr(outer, 'claim_response', 'UNKNOWN'), 'CONTACTED': getattr(outer, 'contact_response', 'UNKNOWN'), 'CV_DELIVERED': 'SUBMITTED',
                          'PROGRESS': 'UNKNOWN' if 'SUBMITTING' in [event['type'] for event in events] else 'RUNNING',
                          'NEEDS_INPUT': 'NEEDS_INPUT'}[payload['type']]
+                if payload.get('action') == 'SEND_CV' and getattr(outer, 'reject_cv_claim', False):
+                    self.send_response(409); self.end_headers(); return
                 data = json.dumps({'id': 'task-fixture', 'state': state}).encode()
                 self.send_response(200); self.end_headers(); self.wfile.write(data)
             def log_message(self, *args):
@@ -394,6 +396,29 @@ class ReceiptTest(unittest.TestCase):
         self.assertEqual({'status': 'SUBMITTED'}, run(self.bundle, Browser()))
         self.assertEqual(['PROGRESS', 'SUBMITTING', 'CONTACTED', 'CV_DELIVERED'], [event['type'] for event in self.events])
         self.assertNotEqual(json.loads(self.events[2]['evidence'])['messageId'], json.loads(self.events[3]['evidence'])['messageId'])
+
+    def test_policy_cv_send_requires_a_separate_acknowledged_stage_claim(self):
+        original = json.loads(self.bundle.read_text())
+        original['task']['approvalSource'] = 'SCOPE_POLICY'
+        original['task']['packageId'] = 'synthetic-package'
+        self.bundle.write_text(json.dumps(original))
+        for reject in (False, True):
+            with self.subTest(reject=reject):
+                self.events.clear(); self.reject_cv_claim = reject
+                owner = self
+                class Browser:
+                    calls = []
+                    def action(inner, op, **values):
+                        inner.calls.append(op)
+                        common = {'jobId': original['task']['platformJobId'], 'conversationId': 'fixture-conversation'}
+                        if op == 'preflight': return dict(common, baselineIds=[])
+                        if op == 'send_text': return {'contact': dict(common, messageId='text', initialMessageSha256=owner.message_sha, proof='Fresh text receipt')}
+                        assert any(e.get('action') == 'SEND_CV' for e in owner.events), 'CV must claim before browser action'
+                        return {'cv': dict(common, messageId='cv', resumeSha256=owner.sha, proof='Fresh CV receipt')}
+                browser = Browser()
+                self.assertEqual({'status': 'UNKNOWN' if reject else 'SUBMITTED'}, run(self.bundle, browser))
+                self.assertEqual(['CONTACT', 'SEND_CV'], [e.get('action') for e in self.events if e['type'] == 'SUBMITTING'])
+                self.assertEqual(['preflight', 'send_text'] + ([] if reject else ['send_resume']), browser.calls)
 
     def test_only_contact_receipt_never_counts_as_cv_delivery(self):
         class Browser:

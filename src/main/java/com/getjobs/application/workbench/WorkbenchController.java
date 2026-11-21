@@ -21,6 +21,9 @@ public class WorkbenchController {
         runner.refreshMatching();
         var state = service.state(); state.set("runtime", runner.runtime()); return state;
     }
+    /** One intent advances all stages; resumes only known-unsent checkpoints after revalidation. */
+    @PostMapping("/cycles") public ObjectNode startCycle(@RequestBody ObjectNode input) { return runner.startCycle(input, null); }
+    @PostMapping("/cycles/{id}/resume") public ObjectNode resumeCycle(@PathVariable String id, @RequestBody ObjectNode input) { return runner.startCycle(input, id); }
     @GetMapping("/candidates") public ObjectNode candidates() { runner.refreshMatching(); return service.candidates.workspace(); }
     @PostMapping("/candidates/match") public ObjectNode matchCandidates(@RequestBody ObjectNode input) { return runner.matchCandidates(input); }
     @PostMapping("/candidates/prepare") public ObjectNode prepareCandidates(@RequestBody ObjectNode input) { return runner.prepareCandidates(input); }

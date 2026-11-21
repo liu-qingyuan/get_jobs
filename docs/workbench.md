@@ -35,9 +35,9 @@ bash gradlew --no-daemon workbench -x installPatchrightDriver \
 1. **个人资料 → 已有材料一次核对**：粘贴或选择有权提供的 TXT/MD 材料，明确通用/香港/内地作用域，并可勾选已登记来源及四类独立简历/岗位版。点击整理后，展示来源原文、哈希、重复、矛盾及缺失证据；集中勾选可核实事实和已经亲自审核的简历，一次确认可用子集。其余项仍待核实。原材料变化时另存来源版本，失去旧依据的事实暂停使用；旧确认与任务快照不改写。未变事实直接复用，同版本分析缓存命中不调用模型，页面轮询也不调用模型。PDF/DOCX 无正文时明确待补文本，不假装已提取或核准。仍可预览 JobsDB 已知资料（需显式点击）及逐条手动澄清；不自动读取旧资料、目录或私有基线。未确认项不进入授权快照，确认基线不授权外发。
 2. **简历版本**：分别上传港区/国内的中文/英文版本；PDF、DOCX 或文本，最大 10MB。每次保存是新版本，审核批准只影响该版本。文本草稿不会自动变成可投的 PDF，需人工完成格式检查并上传最终附件。
 3. **求职范围**：在新页签一次选定精确来源、渠道、地区/语言/方向、岗位选择词和排除词、已确认事实、独立核准简历、变换、动作、累计预算和有效期。默认只读发现/匹配/准备，无外发和项目执行许可。先保存再用同一代表性岗位预检，查看当前范围版本、策略来源和所有拒绝原因。可暂停、恢复、变更、撤销及回读历史；这些操作均产生新版本，旧未执行授权不复活。新版本补充额度应提高累计上限，不清零已耗量。保存范围本身不启动执行器；默认候选主屏可另行显式启动只读发现，不将 Boss/JobsDB 原批次显示成已受控接通。
-4. **候选与发现（默认主屏）**：一次填写获准官网入口和 OfferToday 港区列表，设置本次页面、每页候选槽/秒数/官网模型上限后启动。在同一独占槽读取两种来源及必要详情；完整候选显示规范链接、平台身份、全文 JD、取得时间。描述不足/失效/范围拒绝不会进入匹配。达到页面或累计资源上限、连接/版本例外时保留进度；可按当前范围继续，不清零计量。官网必须配置支持 `CANDIDATE_READ` 的可信通用执行器；OfferToday 复用已授权连接，不创建登录态，不点 Chat/Apply、不上传/发送。技术通过不代表真实覆盖或匹配质量已验收。
+4. **候选与发现（默认主屏）**：一次填写获准官网入口和 OfferToday 港区列表，设置本次页面、每页及匹配/备料/执行资源上限，点击「一次启动本轮求职」。自动衔接发现、匹配、备料及范围明确允许的逐岗执行，不要求二次启动、逐阶段推进或逐岗审批；仅准备权限停留可见材料，不创建发送任务。整轮进展展示单岗材料版本、阶段、例外与回执；处理必要例外或补充范围累计预算后恢复**同一轮**，只继续已知未外发断点，已完成和 UNKNOWN 不重放。独立阶段按钮收纳为高级入口，不是主流程。在同一独占槽读取两种来源及必要详情；完整候选显示规范链接、平台身份、全文 JD、取得时间。描述不足/失效/范围拒绝不会进入匹配。达到页面或累计资源上限、连接/版本例外时保留进度；可按当前范围继续，不清零计量。官网必须配置支持 `CANDIDATE_READ` 的可信通用执行器；OfferToday 复用已授权连接，不创建登录态，不点 Chat/Apply、不上传/发送。技术通过不代表真实覆盖或匹配质量已验收。
 5. **手工任务与历史（次要入口）**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
-6. **官网/简历 AI**：必须另外配置执行器，批准不等于开始执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
+6. **官网/简历 AI**：必须另外配置执行器。旧人工任务仍保留批准后显式启动；新整轮由当前范围与可证实材料策略核准，不伪造人审，启动后自动逐岗执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
 7. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
 8. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
 
@@ -49,7 +49,7 @@ JobsDB 页只读显示最近 100 条原账本并保留 CLI 交接。**工作台�
 
 在平台入口或任务渠道中选择 OfferToday。先在普通 Chrome 登录，并通过官方 Playwright 扩展只共享所需标签页，不必重新登录或复制登录态。平台页保留的旧「读取当前职位」仅取已加载卡片，选择后填入待审表单；默认候选页的新只读发现按当前范围和预算读取列表及必要详情，不会创建或发送申请。两者都不猜测未加载的远端分页。
 
-OfferToday 只使用港区已审核 PDF/DOCX 附件，中文与英文版本继续独立。首条消息默认空白，须逐岗确认；核对平台实际联系方式与最新偏好及线上资料后，批准固定消息哈希、附件和适用事实。脚本启动不调用模型，也不等于已发送。缺资料、验证码、未知控件、不可控制的自动招呼或旧附件无法核验时等待人工。
+OfferToday 只使用港区已审核 PDF/DOCX 附件，中文与英文版本继续独立。旧人工入口首条消息默认空白，须逐岗确认；新整轮使用一次范围核对的联系方式与 #13 精确消息/附件冻结包，不重复逐岗审批。核对平台实际联系方式与最新偏好及线上资料后，批准固定消息哈希、附件和适用事实。脚本启动不调用模型，也不等于已发送。缺资料、验证码、未知控件、不可控制的自动招呼或旧附件无法核验时等待人工。
 
 源码 checkout 存在随附脚本时自动配置脚本前缀；可用 `WORKBENCH_OFFERTODAY_COMMAND` 的 JSON 参数数组覆盖，显式 `[]` 禁用。它是参数前缀，Runner 追加 `discover`、`read-candidates taskFile` 或 `run taskFile`，不是 shell，也不含 `{taskFile}` 模板。例如：
 
@@ -124,6 +124,15 @@ bash gradlew --no-daemon workbench --console=plain
 - `GET /api/workbench/preparations` 与 `/state.preparations` 返回 `{packages:[...]}`。每包包含 `id/candidateId/analysisId/scopeVersion/source=SCOPE_POLICY/rulesVersion/target/status/reason/proposal?/snapshot?`；`snapshot` 包含独立 `resume/facts/initialMessage/initialMessageSha256` 及 OfferToday 的 `contactVerified/contactFacts`。`target.resumeId` 是范围所选基线 ID；`snapshot.resume.id` 是实际冻结文件的版本 ID，派生时不同。后续授权按范围基线核验，实际执行只能使用该包冻结文件，不偷偷换回原文件。
 - `POST /api/workbench/preparations/{id}/check`：`{action:PREPARE|APPLY|CONTACT|SEND_CV}`，返回 `allowed/source/packageId/reasons`。每个不可逆阶段必须重核范围版本/有效期/暂停撤销、动作与变换许可、动作预算、当前匹配/事实/文件、原申请和策略已消费外发目标的防重；文件或事实变化不能重新授权 UNKNOWN。此入口只读、不创建授权、不扣量、不 claim/启动/发送，也不代表渠道执行能力可用。后续消费者须另行消费单阶段授权、确认 claim 并收集相应真实回执；不能复用核验响应作重试或下一阶段许可。`INVALIDATED` 是当前读取视图，历史核准依据不覆盖。局部八图以 `liu-qingyuan/get_jobs#13` 发布合同为准。
 
+## 连续求职周期 Interface（#14）
+
+- `POST /api/workbench/cycles`：一次启动，返回持久轮次 `id/status=RUNNING`，后台独占同一运行槽自动推进。请求沿用候选发现的 `scopeVersion/sources/maxPages/jobsPerPage/secondsPerPage/modelTokensPerPage`，以及匹配/准备的 `secondsPerBatch/modelTokensPerCandidate`；新增 `secondsPerJob` 1–120（默认30）、`modelTokensPerJob` 1–100000（默认1000）。按最多20岗批次处理，不截断丢弃超额候选。读取页数上限到达后保留 `CHECKPOINT`，不是无限调度。来源/AI/单岗脚本仍为已配置可信 Adapter，不接受网页/请求指定命令。
+- `/state.workflow.cycles` 展示 `stage`（DISCOVER/MATCH/PREPARE/DISPATCH）、`entries/events`，每候选可见材料包、taskId、当前 execution 事件与回执。整轮状态是 `RUNNING/CHECKPOINT/PAUSED/EXCEPTION/PREPARED/COMPLETED`；COMPLETED 表示本轮有界处理结束，不保证全站覆盖、推荐质量或雇主已读。权限只有准备时为 PREPARED，绝不启动外发进程。
+- `POST /api/workbench/cycles/{id}/resume`：`{scopeVersion:当前版本}`。必要资料/登录/未知页面解决或累计预算上限补充后恢复同一轮；保留来源游标、候选、缓存与安全任务 ID。相同输入复用匹配/准备（含失败）；事实/范围变化才重新核验，不续签旧冻结快照。已有 RUNNING/UNKNOWN/SUBMITTED 持续去重，UNKNOWN 仅收集/人工核对证据，不重投或继续未开始 CV；其他合格岗位不因此阻塞。暂停/撤销按钮在执行期间可用；已开始动作只允许收集结果，不开始下一阶段。
+- 策略任务写 `approvalSource=SCOPE_POLICY` 和单岗 `POLICY_APPROVED` 事件，绑定 preparation 的精确快照，禁止经旧 `/approve` 转成人审。启动前预扣完整秒数和官网模型 token 上限，失败/无 claim 不退款；OfferToday 执行零模型。任务包携带 `limits`，可信官网 CLI 必须执行 token 上限，否则报告 NEEDS_INPUT；不是 OS/模型沙箱。Runner 对进程实施秒数硬截止。
+- 每个不可逆阶段由当前执行 token 提交 `SUBMITTING` 并明确 `action=APPLY/CONTACT/SEND_CV`；在同一存储事务中重核目标、范围、事实/匹配、冻结文件，消费该阶段外发预算并取得 claim，HTTP 200 才能动作。执行时间已在启动预扣，不在阶段重复扣；外发每阶段各扣一次。官网一次 APPLY；OfferToday CONTACT 之后记录对应 CONTACTED，再独立 SEND_CV claim，最后新 CV 消息必须同岗/attempt/会话且绑定冻结实际附件哈希。旧 claim、文件选中、退出0或只联系都不是成功。
+- 重启不自动外发。原执行子进程有精确 PID/启动时间的私有租约；内置 Python 标准库监护脚本在 POSIX 独立进程组内运行命令，保留组长直到后代全部结束，主命令退出不代表释放。仅有私有 release proof 才清除租约，资源不明时不强杀监护进程并假设成功。重启先确认释放**自己创建的**整组后代，再开放共享槽；PID 复用/身份不明、监护进程异常消失或创建窗口中断时停止，不能杀其他进程或猜测资源已释放；无可靠 POSIX 进程组/Python 环境则明确不可执行。所有旧 callback token 失效；策略任务未登记 claim 的中断保持已知未外发，可恢复；任何已 claim/已联系者保持 UNKNOWN。历史人工任务缺回执仍按旧合同保守 UNKNOWN。
+
 ## 执行器报告合同
 
 任务包包含 `taskId`、`instructions`、`task`、`callbackUrl`、`token`、`reporterPath`。申请/简历任务有 `resumePath`；只读状态查询不交付附件。所有路径都属于本地私有材料，禁止向网站或日志公开 token。
@@ -135,6 +144,8 @@ python3 /path/to/scripts/workbench/report.py /private/path/task.json PROGRESS '�
 python3 /path/to/scripts/workbench/report.py /private/path/task.json NEEDS_INPUT '请用户完成验证码'
 # 真正点击提交前必须成功收到 UNKNOWN；报告失败立即停止，不得点击。
 python3 /path/to/scripts/workbench/report.py /private/path/task.json SUBMITTING '提交前登记'
+# 新策略任务必须明确阶段；OfferToday 附件前需独立 --action SEND_CV
+python3 /path/to/scripts/workbench/report.py /private/path/task.json SUBMITTING '策略任务提交前登记' --action APPLY
 # 点击一次，观察明确回执后才报告；未见回执保持 UNKNOWN。
 python3 /path/to/scripts/workbench/report.py /private/path/task.json SUBMITTED '收到成功回执' --evidence '实际申请编号或回执证据'
 # 简历优化任务仅返回草稿，另存未批准版本。
@@ -145,7 +156,7 @@ python3 /path/to/scripts/workbench/report.py /private/path/task.json EMPLOYER_ST
 
 OfferToday 使用独立的 `CONTACTED` 和 `CV_DELIVERED` 回执事件，其 evidence 为绑定岗位、attemptId、会话、消息编号、相应消息/附件哈希及 proof 的 JSON。文字与简历分开发送，消息编号必须不同；联系回执得到回调确认后才进入附件步骤。仅联系后保持 UNKNOWN；同会话的附件字节绑定和新平台历史记录核验后才记 SUBMITTED，不走上例普通 SUBMITTED。此状态不保证雇主已读或站内求职记录已更新。脚本使用相同 reporter 和占位确认，不自动重试。
 
-所有事件明确标记来源为 agent/user/system；工作台没有声称直接观察了浏览器。正常退出 0、打印“完成”均不算提交证明。提交前占位后 UNKNOWN 禁止重投；未提供最终回执而结束的申请也保守保留 UNKNOWN。重启不会恢复自动投递，只提示核实。
+所有事件明确标记来源为 agent/user/system；工作台没有声称直接观察了浏览器。正常退出 0、打印“完成”均不算提交证明。提交前占位后 UNKNOWN 禁止重投；未提供最终回执而结束的旧人工申请也保守保留 UNKNOWN；新策略任务无外发 claim 则保留已知未外发断点。重启不会恢复自动投递，只提示核实。
 
 任务包及执行输出保存在 `.workbench/runs/`，资料、附件和状态库也在 `.workbench/`。目录默认私有且 Git 忽略；截图证据按任务本地留存，不批量上传全库。保留目录备份即可保留版本/账本，但不要把它作为公开源码提交。
 
@@ -172,8 +183,11 @@ Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9–#13
 # 先用正常配置构建；不会把测试端口/fake 配置编入正式产物。
 bash gradlew --no-daemon test bootJar -PrebuildFrontend -x installPatchrightDriver --console=plain
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/baseline-smoke.mjs
+PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/workflow-smoke.mjs
 ```
 
 脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；然后通过界面准备独立岗位 DOCX，查看正文/依据、下载文件、只读动作拒绝与跨刷新复用，并在岗位条件变化后展示失效；共 8 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 3 次/备料 1 次、3 包（核准1/例外2，核准包后来失效）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png`、`preparation.png` 与 `prepared-job.docx` 的临时证据目录和实际计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
+
+#14 的 `workflow-smoke.mjs` 使用同样隔离约束，从默认页面一次启动官网与 OfferToday，自动连续推进两岗并保留第三岗的登录例外；处理必要例外后在同一轮恢复，不重放已完成阶段/岗位。另在联系后强制终止自己启动的临时 Java 进程，重启确认旧子进程已释放、旧 token 拒绝，保留联系/UNKNOWN 且不发 CV，并可推进其他岗。输出三张合成页面截图及实际计数；不会切换当前工作台，也不是实站发送验收。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。

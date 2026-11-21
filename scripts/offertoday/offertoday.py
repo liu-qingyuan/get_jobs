@@ -269,8 +269,8 @@ def _validate_bundle(bundle):
     return task, snapshot, filename, data
 
 
-def _event(bundle_file, bundle, name, message, state, evidence=''):
-    response = report_event(bundle_file, name, message, evidence)
+def _event(bundle_file, bundle, name, message, state, evidence='', *, action=''):
+    response = report_event(bundle_file, name, message, evidence, action=action)
     if response.get('taskId') != bundle['taskId'] or response.get('state') != state:
         raise BrowserBlocked('Workbench did not acknowledge the expected task state')
 
@@ -334,7 +334,8 @@ def run(bundle_file, adapter=None):
             if _hash(staged.read_bytes()) != snapshot['resume']['sha256']:
                 raise BrowserBlocked('Staged resume hash mismatch')
             claim_attempted = True
-            _event(bundle_file, bundle, 'SUBMITTING', 'Claim before one OfferToday contact/CV send', 'UNKNOWN')
+            _event(bundle_file, bundle, 'SUBMITTING', 'Claim before one OfferToday contact send', 'UNKNOWN',
+                   action='CONTACT' if task.get('approvalSource') == 'SCOPE_POLICY' else '')
             outcome = browser.action('send_text', jobId=task['platformJobId'], title=task['title'], company=task['company'],
                                      preflight=preflight, message=snapshot['initialMessage'],
                                      messageSha256=snapshot['initialMessageSha256'])
@@ -343,6 +344,8 @@ def run(bundle_file, adapter=None):
                 raise BrowserBlocked('No fresh self-message acknowledgement')
             contact_evidence = _receipt(contact, preflight, task, snapshot, 'contact')
             _event(bundle_file, bundle, 'CONTACTED', 'Fresh same-job approved initial message acknowledged', 'UNKNOWN', contact_evidence)
+            if task.get('approvalSource') == 'SCOPE_POLICY':
+                _event(bundle_file, bundle, 'SUBMITTING', 'Revalidate and claim before separate CV send', 'UNKNOWN', action='SEND_CV')
             outcome = browser.action('send_resume', jobId=task['platformJobId'], title=task['title'], company=task['company'],
                                      preflight=preflight, contactMessageId=contact['messageId'], resumePath=str(staged),
                                      resumeFilename=filename, resumeSha256=snapshot['resume']['sha256'], resumeSize=len(data))
