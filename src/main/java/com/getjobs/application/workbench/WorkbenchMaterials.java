@@ -230,6 +230,43 @@ final class WorkbenchMaterials {
         return context;
     }
 
+    /** Matching may re-read only selected IDs after clarification; this never renews frozen execution materials. */
+    ObjectNode matchingContext(Connection c, ObjectNode scope, JsonNode target) throws Exception {
+        var context = object(); var facts = context.putArray("facts"); var resumes = context.putArray("resumes");
+        var questions = context.putArray("questions");
+        String site = java.net.URI.create(target.path("url").asText()).getHost();
+        var all = store.list(c, "fact");
+        for (var snapshot : scope.path("materials").path("facts")) {
+            JsonNode current = null;
+            for (var fact : all) if (fact.path("id").equals(snapshot.path("id"))) current = fact;
+            // An ID changing scope cannot cause the old scope's private contents to leave here.
+            if (!applicable(snapshot.path("scope").asText(), target.path("region").asText(), site)) continue;
+            boolean usable = current != null && current.path("scope").equals(snapshot.path("scope"))
+                    && current.path("confirmed").asBoolean() && !current.path("needsReview").asBoolean()
+                    && !unsafe(current.path("value").asText());
+            boolean conflict = false;
+            if (usable) for (var other : all) if (!other.path("id").equals(current.path("id")) && sameKey(current, other)
+                    && !other.path("value").equals(current.path("value"))) conflict = true;
+            if (!usable || conflict) {
+                questions.add(object().put("factId", snapshot.path("id").asText()).put("key", snapshot.path("key").asText())
+                        .put("label", snapshot.path("label").asText()).put("version", current == null ? -1 : current.path("version").asInt(1))
+                        .put("reason", conflict ? "同一事实存在冲突，请核实或更正来源" : "所选事实未确认、缺证据或已不可用"));
+            } else facts.add(current.deepCopy());
+        }
+        for (var snapshot : scope.path("materials").path("resumes")) {
+            var probe = ((ObjectNode) target).deepCopy().put("resumeId", snapshot.path("id").asText());
+            if (!scopeResumeApplies(snapshot, probe)) continue;
+            var resume = store.get(c, "resume", snapshot.path("id").asText());
+            try {
+                require(resume.path("approved").asBoolean(), "简历尚未核准"); service.verifyResume(resume);
+                var selected = object();
+                for (String field : List.of("id", "label", "region", "language", "jobUrl", "sha256", "contentSha256")) selected.set(field, resume.path(field));
+                selected.put("content", sanitized(resume.path("content").asText())); resumes.add(selected);
+            } catch (WorkbenchException e) { questions.add(object().put("resumeId", resume.path("id").asText()).put("reason", "所选适用简历已不可用，请重新登记核准")); }
+        }
+        return context;
+    }
+
     boolean scopeResumeApplies(JsonNode resume, JsonNode target) {
         return resume.path("id").asText().equals(target.path("resumeId").asText().trim())
                 && resume.path("region").asText().equals(target.path("region").asText().trim())

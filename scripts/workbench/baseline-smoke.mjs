@@ -37,6 +37,18 @@ if b['kind']=='CANDIDATE_READ':
         marker.write_text('read')
         jobs.append({'url':'https://careers.example.test/jobs/short','company':'Synthetic Incomplete Co','title':'AI engineer','description':'Card only','descriptionComplete':False})
     json.dump({'jobs':jobs,'nextUrl':'','cursor':''},open(b['resultPath'],'w')); sys.exit(0)
+if b['kind']=='CANDIDATE_MATCH':
+    p=pathlib.Path(${JSON.stringify(join(root, 'match-calls'))}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')
+    results=[]
+    for j in b['candidates']:
+        gap=next((f for f in j['facts'] if f['key']=='production-evaluation'),None)
+        project=next(f for f in j['facts'] if f['key']=='project')
+        kind='PARTIAL' if j['channel']=='OFFICIAL' else 'EXPERIENCE_GAP' if gap else 'NEEDS_FACTS'
+        f=gap if kind=='EXPERIENCE_GAP' else project
+        finding={'kind':kind,'requirementQuote':'evaluation','reason':'合成项目可迁移到评估，仍缺真实生产评估经验' if kind!='NEEDS_FACTS' else '生产评估事实冲突，请先核实','evidence':[] if kind=='NEEDS_FACTS' else [{'type':'FACT','id':f['id'],'quote':f['value']}]}
+        if kind=='EXPERIENCE_GAP': finding['suggestion']={'goal':'合成数据评估小项目','acceptance':'本地可重复运行的指标与失败用例；不冒充商业经验'}
+        results.append({'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[finding]})
+    json.dump({'results':results},open(b['resultPath'],'w')); sys.exit(0)
 assert b['kind']=='MATERIAL_REVIEW'
 p=pathlib.Path(${JSON.stringify(join(root, 'calls'))}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')
 c=[]
@@ -87,6 +99,12 @@ try {
     return route.abort('blockedbyclient')
   })
   page = await context.newPage()
+  const waitForCandidates = () => page.waitForFunction(() => {
+    let node = document.querySelector('[aria-label="候选岗位队列"]')
+    if (!node) return false
+    for (; node; node = node.parentElement) if (Number(getComputedStyle(node).opacity) < 0.99) return false
+    return true
+  })
   page.on('pageerror', error => failures.push(error.message))
   page.on('dialog', dialog => dialog.accept())
   await page.goto(`${base}/workbench`)
@@ -189,6 +207,38 @@ try {
   assert.equal(await candidates.getByText('完整 JD · 待匹配', { exact: true }).count(), 2)
   const initialCandidates = await (await fetch(`${base}/api/workbench/candidates`)).json()
   const original = initialCandidates.jobs.find(job => job.channel === 'OFFICIAL' && job.status === 'READY')
+  // #12: add only synthetic, explicitly confirmed evidence, then one read-only matching batch.
+  const post = async (path, body) => {
+    const response = await fetch(`${base}/api/workbench${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    assert(response.ok, `${path}: ${response.status}`); return response.json()
+  }
+  const gapFact = await post('/facts', { key: 'production-evaluation', label: '合成生产经验缺口', value: 'No production evaluation experience.', scope: 'SITE:www.offertoday.com', confirmed: true })
+  const matchScope = (await (await fetch(`${base}/api/workbench/scope`)).json()).current
+  await post('/scope', { ...matchScope, expectedVersion: 6, factIds: [...matchScope.factIds, gapFact.id] })
+  await page.reload()
+  const matching = page.getByRole('form', { name: '批量匹配', exact: true })
+  await matching.getByRole('button', { name: '批量分析所选候选（3/20）', exact: true }).click()
+  await candidates.getByText('可迁移 · 部分支持 · 合成项目可迁移到评估，仍缺真实生产评估经验', { exact: true }).waitFor()
+  await candidates.getByText('真实经验缺口 · 可读取补强建议 · 当前输入缓存', { exact: true }).waitFor()
+  await candidates.getByText('当前不能匹配 · 当前输入缓存', { exact: true }).waitFor()
+  await candidates.getByText('补强建议（未授权执行）：合成数据评估小项目', { exact: false }).waitFor()
+  assert.equal((await (await fetch(`${base}/api/workbench/candidates/gaps`)).json()).suggestions.length, 1)
+  await page.reload()
+  await candidates.getByText('真实经验缺口 · 可读取补强建议 · 当前输入缓存', { exact: true }).waitFor()
+  assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '1')
+  await waitForCandidates()
+  await page.screenshot({ path: join(root, 'matching.png'), fullPage: true })
+  const conflicting = await post('/facts', { key: 'production-evaluation', label: '合成冲突', value: 'PRIVATE_UNCONFIRMED_CONFLICT', scope: 'SITE:www.offertoday.com', confirmed: false })
+  await page.reload()
+  await candidates.getByText('待核实事实 · 解决后自动重评 · 当前输入缓存', { exact: true }).waitFor()
+  assert.equal((await (await fetch(`${base}/api/workbench/candidates/gaps`)).json()).suggestions.length, 0)
+  assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '2')
+  await waitForCandidates()
+  await page.screenshot({ path: join(root, 'matching-needs-facts.png'), fullPage: true })
+  assert((await fetch(`${base}/api/workbench/facts/${conflicting.id}`, { method: 'DELETE' })).ok)
+  await page.reload()
+  await candidates.getByText('真实经验缺口 · 可读取补强建议 · 当前输入缓存', { exact: true }).waitFor()
+  assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '2')
   await discovery.getByRole('button', { name: '一次启动范围内只读发现', exact: true }).click()
   await candidates.getByText('未取得新全文；保留上次完整 JD 与原取得时间', { exact: false }).waitFor()
   await page.reload()
@@ -212,14 +262,9 @@ try {
   assert.equal(discovered.scope.usage.outbound, 0)
   assert.equal(await readFile(join(root, 'calls'), 'utf8'), '1')
   assert.deepEqual(failures, [])
-  await page.waitForFunction(() => {
-    let node = document.querySelector('[aria-label="候选岗位队列"]')
-    if (!node) return false
-    for (; node; node = node.parentElement) if (Number(getComputedStyle(node).opacity) < 0.99) return false
-    return true
-  })
+  await waitForCandidates()
   await page.screenshot({ path: join(root, 'candidates.png'), fullPage: true })
-  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, confirmedFacts: 1, confirmedResumes: 1, tasks: 0, scopeVersions: 6, candidates: 3, fullJd: 2, refusedOnRediscovery: retained.status === 'REFUSED', outbound: 0 }))
+  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, matchingCalls: 2, confirmedFacts: 2, confirmedResumes: 1, tasks: 0, scopeVersions: 7, candidates: 3, fullJd: 2, refusedOnRediscovery: retained.status === 'REFUSED', outbound: 0 }))
 } catch (error) {
   console.error(`Smoke evidence: ${root}`)
   if (page) {

@@ -23,6 +23,7 @@ public final class WorkbenchService {
     final WorkbenchMaterials materials;
     final WorkbenchScopePolicy scope;
     final WorkbenchCandidates candidates;
+    final WorkbenchMatching matching;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this.store = new WorkbenchStore(root, json);
@@ -32,6 +33,7 @@ public final class WorkbenchService {
         this.materials = new WorkbenchMaterials(this);
         this.scope = new WorkbenchScopePolicy(this);
         this.candidates = new WorkbenchCandidates(this);
+        this.matching = new WorkbenchMatching(this);
     }
 
     public ObjectNode state() {

@@ -19,7 +19,9 @@ final class WorkbenchCandidates {
 
     ObjectNode workspace() { return store.write(this::workspace); }
     ObjectNode workspace(Connection c) throws Exception {
-        var result = object(); result.set("jobs", store.list(c, "candidate")); result.set("runs", store.list(c, "candidate_run")); return result;
+        var result = object(); var jobs = store.list(c, "candidate");
+        for (var row : jobs) ((ObjectNode) row).set("analysis", service.matching.view(c, (ObjectNode) row));
+        result.set("jobs", jobs); result.set("runs", store.list(c, "candidate_run")); return result;
     }
 
     ObjectNode discover(ObjectNode input, Reader reader) {

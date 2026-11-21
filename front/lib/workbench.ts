@@ -164,12 +164,24 @@ export interface ScopeWorkspace {
   }>
 }
 
+export type MatchKind = 'SUPPORTED' | 'PARTIAL' | 'NEEDS_FACTS' | 'EXPERIENCE_GAP' | 'HARD_REQUIREMENT' | 'NOT_APPLICABLE'
+export interface MatchingAnalysis {
+  id?: string; status: 'NOT_ANALYZED' | 'ANALYSIS_READY' | 'NEEDS_FACTS' | 'EXPERIENCE_GAP' | 'ANALYSIS_EXCEPTION' | 'INELIGIBLE'
+  stale: boolean; scopeVersion?: number; rulesVersion?: string; jdSha256?: string; createdAt?: string; exception?: string
+  questions?: Array<string | { factId?: string; label?: string; reason: string }>
+  findings?: Array<{
+    kind: MatchKind; requirementQuote: string; reason: string
+    evidence: Array<{ type: 'FACT' | 'RESUME'; id: string; quote: string; source: Partial<Fact & Resume> }>
+    suggestion?: { goal: string; acceptance: string }
+  }>
+}
 export interface CandidateJob {
   id: string; channel: Channel; region: Region; language: Language; direction: Direction
   company: string; title: string; url: string; description: string; platformJobId?: string
   status: 'READY' | 'INCOMPLETE' | 'EXPIRED' | 'REFUSED'
   scopeVersion: number; sourceUrl: string; retrievedAt: string; firstSeenAt: string; discoveries: number; reasons: string[]
   descriptionComplete: boolean; lastReadComplete: boolean; lastSeenAt: string; lastReadDescription?: string
+  analysis: MatchingAnalysis
 }
 export interface CandidateRun {
   id: string; status: 'DISCOVERING' | 'CHECKPOINT' | 'COMPLETED'; scopeVersion: number; pagesRead: number; updatedAt: string

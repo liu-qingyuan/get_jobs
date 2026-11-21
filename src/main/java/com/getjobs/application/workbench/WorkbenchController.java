@@ -18,9 +18,12 @@ public class WorkbenchController {
     public WorkbenchController(WorkbenchService service, WorkbenchRunner runner) { this.service = service; this.runner = runner; }
 
     @GetMapping("/state") public ObjectNode state() {
+        runner.refreshMatching();
         var state = service.state(); state.set("runtime", runner.runtime()); return state;
     }
-    @GetMapping("/candidates") public ObjectNode candidates() { return service.candidates.workspace(); }
+    @GetMapping("/candidates") public ObjectNode candidates() { runner.refreshMatching(); return service.candidates.workspace(); }
+    @PostMapping("/candidates/match") public ObjectNode matchCandidates(@RequestBody ObjectNode input) { return runner.matchCandidates(input); }
+    @GetMapping("/candidates/gaps") public ObjectNode candidateGaps() { runner.refreshMatching(); return service.matching.gaps(); }
     @PostMapping("/candidates/discover") public ObjectNode discoverCandidates(@RequestBody ObjectNode input) { return runner.discoverCandidates(input); }
     @GetMapping("/scope") public ObjectNode scope() { return service.scope.workspace(); }
     @PostMapping("/scope") public ObjectNode saveScope(@RequestBody ObjectNode input) { return service.scope.save(input); }

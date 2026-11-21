@@ -66,7 +66,7 @@ export WORKBENCH_OFFERTODAY_COMMAND='["python3","/absolute/checkout/scripts/offe
 例如已有 Pi CLI、模型配置及经授权的浏览器工具时：
 
 ```bash
-export WORKBENCH_AGENT_COMMAND='["pi","--print","--no-session","@{taskFile}","只按任务包 instructions 执行。kind 为 MATERIAL_REVIEW 时，只分析给定 sources 并向 resultPath 写候选 JSON，不调用回调、不读取其他文件或网络；kind 为 CANDIDATE_READ 时，只在 source 与 limits 授权范围内读列表/必要完整详情，不登录、不联系、不上传、不点 Chat/Apply；遵守 instructions 并只向 resultPath 写只读岗位结果，无法执行资源上限或网站未知则返回 exception；其他任务先阅读 reporterPath 帮助，按合同报告进度，缺资料报告 NEEDS_INPUT 后退出，不扩大权限。"]'
+export WORKBENCH_AGENT_COMMAND='["pi","--print","--no-session","@{taskFile}","只按任务包 instructions 执行。kind 为 MATERIAL_REVIEW 时，只分析给定 sources 并向 resultPath 写候选 JSON，不调用回调、不读取其他文件或网络；kind 为 CANDIDATE_MATCH 时，只分析给定完整 candidates、facts、resumes，执行 limits 资源上限，不读取其他文件或网络；按 instructions 向 resultPath 写逐岗引用和理由，失败返回逐岗 exception，不确认事实、备料或申请；kind 为 CANDIDATE_READ 时，只在 source 与 limits 授权范围内读列表/必要完整详情，不登录、不联系、不上传、不点 Chat/Apply；遵守 instructions 并只向 resultPath 写只读岗位结果，无法执行资源上限或网站未知则返回 exception；其他任务先阅读 reporterPath 帮助，按合同报告进度，缺资料报告 NEEDS_INPUT 后退出，不扩大权限。"]'
 bash gradlew --no-daemon workbench --console=plain
 ```
 
@@ -80,7 +80,7 @@ bash gradlew --no-daemon workbench --console=plain
 - 分析命令沿用 `WORKBENCH_AGENT_COMMAND` 的无 shell `{taskFile}` 替换和独占运行槽。`kind=MATERIAL_REVIEW` 的任务包只含选定 `sources`、规则、`instructions`、`resultPath`，无申请回调或 token；最长 120 秒（受更短的执行器超时约束）。向 `resultPath` 写 `{candidates:[{sourceId,key,label,value,quote}],missing:[]}`，最多 100 候选。`value` 必须逐字位于同来源 `quote` 中；未知来源丢弃，模型的 scope/confirmed/路径等额外字段无权改变合同。此为提取式候选，语义真实性仍由用户核对，不冒充独立验证。
 - `POST /api/workbench/baseline/reviews/{id}/confirm`：`{candidateIds:[],resumeIds:[]}`，只确认当前材料的可核对子集和本次明确展示的独立简历。冲突、缺证据或过期材料拒绝，整次事务不留下半确认；未选择项仍待核实。修改/删除事实的确认依据保留在 `GET /api/workbench/facts/{id}/history`。
 - `GET /api/workbench/baseline?region=HK&language=en&site=careers.example.com`：后续准备的只读 Interface。返回 `version`、当前适用已确认 `facts` 与匹配地区/语言的核准 `resumes`；`site` 可省略，不能据此读取目录或其他资料。文件哈希不符返回阻塞，不输出可用附件。事实是经历/联系方式等，不因简历语言自动翻译或改写；简历语言筛选独立进行。
-- `/state` 包含核对记录与来源版本的可见摘要，不在轮询中运行模型。界面可读旧核对记录和事实确认历史。所有材料、日志和来源哈希只存当前隔离工作台，不覆盖原件；开发必须另用临时目录及 fake 命令。可识别凭据/指令行只保留隔离提示，不作为事实；外部命令是用户信任的本机程序，并非安全沙箱。
+- `/state` 包含核对记录与来源版本的可见摘要，不在轮询中重新整理材料。界面可读旧核对记录和事实确认历史。所有材料、日志和来源哈希只存当前隔离工作台，不覆盖原件；开发必须另用临时目录及 fake 命令。可识别凭据/指令行只保留隔离提示，不作为事实；外部命令是用户信任的本机程序，并非安全沙箱。
 
 ## 范围策略 Interface（#10）
 
@@ -103,6 +103,16 @@ bash gradlew --no-daemon workbench --console=plain
 - 返回轮次为 `DISCOVERING → COMPLETED` 或 `CHECKPOINT`，附逐来源游标与可见事件；来源没有更多已知只读页面才标记结束，不承诺全站覆盖。`{scopeVersion,runId,...本次资源上限}` 继续旧断点；来源不变、当前范围重新核验、累计预算不重置。进程中断后保留已存完整页、恢复 CHECKPOINT，不自动重试或启动其他渠道。
 - 官网命令收到 `kind=CANDIDATE_READ`、`source`（本页 URL 和 cursor）、`limits`（四个计量）、`instructions/resultPath`；没有材料、申请任务、回调 token 或 claim。可信命令必须能限制实际模型消耗/读取来源，否则返回 `{exception:原因}`；本机程序不是沙箱。只写 `{jobs:[{url,title,company,description,descriptionComplete,available?}],nextUrl?,cursor?,note?}`，每页不超过已授候选槽，结果最大 2MB。完整 JD 需正向 `descriptionComplete` 且至少 120 字符，超过 30000 字符拒绝；仅标题/卡片不冒充完整描述。下一页仍按当前精确来源/渠道重核，未授权不启动进程。
 - OfferToday 使用现有已附着会话，固定已知原生客户端版本，独立 `candidate_page` 只调用公开 `get_getJobDetail`，不打开聊天/附件选择器。`jobDesc` 非已支持全文 schema 时保留 INCOMPLETE，不猜测字段或使用投递按钮探查；只遍历当前已加载卡片的有界游标，尚未加载的远端分页不猜测。没会话、版本变化、身份不符或当前有未保存草稿/弹窗均为可见例外。真实只读采样另需授权。
+
+## 候选匹配 Interface（#12）
+
+- 默认候选主屏勾选 1–20 岗，设置批次秒数/每岗 token 后点击批量分析。展示直接/可迁移部分支持、必要核实、真实缺口、硬性条件不足和地区/语言不适用，以及 JD 原文、事实/材料引用、版本、缓存与例外。没有 AI 时明确不可分析；没有获准真实代表样本，不声明推荐质量已验收。
+- `POST /api/workbench/candidates/match`：`{scopeVersion,candidateIds?,secondsPerBatch?,modelTokensPerCandidate?}`；省略 ID 时选择全部（总数仍须 1–20）。秒数 1–120（默认30），每岗 token 1–100000（默认1000）。每个未命中岗位独立核对来源/地区/语言/方向/选择词/有效期和 MATCH 权限，并预扣该岗全部秒数/token，上述批次硬截止受更短执行器超时约束；失败不退款。缓存命中不消耗预算。
+- 显式启动后保存此批候选及资源上限。`GET /candidates`、`/state` 和 `/candidates/gaps` 对此批相关输入变化自动作有界重评；相同输入（含失败）在重跑、轮询和重启后不调用模型。未启动过的批次不会仅因读状态调用模型。共享槽忙时先返回旧结果并标记 `stale`，空闲后的读取再重评；暂停/撤销/到期不启动新模型。重新 POST 选择下一批，不形成后台无限队列。范围/规则版本变更使该批重新核验；仅无关事实/材料变化不影响缓存。中断或失败的相同输入不自动重试，须先解决输入/范围问题。
+- 原范围所选 factIds 的当前已确认值可用于**只读重评**；未确认、冲突或不可用项只显示必要核实 ID/标签，不将其值交给模型，不自动加入其他 ID。适用的核准简历按地区、语言及岗位专属链接过滤，不出服务器附件路径。这个读取不续签 #10 通用冻结授权，不解除材料变化对准备/外发的阻塞。
+- AI 任务包 `kind=CANDIDATE_MATCH`：`rulesVersion`、`limits`、`candidates`、`instructions/resultPath`。每岗含 `candidateId/jdSha256`、完整 JD 与岗位条件、适用已选 `facts/resumes` 和不含未确认值的 `questions`。没有申请回调、token、附件路径、账号或全库。可信命令不是沙箱，须执行总 token/时间上限，否则返回例外。
+- 写出 `{results:[{candidateId,jdSha256,findings:[{kind,requirementQuote,reason,evidence:[{type:"FACT"|"RESUME",id,quote}],suggestion?:{goal,acceptance}}]}]}`；每岗最多30理由、每理由最多20引用，整份输出最多2MB。`kind` 为 `SUPPORTED/PARTIAL/NEEDS_FACTS/EXPERIENCE_GAP/HARD_REQUIREMENT/NOT_APPLICABLE`。必须回显本次完整 JD 哈希，岗位原文必须来自全文，引用必须逐字来自该岗的事实值/核准简历正文；支持、部分支持、硬性不足及真实缺口必须有引用，缺证据不能推断经验不足。任何额外 score/actions/facts/路径等字段均为越权例外。每岗也可返回 `{candidateId,exception}`；该岗伪造引用、遗漏 JD 或失败不阻断其他有效结果；整个进程失败则逐岗保存例外。
+- `jobs[].analysis` 包含 `id/status/stale/scopeVersion/rulesVersion/jdSha256/questions/findings/exception`。状态为 `NOT_ANALYZED/ANALYSIS_READY/NEEDS_FACTS/EXPERIENCE_GAP/ANALYSIS_EXCEPTION/INELIGIBLE`；当前输入可复用旧分析，历史引用不改写。`GET /api/workbench/candidates/gaps` 返回 `{suggestions:[{candidateId,analysisId,scopeVersion,requirementQuote,suggestion}]}`，只提供当前有效缺口建议供项目切片读取；不创建任务、不执行项目、不生成/批准可外发材料，也不产生新事实。
 
 ## 执行器报告合同
 
@@ -146,7 +156,7 @@ cd front
 node node_modules/next/dist/bin/next build
 ```
 
-Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9–#11 的打包应用冒烟：
+Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9–#12 的打包应用冒烟：
 
 ```bash
 # 先用正常配置构建；不会把测试端口/fake 配置编入正式产物。
@@ -154,6 +164,6 @@ bash gradlew --no-daemon test bootJar -PrebuildFrontend -x installPatchrightDriv
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/baseline-smoke.mjs
 ```
 
-脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；共 6 个范围版本、3 候选（2 完整 JD）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png` 的临时证据目录与计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
+脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；共 7 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 2 次、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png` 的临时证据目录与计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。

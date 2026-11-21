@@ -104,7 +104,7 @@ final class WorkbenchScopePolicy {
         }
         return result;
     }
-    private ObjectNode latest(Connection c) throws Exception {
+    ObjectNode latest(Connection c) throws Exception {
         var all = store.list(c, "scope_version");
         return all.isEmpty() ? null : (ObjectNode) all.get(all.size() - 1);
     }
@@ -199,6 +199,32 @@ final class WorkbenchScopePolicy {
         });
     }
 
+    /** Dedicated read-only matching reservation; never creates a reusable frozen execution grant. */
+    ObjectNode matchingDecision(Connection c, int version, ObjectNode target) throws Exception {
+        return assess(c, matchingRequest(version, target), false, true, target.path("lastReadDescription").asText(), true);
+    }
+    ObjectNode reserveMatching(int version, ObjectNode target, int seconds, int tokens) {
+        return store.write(c -> {
+            var request = matchingRequest(version, target);
+            request.putObject("cost").put("seconds", seconds).put("modelTokens", tokens).put("candidates", 0).put("outbound", 0);
+            var decision = assess(c, request, false, false, target.path("lastReadDescription").asText(), true);
+            if (decision.path("allowed").asBoolean()) {
+                var used = usage(c);
+                for (String meter : METERS) used.put(meter, used.path(meter).asLong() + decision.path("cost").path(meter).asLong());
+                store.save(c, "scope_usage", used);
+                var authorization = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", version)
+                        .put("status", "CONSUMED").put("createdAt", now()).put("consumedAt", now());
+                authorization.set("request", request); authorization.set("reasons", decision.path("reasons"));
+                store.save(c, "scope_authorization", authorization); decision.put("authorizationId", authorization.path("id").asText());
+            }
+            return decision;
+        });
+    }
+    private ObjectNode matchingRequest(int version, ObjectNode target) {
+        var request = object().put("scopeVersion", version).put("action", "MATCH");
+        request.set("target", target.deepCopy().put("resumeId", "").put("transformation", "ORIGINAL")); return request;
+    }
+
     ObjectNode discoveryCandidate(Connection c, int version, ObjectNode target, String observedDescription) throws Exception {
         var request = discoveryRequest(version, target);
         return assess(c, request, false, true, observedDescription);
@@ -216,6 +242,9 @@ final class WorkbenchScopePolicy {
         return assess(c, input, sourceRead, reserved, "");
     }
     private ObjectNode assess(Connection c, ObjectNode input, boolean sourceRead, boolean reserved, String observedDescription) throws Exception {
+        return assess(c, input, sourceRead, reserved, observedDescription, false);
+    }
+    private ObjectNode assess(Connection c, ObjectNode input, boolean sourceRead, boolean reserved, String observedDescription, boolean currentMatch) throws Exception {
         var decision = object().put("allowed", false).put("source", "SCOPE_POLICY");
         var reasons = decision.putArray("reasons"); var codes = decision.putArray("reasonCodes");
         var scope = latest(c);
@@ -256,8 +285,8 @@ final class WorkbenchScopePolicy {
         if (!sourceRead && !scope.path("includeTerms").isEmpty() && !matches(scope.path("includeTerms"), content)) deny(reasons, codes, "SELECTION_DENIED", "岗位未命中已确认的选择词");
         if (!sourceRead && matches(scope.path("excludeTerms"), content)) deny(reasons, codes, "EXCLUDED", "岗位命中排除项");
         String transformation = text(target, "transformation", 50, true);
-        if (!sourceRead && !reserved && !contains(scope.path("transformations"), transformation)) deny(reasons, codes, "TRANSFORMATION_DENIED", "材料变换未获允许；不能新增事实或跨地区/语言覆盖");
-        try {
+        if (!sourceRead && !reserved && !currentMatch && !contains(scope.path("transformations"), transformation)) deny(reasons, codes, "TRANSFORMATION_DENIED", "材料变换未获允许；不能新增事实或跨地区/语言覆盖");
+        if (!currentMatch) try {
             var selected = service.materials.scopeSelection(c, scope);
             if (!selected.equals(scope.path("materials"))) deny(reasons, codes, "MATERIAL_CHANGED", "事实或独立材料版本已变化，须重新确认范围");
             boolean resumeRequired = action.equals("PREPARE") || OUTBOUND.contains(action);

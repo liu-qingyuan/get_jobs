@@ -187,15 +187,57 @@ public final class WorkbenchRunner implements AutoCloseable {
         }
     }
 
-    /** Bounded, read-only material analysis. Shares the application slot but has no event token or browser authority. */
-    public synchronized ObjectNode reviewMaterials(ObjectNode input) {
-        if (closed || busy.get()) throw new WorkbenchException(409, "已有执行任务运行中或执行器已关闭");
-        var review = service.materials.prepare(input);
-        if (review.has("candidates")) return review;
-        if (command.isEmpty()) throw new WorkbenchException(409, "尚未配置 AI 执行器，不能整理材料；未确认任何事实");
-        busy.set(true);
+    /** Explicit bounded batch; subsequent reads reconcile relevant changes, never retry identical failed inputs. */
+    public synchronized ObjectNode matchCandidates(ObjectNode input) {
+        if (closed || !busy.compareAndSet(false, true)) throw new WorkbenchException(409, "执行器已关闭或正在处理其他任务");
+        try { return service.matching.start(input, this::analyzeCandidates); }
+        finally { busy.set(false); }
+    }
+    public void refreshMatching() {
+        // Claim before waiting for the lifecycle monitor: an already running process must never block a GET.
+        if (!busy.compareAndSet(false, true)) return;
+        try {
+            synchronized (this) {
+                if (!closed) service.matching.refresh(this::analyzeCandidates);
+            }
+        } finally { busy.set(false); }
+    }
+    private ObjectNode analyzeCandidates(ObjectNode bundle) throws Exception {
+        if (command.isEmpty()) throw new WorkbenchException(409, "尚未配置匹配 AI 执行器，未生成事实或申请");
+        Path directory = service.store.root.resolve("runs").resolve("matching-" + UUID.randomUUID());
+        Files.createDirectories(directory);
+        Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
+        long seconds = Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong());
+        ((ObjectNode) bundle.path("limits")).put("seconds", seconds);
+        bundle.put("resultPath", result.toString());
+        Files.writeString(file, service.json.writeValueAsString(bundle));
+        try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
+        catch (UnsupportedOperationException ignored) { }
+        var arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
         Process child = null;
         try {
+            child = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("analysis.log").toFile()).start();
+            process = child; child.getOutputStream().close();
+            if (!child.waitFor(seconds, TimeUnit.SECONDS)) throw new WorkbenchException(409, "匹配时间预算耗尽，未确认新事实；相同输入不自动重试");
+            if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024)
+                throw new WorkbenchException(409, "匹配执行器未返回有效结果，请检查本机日志；相同输入不自动重试");
+            var parsed = service.json.readTree(Files.readString(result));
+            if (!(parsed instanceof ObjectNode output)) throw new WorkbenchException(409, "匹配结果格式无效");
+            return output;
+        } finally {
+            if (child != null && child.isAlive()) terminate(child);
+            process = null;
+        }
+    }
+
+    /** Bounded, read-only material analysis. Shares the application slot but has no event token or browser authority. */
+    public synchronized ObjectNode reviewMaterials(ObjectNode input) {
+        if (closed || !busy.compareAndSet(false, true)) throw new WorkbenchException(409, "已有执行任务运行中或执行器已关闭");
+        Process child = null;
+        try {
+            var review = service.materials.prepare(input);
+            if (review.has("candidates")) return review;
+            if (command.isEmpty()) throw new WorkbenchException(409, "尚未配置 AI 执行器，不能整理材料；未确认任何事实");
             Path directory = service.store.root.resolve("runs").resolve("material-" + UUID.randomUUID());
             Files.createDirectories(directory);
             Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
