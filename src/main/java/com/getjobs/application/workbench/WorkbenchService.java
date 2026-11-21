@@ -28,6 +28,7 @@ public final class WorkbenchService {
     final WorkbenchPreparation preparation;
     final WorkbenchWorkflow workflow;
     final WorkbenchProjects projects;
+    final WorkbenchVerification verification;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this(root, jobsdb, json, null);
@@ -45,6 +46,7 @@ public final class WorkbenchService {
         this.preparation = new WorkbenchPreparation(this);
         this.workflow = new WorkbenchWorkflow(this);
         this.projects = new WorkbenchProjects(this, projectsRoot);
+        this.verification = new WorkbenchVerification(this);
     }
 
     public ObjectNode state() {
@@ -70,7 +72,7 @@ public final class WorkbenchService {
 
     public ObjectNode saveFact(ObjectNode input) {
         var manual = input.deepCopy();
-        manual.remove(java.util.List.of("sourceId", "sourceName", "sourceSha256", "quote", "reviewId"));
+        manual.remove(java.util.List.of("sourceId", "sourceName", "sourceSha256", "quote", "reviewId", "evidenceKind", "projectId", "attemptId", "verificationId", "region", "language", "direction", "requirementQuote"));
         manual.put("needsReview", false);
         return store.write(c -> saveFact(c, manual));
     }
@@ -88,7 +90,7 @@ public final class WorkbenchService {
         fact.put("id", id.isEmpty() ? id() : id);
         boolean unchangedValue = previous != null && previous.path("key").equals(fact.path("key"))
                 && previous.path("scope").equals(fact.path("scope")) && previous.path("value").equals(fact.path("value"));
-        for (String field : java.util.List.of("sourceId", "sourceName", "sourceSha256", "quote", "reviewId", "needsReview")) {
+        for (String field : java.util.List.of("sourceId", "sourceName", "sourceSha256", "quote", "reviewId", "needsReview", "evidenceKind", "projectId", "attemptId", "verificationId", "region", "language", "direction", "requirementQuote")) {
             if (input.has(field)) fact.set(field, input.get(field).deepCopy());
             else if (unchangedValue && previous.has(field)) fact.set(field, previous.get(field).deepCopy());
         }
@@ -250,8 +252,8 @@ public final class WorkbenchService {
             var facts = json.createArrayNode();
             String site = task.path("url").asText().isEmpty() ? "" : "SITE:" + URI.create(task.path("url").asText()).getHost();
             for (var fact : store.list(c, "fact")) {
-                String scope = fact.path("scope").asText();
-                if (fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean() && (scope.equals("COMMON") || scope.equals(task.path("region").asText()) || scope.equalsIgnoreCase(site))) facts.add(fact.deepCopy());
+                if (fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean() && verification.factCurrent(c, fact)
+                        && WorkbenchMaterials.factApplies(fact, task.path("region").asText(), task.path("language").asText(), site.isEmpty() ? "" : site.substring(5))) facts.add(fact.deepCopy());
             }
             snapshot.set("facts", facts); task.set("snapshot", snapshot);
             task.put("state", "APPROVED"); task.remove("tokenHash");

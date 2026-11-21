@@ -22,6 +22,10 @@ export interface Fact {
   sourceSha256?: string
   quote?: string
   needsReview?: boolean
+  evidenceKind?: 'LOCAL_PROJECT'
+  projectId?: string
+  attemptId?: string
+  verificationId?: string
 }
 
 export interface Resume {
@@ -120,7 +124,7 @@ export interface MaterialReview {
   missing: string[]
 }
 
-export type ScopeAction = 'DISCOVER' | 'MATCH' | 'PREPARE' | 'APPLY' | 'CONTACT' | 'SEND_CV' | 'PROJECT_EXECUTE'
+export type ScopeAction = 'DISCOVER' | 'MATCH' | 'PREPARE' | 'APPLY' | 'CONTACT' | 'SEND_CV' | 'PROJECT_EXECUTE' | 'PROJECT_VERIFY' | 'PROJECT_FEEDBACK'
 export type ScopeMeter = 'candidates' | 'modelTokens' | 'seconds' | 'outbound'
 export interface ScopeConfig {
   expectedVersion?: number
@@ -137,6 +141,7 @@ export interface ScopeConfig {
   contactVerified?: boolean
   projectIds?: string[]
   projectResources?: string[]
+  projectFeedbackIds?: string[]
   transformations: string[]
   actions: ScopeAction[]
   budgets: Record<ScopeMeter, number>
@@ -165,8 +170,8 @@ export interface ScopeWorkspace {
   usage: Record<ScopeMeter, number>
   authorizations: Array<{
     id: string; scopeVersion: number; status: 'FROZEN' | 'CONSUMED'; source: 'SCOPE_POLICY'
-    request: { action: Exclude<ScopeAction, 'PROJECT_EXECUTE'>; target: { title: string; url: string } } |
-      { action: 'PROJECT_EXECUTE'; projectId: string; directory: string }
+    request: { action: Exclude<ScopeAction, 'PROJECT_EXECUTE' | 'PROJECT_VERIFY' | 'PROJECT_FEEDBACK'>; target: { title: string; url: string } } |
+      { action: 'PROJECT_EXECUTE' | 'PROJECT_VERIFY' | 'PROJECT_FEEDBACK'; projectId: string; directory: string }
     result?: { outcome: string; evidence: string }
   }>
 }
@@ -216,7 +221,11 @@ export interface WorkflowCycle {
 export interface GapProject {
   id: string; candidateId: string; analysisId: string; requirementQuote: string; goal: string; acceptance: string
   directory?: string; limitation: string; allowedActions: string[]; scopeVersion?: number
-  status: 'PROPOSED' | 'BLOCKED' | 'QUEUED' | 'RUNNING' | 'UNVERIFIED' | 'FAILED' | 'STOPPED'
+  status: 'PROPOSED' | 'BLOCKED' | 'QUEUED' | 'RUNNING' | 'UNVERIFIED' | 'FAILED' | 'STOPPED' | 'REJECTED' | 'VERIFIED'
+  verifications?: Array<{ id: string; source: string; status: 'VERIFYING' | 'PASSED' | 'REJECTED'; attemptId: string; verifierIdentity: string; evidenceSha256: string; scopeVersion: number; reason?: string
+    contract: { goal: string; acceptance: string; artifacts: Array<{ path: string; sha256: string; bytes: number }> }
+    checks?: Array<{ criterion: string; passed: boolean; evidence: string }>
+  }>
   stopRequested?: boolean; lastProgress?: string; updatedAt: string
   events: Array<{ code: string; message: string; at: string }>
   attempts: Array<{ id: string; startedAt: string; endedAt?: string; status?: string; authorizationId: string
@@ -234,7 +243,7 @@ export interface WorkbenchState {
   preparations: { packages: PreparationPackage[] }
   workflow: { cycles: WorkflowCycle[] }
   projects: { projects: GapProject[] }
-  runtime: { projectConfigured: boolean; agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string }
+  runtime: { verifierConfigured: boolean; projectConfigured: boolean; agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string }
   platforms: {
     bossUrl: string
     offerTodayUrl: string

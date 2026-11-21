@@ -38,6 +38,9 @@ final class WorkbenchProjects {
         catch (java.io.IOException e) { throw new WorkbenchException(409, "项目根目录不可用"); }
         return directory;
     }
+    void checkVerifierFile(Path file) throws java.io.IOException {
+        require(root == null || !file.toRealPath().startsWith(root), "独立验收程序不能来自执行器可写的项目目录");
+    }
     private static void checkRoot(Path root) {
         for (Path parent = root; parent != null; parent = parent.getParent()) {
             require(!Files.exists(parent.resolve(".git")) && !Files.exists(parent.resolve("workbench.db"))
@@ -73,7 +76,7 @@ final class WorkbenchProjects {
         input.fieldNames().forEachRemaining(field -> require(Set.of("scopeVersion", "seconds", "modelTokens").contains(field), "项目启动不能指定路径、命令或额外资源：" + field));
         return store.write(c -> {
             var p = store.get(c, "project", id);
-            require(Set.of("PROPOSED", "BLOCKED", "FAILED", "STOPPED").contains(p.path("status").asText()), "项目已排队、运行或待独立验证，不能重复执行");
+            require(Set.of("PROPOSED", "BLOCKED", "FAILED", "STOPPED", "REJECTED").contains(p.path("status").asText()), "项目已排队、运行或待独立验证，不能重复执行");
             int seconds = limit(input, "seconds", 30, 120), tokens = limit(input, "modelTokens", 0, 100000);
             require(seconds >= 1, "项目时间须为正数");
             p.remove("stopRequested"); p.remove("lastProgress");
@@ -194,6 +197,11 @@ final class WorkbenchProjects {
     }
     ObjectNode workspace() { return store.write(this::workspace); }
     ObjectNode workspace(Connection c) throws Exception {
-        var result = object(); result.set("projects", store.list(c, "project")); return result;
+        var result = object(); var projects = store.list(c, "project");
+        for (var p : projects) {
+            var records = ((ObjectNode) p).putArray("verifications");
+            for (var record : store.list(c, "project_verification")) if (record.path("projectId").equals(p.path("id"))) records.add(record);
+        }
+        result.set("projects", projects); return result;
     }
 }

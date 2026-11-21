@@ -10,7 +10,8 @@ import static com.getjobs.application.workbench.WorkbenchService.*;
 
 /** Evidence-based, advisory matching. Owns cache identity, provenance and per-candidate exceptions, never facts or approvals. */
 final class WorkbenchMatching {
-    static final String RULES = "evidence-matching-v1";
+    static final String RULES = "evidence-matching-v2";
+    private static final java.util.regex.Pattern EMPLOYMENT_REQUIREMENT = java.util.regex.Pattern.compile("(?i)\\b(?:years?|yrs?|months?|mos?|commercial|employment|production|professional|tenure|industry)\\b|\\d+\\s*\\+?\\s*(?:y(?:rs?)?|m(?:os?)?)\\b|年|个月|商业|任职|生产(?:环境|经验)");
     private static final Set<String> KINDS = Set.of("SUPPORTED", "PARTIAL", "NEEDS_FACTS", "EXPERIENCE_GAP", "HARD_REQUIREMENT", "NOT_APPLICABLE");
     @FunctionalInterface interface Analyzer { ObjectNode analyze(ObjectNode bundle) throws Exception; }
     private final WorkbenchService service;
@@ -87,7 +88,7 @@ final class WorkbenchMatching {
                 + "每个候选必须回显完整 JD 的 jdSha256；requirementQuote 必须逐字来自完整 JD。kind 仅 SUPPORTED/PARTIAL/NEEDS_FACTS/EXPERIENCE_GAP/HARD_REQUIREMENT/NOT_APPLICABLE。"
                 + "SUPPORTED/PARTIAL/HARD_REQUIREMENT/EXPERIENCE_GAP 必须有实际 FACT 或 RESUME 原文 evidence；id 必须来自该候选，quote 必须逐字来自相应 value/content。"
                 + "区分直接支持、可迁移部分支持、事实不明、真实经验不足、硬性年限不足和地区/语言不适用。缺证据只能 NEEDS_FACTS，不可推断新经历。"
-                + "仅 EXPERIENCE_GAP 可建议有界项目的 goal/acceptance；项目不能补造工作年限。没有匹配分数、权限、文件路径或外发材料。单岗失败可返回 {candidateId,exception:原因}，不影响其他候选。每岗最多30个理由。判定是建议，引用核验不等于真实质量验收。");
+                + "evidenceKind=LOCAL_PROJECT 仅支持验收范围内的本地技能练习，不能支持 commercial/employment/production/years 要求；这些硬性要求仍须单列 GAP。仅 EXPERIENCE_GAP 可建议有界项目的 goal/acceptance；项目不能补造工作年限。没有匹配分数、权限、文件路径或外发材料。单岗失败可返回 {candidateId,exception:原因}，不影响其他候选。每岗最多30个理由。判定是建议，引用核验不等于真实质量验收。");
         ObjectNode output = null; String failure = null;
         try {
             output = analyzer.analyze(bundle);
@@ -142,12 +143,34 @@ final class WorkbenchMatching {
                 item.set("source", source.deepCopy()); evidence.add(item);
             }
             if (Set.of("SUPPORTED", "PARTIAL", "HARD_REQUIREMENT", "EXPERIENCE_GAP").contains(kind)) require(!evidence.isEmpty(), "支持或硬性不足判断必须引用实际经历，缺证据不能推断事实");
+            if (Set.of("SUPPORTED", "PARTIAL").contains(kind) && EMPLOYMENT_REQUIREMENT.matcher(quote).find()) {
+                boolean localProject = false;
+                for (var ref : evidence) if (ref.path("source").path("evidenceKind").asText().equals("LOCAL_PROJECT")) localProject = true;
+                if (localProject) {
+                    kind = "EXPERIENCE_GAP";
+                    saved.put("kind", kind).put("reason", "独立验收仅证明本地项目成果，不证明任职、商业落地、生产经验或工作年限；此硬性要求仍缺证据");
+                }
+            }
             if (finding.has("suggestion")) {
                 require(kind.equals("EXPERIENCE_GAP") && finding.path("suggestion") instanceof ObjectNode, "只有真实经验缺口可建议项目，不执行或冒充工作年限");
                 var suggestion = (ObjectNode) finding.path("suggestion"); fields(suggestion, Set.of("goal", "acceptance"));
                 saved.putObject("suggestion").put("goal", text(suggestion, "goal", 1000, true)).put("acceptance", text(suggestion, "acceptance", 2000, true));
             }
             needs |= kind.equals("NEEDS_FACTS"); gap |= kind.equals("EXPERIENCE_GAP"); findings.add(saved);
+        }
+        // A model can also omit the hard clause entirely. Local practice must not erase observable employment requirements.
+        JsonNode local = null;
+        for (var fact : input.path("context").path("facts")) if (fact.path("evidenceKind").asText().equals("LOCAL_PROJECT")) local = fact;
+        if (local != null) for (String clause : input.path("target").path("description").asText().split("[.!?。！？\\n]")) {
+            clause = clause.trim(); if (clause.isEmpty() || !EMPLOYMENT_REQUIREMENT.matcher(clause).find()) continue;
+            boolean addressed = false;
+            for (var finding : findings) if (clause.contains(finding.path("requirementQuote").asText()) && EMPLOYMENT_REQUIREMENT.matcher(finding.path("requirementQuote").asText()).find()) addressed = true;
+            if (!addressed) {
+                var missing = object().put("kind", "EXPERIENCE_GAP").put("requirementQuote", clause)
+                        .put("reason", "独立验收仅证明本地练习；模型遗漏的任职/商业/生产/年限条件仍缺独立经历依据");
+                missing.putArray("evidence").add(object().put("type", "FACT").put("id", local.path("id").asText()).put("quote", local.path("value").asText()).set("source", local.deepCopy()));
+                findings.add(missing); gap = true;
+            }
         }
         record.put("status", needs ? "NEEDS_FACTS" : gap ? "EXPERIENCE_GAP" : "ANALYSIS_READY");
     }

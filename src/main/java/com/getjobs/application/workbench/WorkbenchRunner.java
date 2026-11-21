@@ -17,6 +17,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final List<String> offerTodayCommand;
     private final List<String> jobsDbCommand;
     private final List<String> projectCommand;
+    private final List<String> verifierCommand;
     private final WorkbenchCandidates.Reader bossReader;
     private final String callback;
     private final long timeoutSeconds;
@@ -47,6 +48,15 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
             WorkbenchCandidates.Reader bossReader, List<String> projectCommand, String callback, long timeoutSeconds) {
+        this(service, command, offerTodayCommand, jobsDbCommand, bossReader, projectCommand, List.of(), callback, timeoutSeconds);
+    }
+
+    WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
+            WorkbenchCandidates.Reader bossReader, List<String> projectCommand, List<String> verifierCommand, String callback, long timeoutSeconds) {
+        this.verifierCommand = List.copyOf(verifierCommand);
+        if (!verifierCommand.isEmpty() && (verifierCommand.stream().noneMatch(arg -> arg.contains("{taskFile}")) || verifierCommand.stream().anyMatch(String::isBlank)
+                || verifierCommand.equals(projectCommand) || verifierCommand.equals(command)))
+            throw new IllegalArgumentException("独立验收器须单独配置，参数包含 {taskFile}，不可复用项目/官网命令");
         this.projectCommand = List.copyOf(projectCommand);
         if (!projectCommand.isEmpty() && (projectCommand.stream().noneMatch(arg -> arg.contains("{taskFile}")) || projectCommand.stream().anyMatch(String::isBlank)))
             throw new IllegalArgumentException("项目执行器参数必须包含 {taskFile} 且不能为空");
@@ -63,6 +73,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             recoverProcessLease();
             service.recoverInterrupted();
             service.projects.recover();
+            service.verification.recover();
         } catch (Exception e) {
             try { if (lock != null) lock.release(); if (lockChannel != null) lockChannel.close(); } catch (Exception ignored) { }
             throw new IllegalStateException("工作台数据目录已被使用或无法锁定", e);
@@ -71,7 +82,7 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     public ObjectNode runtime() {
         return service.json.createObjectNode().put("agentConfigured", !command.isEmpty())
-                .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get()).put("projectConfigured", !projectCommand.isEmpty())
+                .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get()).put("projectConfigured", !projectCommand.isEmpty()).put("verifierConfigured", !verifierCommand.isEmpty())
                 .put("jobsDbConfigured", !jobsDbCommand.isEmpty()).put("jobsDbProductionVerified", false)
                 .put("jobsDbOutboundSupported", false).put("jobsDbCapabilityReason", JobsDbTarget.OUTBOUND_BLOCK_REASON)
                 .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
@@ -116,6 +127,82 @@ public final class WorkbenchRunner implements AutoCloseable {
         var project = service.projects.queue(id, input);
         if (project.path("status").asText().equals("QUEUED")) executor.submit(() -> executeProject(id, project.path("queueId").asText()));
         return project;
+    }
+    public synchronized ObjectNode verifyProject(String id, ObjectNode input) {
+        if (closed || verifierCommand.isEmpty()) throw new WorkbenchException(409, "尚未配置独立可信验收器，不能采信执行器自述");
+        if (!busy.compareAndSet(false, true)) throw new WorkbenchException(409, "共享资源正在使用，不能并行验收");
+        ObjectNode record = null;
+        try {
+            var verifier = verifierArguments();
+            String identity = verifierIdentity(verifier);
+            record = service.verification.begin(id, input, identity);
+            if (!record.path("cached").asBoolean()) {
+                var bundle = service.verification.bundle(record);
+                long seconds = Math.min(timeoutSeconds, record.path("seconds").asLong());
+                ((ObjectNode) bundle.path("limits")).put("seconds", seconds);
+                Path run = service.verification.run(record), task = run.resolve("task.json");
+                Files.writeString(task, bundle.toString());
+                var args = verifier.stream().map(arg -> arg.replace("{taskFile}", task.toString())).toList();
+                service.verification.checkRunning(record);
+                Process child = spawn(new ProcessBuilder(args).directory(run.resolve("artifacts").toFile()).redirectErrorStream(true).redirectOutput(run.resolve("verification.log").toFile()));
+                child.getOutputStream().close();
+                long deadline = System.nanoTime() + seconds * 1_000_000_000L;
+                while (!child.waitFor(75, TimeUnit.MILLISECONDS)) {
+                    service.verification.checkRunning(record);
+                    if (closed || System.nanoTime() >= deadline) throw new WorkbenchException(409, "独立验收时间预算耗尽或已停止");
+                }
+                WorkbenchService.require(child.exitValue() == 0, "独立验收进程失败；没有新增经历");
+                releaseProcess();
+                WorkbenchService.require(identity.equals(verifierIdentity(verifierArguments())), "验收程序身份已变化，拒绝过期证据");
+                service.verification.finish(record, projectJson(run, run.resolve("result.json")), null);
+            }
+        } catch (Exception e) {
+            releaseProcess();
+            if (record == null) {
+                if (e instanceof WorkbenchException exception) throw exception;
+                throw new WorkbenchException(409, "独立验收配置或环境无效");
+            }
+            service.verification.finish(record, null, e instanceof WorkbenchException ? e.getMessage() : "独立验收失败或证据不可读取");
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+        } finally {
+            try { releaseProcess(); } finally { busy.set(false); }
+        }
+        for (var project : service.projects.workspace().path("projects")) if (project.path("id").asText().equals(id)) return (ObjectNode) project;
+        throw new WorkbenchException(409, "项目不存在");
+    }
+    /** Narrow launch contract: a pinned executable, or Python with a pinned absolute script. Never resolve code in artifact cwd. */
+    private List<String> verifierArguments() throws Exception {
+        boolean python = verifierCommand.size() == 3 && Path.of(verifierCommand.get(0)).getFileName().toString().matches("python(?:3(?:\\.\\d+)?)?");
+        WorkbenchService.require((verifierCommand.size() == 2 || python) && verifierCommand.get(verifierCommand.size() - 1).equals("{taskFile}"), "独立验收仅支持 [绝对可执行程序,{taskFile}] 或 [python3,绝对脚本,{taskFile}]，不接受相对代码、-m/-c 或 shell 参数");
+        var resolved = new ArrayList<>(verifierCommand);
+        Path executable = Path.of(resolved.get(0));
+        if (python && !executable.isAbsolute()) {
+            WorkbenchService.require(executable.getNameCount() == 1, "验收解释器不能是相对路径");
+            Path installed = null;
+            for (String directory : System.getenv().getOrDefault("PATH", "").split(java.io.File.pathSeparator)) {
+                Path path = Path.of(directory);
+                if (path.isAbsolute() && Files.isRegularFile(path.resolve(executable)) && Files.isExecutable(path.resolve(executable))) { installed = path.resolve(executable); break; }
+            }
+            WorkbenchService.require(installed != null, "找不到可信绝对路径的 Python 解释器"); executable = installed;
+        }
+        WorkbenchService.require(executable.isAbsolute() && Files.isRegularFile(executable) && Files.isExecutable(executable), "验收可执行程序须为已存在的可信绝对路径");
+        resolved.set(0, executable.toRealPath().toString());
+        if (python) WorkbenchService.require(Path.of(resolved.get(1)).isAbsolute() && Files.isRegularFile(Path.of(resolved.get(1))), "独立验收脚本须为已存在的可信绝对路径，不能执行项目产物或相对代码");
+        return resolved;
+    }
+    private String verifierIdentity(List<String> verifier) throws Exception {
+        var identity = service.json.createObjectNode(); identity.set("arguments", service.json.valueToTree(verifier));
+        var files = identity.putArray("configuredFiles");
+        for (String argument : verifier) if (!argument.equals("{taskFile}")) {
+            Path file = Path.of(argument);
+            service.projects.checkVerifierFile(file);
+            for (String projectArgument : projectCommand.subList(Math.min(1, projectCommand.size()), projectCommand.size()))
+                if (!projectArgument.contains("{taskFile}") && Path.of(projectArgument).isAbsolute() && Files.isRegularFile(Path.of(projectArgument)))
+                    WorkbenchService.require(!Files.isSameFile(file, Path.of(projectArgument)), "独立验收不能复用项目执行脚本");
+            WorkbenchService.require(!Files.isSymbolicLink(file) && Files.size(file) <= 10 * 1024 * 1024, "验收脚本须为有界普通文件");
+            files.add(WorkbenchService.hash(Files.readAllBytes(file)));
+        }
+        return WorkbenchService.hash(identity.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
     private void executeProject(String id, String queueId) {
         if (closed) return;

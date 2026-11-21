@@ -190,12 +190,28 @@ final class WorkbenchMaterials {
         });
     }
 
+    /** A policy-selected local accomplishment, never an employment/tenure inference or a rewrite of an existing fact. */
+    void projectAccomplishment(Connection c, ObjectNode project, ObjectNode verification, int scopeVersion) throws Exception {
+        for (var fact : store.list(c, "fact")) if (fact.path("verificationId").equals(verification.path("id"))) return;
+        var candidate = store.get(c, "candidate", project.path("candidateId").asText());
+        String value = "Verified local practice project: " + project.path("goal").asText() + ". Acceptance independently checked: " + project.path("acceptance").asText()
+                + ". Local practice only; not employment, commercial delivery, production experience or years of work.";
+        require(!unsafe(value), "项目目标/验收含指令或凭据，不可回流事实");
+        var fact = object().put("key", "project_" + verification.path("id").asText()).put("label", "独立验收的本地项目成果")
+                .put("value", value).put("confirmed", true).put("needsReview", false).put("scope", "SITE:" + java.net.URI.create(candidate.path("url").asText()).getHost())
+                .put("region", candidate.path("region").asText()).put("language", candidate.path("language").asText()).put("direction", candidate.path("direction").asText()).put("requirementQuote", project.path("requirementQuote").asText())
+                .put("evidenceKind", "LOCAL_PROJECT").put("projectId", project.path("id").asText()).put("attemptId", verification.path("attemptId").asText())
+                .put("verificationId", verification.path("id").asText()).put("sourceId", verification.path("id").asText()).put("sourceSha256", verification.path("evidenceSha256").asText())
+                .put("source", "INDEPENDENT_VERIFIER / project " + project.path("id").asText() + " / scope v" + scopeVersion);
+        service.saveFact(c, fact);
+    }
+
     ObjectNode baseline(String region, String language, String site) {
         if (!Set.of("HK", "MAINLAND").contains(region) || !Set.of("zh", "en").contains(language)) throw new WorkbenchException(400, "请明确基线适用地区与语言");
         return store.write(c -> {
             var result = object().put("region", region).put("language", language);
             var facts = array(); var resumes = array();
-            for (var fact : store.list(c, "fact")) if (fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean() && applicable(fact.path("scope").asText(), region, site)) facts.add(fact);
+            for (var fact : store.list(c, "fact")) if (fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean() && factApplies(fact, region, language, site) && service.verification.factCurrent(c, fact)) facts.add(fact);
             for (var resume : store.list(c, "resume")) if (resume.path("approved").asBoolean() && resume.path("region").asText().equals(region) && resume.path("language").asText().equals(language)) {
                 service.verifyResume((ObjectNode) resume); resumes.add(resume);
             }
@@ -210,7 +226,7 @@ final class WorkbenchMaterials {
         var selected = object(); var facts = selected.putArray("facts"); var resumes = selected.putArray("resumes");
         for (String id : ids(input, "factIds")) {
             var fact = store.get(c, "fact", id);
-            require(fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean(), "范围只能引用当前已确认事实");
+            require(fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean() && service.verification.factCurrent(c, fact), "范围只能引用当前有证据的已确认事实");
             facts.add(fact);
         }
         for (String id : ids(input, "resumeIds")) {
@@ -225,7 +241,7 @@ final class WorkbenchMaterials {
         var selected = scopeSelection(c, scope); var context = object();
         var facts = context.putArray("facts"); var resumes = context.putArray("resumes");
         String site = java.net.URI.create(target.path("url").asText()).getHost();
-        for (var fact : selected.path("facts")) if (applicable(fact.path("scope").asText(), target.path("region").asText(), site)) facts.add(fact);
+        for (var fact : selected.path("facts")) if (factApplies(fact, target.path("region").asText(), target.path("language").asText(), site)) facts.add(fact);
         for (var resume : selected.path("resumes")) if (scopeResumeApplies(resume, target)) resumes.add(resume);
         return context;
     }
@@ -240,10 +256,11 @@ final class WorkbenchMaterials {
             JsonNode current = null;
             for (var fact : all) if (fact.path("id").equals(snapshot.path("id"))) current = fact;
             // An ID changing scope cannot cause the old scope's private contents to leave here.
-            if (!applicable(snapshot.path("scope").asText(), target.path("region").asText(), site)) continue;
+            if (!factApplies(snapshot, target.path("region").asText(), target.path("language").asText(), site)) continue;
             boolean usable = current != null && current.path("scope").equals(snapshot.path("scope"))
                     && current.path("confirmed").asBoolean() && !current.path("needsReview").asBoolean()
-                    && !unsafe(current.path("value").asText());
+                    && !unsafe(current.path("value").asText()) && factApplies(current, target.path("region").asText(), target.path("language").asText(), site)
+                    && service.verification.factCurrent(c, current);
             boolean conflict = false;
             if (usable) for (var other : all) if (!other.path("id").equals(current.path("id")) && sameKey(current, other)
                     && !other.path("value").equals(current.path("value"))) conflict = true;
@@ -252,6 +269,15 @@ final class WorkbenchMaterials {
                         .put("label", snapshot.path("label").asText()).put("version", current == null ? -1 : current.path("version").asInt(1))
                         .put("reason", conflict ? "同一事实存在冲突，请核实或更正来源" : "所选事实未确认、缺证据或已不可用"));
             } else facts.add(current.deepCopy());
+        }
+        // Prior scope consent selects concrete projects, not arbitrary new facts. Only their corresponding requirement can affect this matching cache.
+        if (scope.path("actions").toString().contains("\"PROJECT_FEEDBACK\"")) for (var fact : all) {
+            boolean allowed = false, selected = false;
+            for (var projectId : scope.path("projectFeedbackIds")) if (projectId.asText().equals(fact.path("projectId").asText())) allowed = true;
+            for (var existing : facts) if (existing.path("id").equals(fact.path("id"))) selected = true;
+            if (allowed && !selected && fact.path("evidenceKind").asText().equals("LOCAL_PROJECT") && fact.path("confirmed").asBoolean() && !fact.path("needsReview").asBoolean()
+                    && factApplies(fact, target.path("region").asText(), target.path("language").asText(), site) && fact.path("direction").equals(target.path("direction"))
+                    && target.path("description").asText().contains(fact.path("requirementQuote").asText()) && service.verification.factCurrent(c, fact)) facts.add(fact);
         }
         for (var snapshot : scope.path("materials").path("resumes")) {
             var probe = ((ObjectNode) target).deepCopy().put("resumeId", snapshot.path("id").asText());
@@ -265,6 +291,11 @@ final class WorkbenchMaterials {
             } catch (WorkbenchException e) { questions.add(object().put("resumeId", resume.path("id").asText()).put("reason", "所选适用简历已不可用，请重新登记核准")); }
         }
         return context;
+    }
+
+    static boolean factApplies(JsonNode fact, String region, String language, String site) {
+        return applicable(fact.path("scope").asText(), region, site) && (!fact.has("language") || fact.path("language").asText().equals(language))
+                && (!fact.has("region") || fact.path("region").asText().equals(region));
     }
 
     boolean scopeResumeApplies(JsonNode resume, JsonNode target) {

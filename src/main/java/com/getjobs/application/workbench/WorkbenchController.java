@@ -34,6 +34,7 @@ public class WorkbenchController {
     @PostMapping("/candidates/discover") public ObjectNode discoverCandidates(@RequestBody ObjectNode input) { return runner.discoverCandidates(input); }
     @PostMapping("/projects/{id}/start") public ObjectNode startProject(@PathVariable String id, @RequestBody ObjectNode input) { return runner.startProject(id, input); }
     @PostMapping("/projects/{id}/stop") public ObjectNode stopProject(@PathVariable String id) { return service.projects.stop(id); }
+    @PostMapping("/projects/{id}/verify") public ObjectNode verifyProject(@PathVariable String id, @RequestBody ObjectNode input) { return runner.verifyProject(id, input); }
     @GetMapping("/projects") public ObjectNode projects() { return service.projects.workspace(); }
     @PostMapping("/projects") public ObjectNode proposeProject(@RequestBody ObjectNode input) { return service.projects.propose(input); }
     @GetMapping("/scope") public ObjectNode scope() { return service.scope.workspace(); }
