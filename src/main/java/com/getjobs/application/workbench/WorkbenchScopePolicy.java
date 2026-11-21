@@ -12,7 +12,7 @@ import static com.getjobs.application.workbench.WorkbenchService.*;
 
 /** One user-confirmed scope. Policy decisions never approve a legacy task, acquire a claim, or execute an action. */
 final class WorkbenchScopePolicy {
-    private static final Set<String> ACTIONS = Set.of("DISCOVER", "MATCH", "PREPARE", "APPLY", "CONTACT", "SEND_CV");
+    private static final Set<String> ACTIONS = Set.of("DISCOVER", "MATCH", "PREPARE", "APPLY", "CONTACT", "SEND_CV", "PROJECT_EXECUTE");
     private static final Set<String> OUTBOUND = Set.of("APPLY", "CONTACT", "SEND_CV");
     private static final List<String> METERS = List.of("candidates", "modelTokens", "seconds", "outbound");
     private final WorkbenchService service;
@@ -40,6 +40,12 @@ final class WorkbenchScopePolicy {
             scope.set("resumeIds", strings(input, "resumeIds", null, false));
             scope.set("transformations", strings(input, "transformations", Set.of("ORIGINAL", "REORDER", "REPHRASE"), true));
             scope.set("actions", input.has("actions") ? strings(input, "actions", ACTIONS, true) : array().add("DISCOVER").add("MATCH").add("PREPARE"));
+            scope.set("projectIds", strings(input, "projectIds", null, false));
+            scope.set("projectResources", strings(input, "projectResources", Set.of("LOCAL_FILES", "LOCAL_PROCESS", "MODEL"), false));
+            if (contains(scope.path("actions"), "PROJECT_EXECUTE")) {
+                require(!scope.path("projectIds").isEmpty() && contains(scope.path("projectResources"), "LOCAL_FILES") && contains(scope.path("projectResources"), "LOCAL_PROCESS"), "项目执行须明确选择项目及本地文件/进程资源；默认无网络、账号或外发许可");
+                for (var projectId : scope.path("projectIds")) service.projects.directory(store.get(c, "project", projectId.asText()));
+            }
             var budgets = object();
             for (String meter : METERS) budgets.put(meter, number(input.path("budgets").path(meter), meter, 0));
             scope.set("budgets", budgets);
@@ -234,6 +240,34 @@ final class WorkbenchScopePolicy {
             return decision;
         });
     }
+    /** Project permission and cumulative accounting stay here, not in the executor or job lifecycle. */
+    void projectDecision(Connection c, ObjectNode project, int version, long seconds, long tokens, boolean reserved) throws Exception {
+        var scope = latest(c);
+        require(scope != null && scope.path("version").asInt() == version, "项目范围版本已变化；请按当前范围显式恢复");
+        require(scope.path("status").asText().equals("ACTIVE") && Instant.parse(scope.path("expiresAt").asText()).isAfter(Instant.now()), "项目范围已暂停、撤销或到期");
+        require(service.materials.scopeSelection(c, scope).equals(scope.path("materials")), "事实或材料已变化，须重新确认范围");
+        require(contains(scope.path("actions"), "PROJECT_EXECUTE") && contains(scope.path("projectIds"), project.path("id").asText()), "此范围未授权此具体项目");
+        require(contains(scope.path("projectResources"), "LOCAL_FILES") && contains(scope.path("projectResources"), "LOCAL_PROCESS"), "项目本地资源未获许可");
+        require(tokens == 0 || contains(scope.path("projectResources"), "MODEL"), "项目模型资源未获许可");
+        service.projects.directory(project);
+        if (!reserved) {
+            var used = usage(c);
+            require(seconds <= scope.path("budgets").path("seconds").asLong() - used.path("seconds").asLong()
+                    && tokens <= scope.path("budgets").path("modelTokens").asLong() - used.path("modelTokens").asLong(), "项目累计预算耗尽；失败及恢复不退款、不清零");
+        }
+    }
+    ObjectNode reserveProject(Connection c, ObjectNode project, int version, long seconds, long tokens) throws Exception {
+        projectDecision(c, project, version, seconds, tokens, false);
+        var used = usage(c);
+        used.put("seconds", used.path("seconds").asLong() + seconds).put("modelTokens", used.path("modelTokens").asLong() + tokens);
+        store.save(c, "scope_usage", used);
+        var grant = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", version).put("status", "CONSUMED").put("createdAt", now());
+        var request = grant.putObject("request").put("action", "PROJECT_EXECUTE").put("projectId", project.path("id").asText()).put("directory", service.projects.directory(project).toString());
+        request.set("resources", latest(c).path("projectResources").deepCopy());
+        request.putObject("cost").put("seconds", seconds).put("modelTokens", tokens).put("outbound", 0).put("candidates", 0);
+        store.save(c, "scope_authorization", grant); return grant;
+    }
+
     /** Shared preparation/action eligibility. Derived-file checks belong to the preparation Module; policy uses its selected baseline ID. */
     ObjectNode preparedDecision(Connection c, int version, ObjectNode target, String action, boolean reserved) throws Exception {
         var request = object().put("scopeVersion", version).put("action", action); request.set("target", target);
@@ -330,6 +364,7 @@ final class WorkbenchScopePolicy {
         var used = usage(c);
         for (String meter : METERS) if (!reserved && cost.path(meter).asLong() > scope.path("budgets").path(meter).asLong() - used.path(meter).asLong())
             deny(reasons, codes, "BUDGET_EXHAUSTED", "累计预算不足：" + meter);
+        if (action.equals("PROJECT_EXECUTE")) deny(reasons, codes, "PROJECT_INTERFACE_REQUIRED", "项目须经具体项目队列核对目录及资源，不可借用岗位授权");
         if (!ACTIONS.contains(action) || !contains(scope.path("actions"), action)) deny(reasons, codes, "ACTION_DENIED", "此范围未允许动作：" + action);
         if (!(input.path("target") instanceof ObjectNode target)) throw new WorkbenchException(400, "请指定单个岗位目标");
         String link = url(text(target, "url", 3000, true), true);

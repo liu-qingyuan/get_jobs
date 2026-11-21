@@ -1,4 +1,4 @@
-// #14 packaged UI + real HTTP, synthetic data/fake children only. Never touches a running workbench.
+// #14–17 packaged UI + real HTTP, synthetic data/fake children only. Never touches a running workbench.
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, open, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,7 @@ assert(process.env.PLAYWRIGHT_MODULE, 'Set PLAYWRIGHT_MODULE to an installed pla
 const { default: { chromium } } = await import(pathToFileURL(resolve(process.env.PLAYWRIGHT_MODULE)).href)
 const jar = resolve(process.env.WORKBENCH_SMOKE_JAR || 'build/libs/get_jobs-2.0.1.jar')
 const root = await mkdtemp(join(tmpdir(), 'workbench-workflow-smoke-'))
+const projectRoot = await mkdtemp(join(tmpdir(), 'workbench-project-output-'))
 const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
 const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
 const base = `http://127.0.0.1:${port}`
@@ -24,13 +25,29 @@ mode=(root/'mode').read_text() if (root/'mode').exists() else 'login'
 with (root/'calls').open('a') as log: log.write(b.get('kind','EXECUTE')+'\\n')
 if b.get('kind')=='CANDIDATE_READ':
     offer=b['source']['channel']=='OFFERTODAY'
-    names=['crash-c','crash-d'] if mode=='crash' else ['c'] if offer else ['a','b']
+    names=['project-gap','project-ready'] if mode.startswith('project') else ['crash-c','crash-d'] if mode=='crash' else ['c'] if offer else ['a','b']
     jd='Responsibilities: build and evaluate Python search applications using synthetic data. Requirements: demonstrable Python projects, clear documentation and repeatable evaluation tests.'
     json.dump({'jobs':[{'url':('https://www.offertoday.com/hk/job/synthetic-job-' if offer else 'https://careers.example.test/jobs/')+n,'company':'Synthetic '+n,'title':'Python engineer','description':jd,'descriptionComplete':True} for n in names]},open(b['resultPath'],'w'));sys.exit(0)
 if b.get('kind')=='CANDIDATE_MATCH':
-    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed synthetic Python project','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'));sys.exit(0)
+    results=[]
+    for j in b['candidates']:
+        gap=j['url'].endswith('project-gap')
+        finding={'kind':'EXPERIENCE_GAP' if gap else 'SUPPORTED','requirementQuote':'Python','reason':'Confirmed synthetic demo is not production experience','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}
+        if gap: finding['suggestion']={'goal':'Synthetic local evaluation project','acceptance':'Repeatable synthetic fixture tests; not employment or commercial years'}
+        results.append({'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[finding]})
+    json.dump({'results':results},open(b['resultPath'],'w'));sys.exit(0)
 if b.get('kind')=='MATERIAL_PREPARE':
     json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[j['facts'][0]['id']]} for j in b['candidates']]},open(b['resultPath'],'w'));sys.exit(0)
+if b.get('kind')=='PROJECT_EXECUTE':
+    assert 'token' not in b and 'callbackUrl' not in b and 'facts' not in b and 'resumePath' not in b
+    assert b['limits']['outbound']==0 and b['limits']['modelTokens']==0
+    d=pathlib.Path(b['directory']);assert pathlib.Path.cwd()==d
+    (d/'checkpoint.txt').write_text('Synthetic local checkpoint, not a confirmed fact')
+    json.dump({'message':'Synthetic fixture project progress'},open(b['progressPath'],'w'))
+    if mode=='project-running':
+        (root/'project-held').write_text(str(os.getpid()))
+        while True: time.sleep(.1)
+    json.dump({'summary':'Executor self report only','acceptanceReport':'Synthetic tests claimed passed; independent verification pending','artifacts':[] if mode=='project-false' else [{'path':'checkpoint.txt','description':'Synthetic project checkpoint'}]},open(b['resultPath'],'w'));sys.exit(0)
 t=b['task'];s=t['snapshot']
 assert t['approvalSource']=='SCOPE_POLICY' and s['source']=='SCOPE_POLICY'
 assert hashlib.sha256(pathlib.Path(b['resumePath']).read_bytes()).hexdigest()==s['resume']['sha256']
@@ -67,6 +84,7 @@ let server, browser
 function launch() {
   server = spawn(process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java', ['-jar', jar, `--server.port=${port}`, '--server.address=127.0.0.1', '--browser.auto-start=false',
     `--spring.datasource.url=jdbc:sqlite:${join(root, 'empty-legacy.db')}`, `--workbench.data-dir=${join(root, 'state')}`, `--workbench.jobsdb-dir=${join(root, 'empty-jobsdb')}`,
+    `--workbench.projects-root=${projectRoot}`, `--workbench.project-command=${JSON.stringify(['python3', fake, '{taskFile}'])}`,
     `--workbench.jobsdb-command=${JSON.stringify(['python3', jobsdbFake])}`, `--workbench.offertoday-command=${JSON.stringify(['python3', fake])}`, `--workbench.agent-command=${JSON.stringify(['python3', fake, '{taskFile}'])}`, `--logging.file.name=${join(root, 'application.log')}`,
   ], { cwd: root, stdio: ['ignore', log.fd, log.fd] })
 }
@@ -206,8 +224,63 @@ try {
   await material.getByRole('button', { name: '只核验 APPLY（不执行）', exact: true }).click()
   await material.getByText('APPLY：拒绝执行资格', { exact: true }).waitFor()
   await screenshot('jobsdb-prepared-capability-blocked.png')
+  // #17: propose from the default candidate screen, authorize only the specific directory/resources,
+  // reject executor self-report without artifacts, then kill/restart only this synthetic application.
+  page.on('dialog', dialog => dialog.accept())
+  await writeFile(join(root, 'mode'), 'project-false')
+  const projectScope = await post('/scope', { ...state.scope.current, expectedVersion: 3, channels: ['OFFICIAL'], hosts: ['careers.example.test'], contactVerified: false, contactFactIds: [], actions: ['DISCOVER', 'MATCH', 'PREPARE'] })
+  await post('/candidates/discover', { scopeVersion: projectScope.version, maxPages: 1, jobsPerPage: 2, secondsPerPage: 5, sources: [{ channel: 'OFFICIAL', url: 'https://careers.example.test/jobs', region: 'HK', language: 'en', direction: 'AI_APPLICATION' }] })
+  const projectIds = (await get('/candidates')).jobs.filter(j => j.url.includes('/project-')).map(j => j.id)
+  await post('/candidates/match', { scopeVersion: projectScope.version, candidateIds: projectIds, secondsPerBatch: 5 })
+  await page.reload()
+  await page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Synthetic project-gap · Python engineer', exact: true }) }).getByRole('button', { name: '建立独立项目建议（不执行）', exact: true }).click()
+  const projects = page.getByRole('region', { name: '独立项目队列', exact: true })
+  const project = projects.getByRole('article', { name: '补强项目 Synthetic local evaluation project', exact: true })
+  const startProject = () => project.getByRole('button', { name: '按当前范围启动 / 恢复项目', exact: true }).click()
+  await startProject(); await project.getByText('范围 / 资源阻塞', { exact: true }).waitFor()
+  assert.equal((await get('/projects')).projects[0].attempts.length, 0)
+  await page.getByRole('tab', { name: '求职范围', exact: true }).click()
+  const scopePanel = page.getByRole('region', { name: '求职范围设置', exact: true })
+  await scopePanel.getByRole('checkbox', { name: '独立项目执行（非成果入库）', exact: true }).check()
+  await scopePanel.getByRole('group', { name: '独立项目允许范围', exact: true }).getByRole('checkbox', { name: /^项目：Synthetic local evaluation project/ }).check()
+  await scopePanel.getByRole('checkbox', { name: '本地项目文件', exact: true }).check()
+  await scopePanel.getByRole('checkbox', { name: '本地项目进程', exact: true }).check()
+  await scopePanel.getByRole('button', { name: '变更范围（新版本）', exact: true }).click()
+  await scopePanel.getByRole('heading', { name: /^当前范围 v5/ }).waitFor()
+  await page.getByRole('tab', { name: '候选与发现', exact: true }).click()
+  await startProject(); await project.getByText('执行失败 · 未确认成果', { exact: true }).waitFor()
+  await until(async () => !(await get()).runtime.busy, 'False completion resource release')
+  state = await get(); const factsBefore = structuredClone(state.facts), tasksBefore = structuredClone(state.tasks)
+  assert.equal(state.projects.projects[0].attempts.length, 1)
+  assert(!state.projects.projects[0].attempts[0].evidence)
+  await writeFile(join(root, 'mode'), 'project-running')
+  await startProject()
+  await project.getByText('项目执行中', { exact: true }).waitFor()
+  await until(async () => { try { return !!(await readFile(join(root, 'project-held'), 'utf8')) } catch { return false } }, 'Project interruption barrier')
+  const projectPid = Number(await readFile(join(root, 'project-held'), 'utf8'))
+  const secondsBeforeRestart = (await get('/scope')).usage.seconds
+  server.kill('SIGKILL'); await once(server, 'exit'); launch(); await ready()
+  assert.throws(() => process.kill(projectPid, 0), 'Owned project and descendants must be released on restart')
+  const recovered = (await get('/projects')).projects[0]
+  assert.equal(recovered.status, 'STOPPED'); assert.equal(recovered.attempts.length, 2)
+  assert.equal((await get('/scope')).usage.seconds, secondsBeforeRestart)
+  assert.match(await readFile(join(projectRoot, recovered.id, 'checkpoint.txt'), 'utf8'), /Synthetic local checkpoint/)
+  await page.reload(); await project.getByText('已停止 · 待显式恢复', { exact: true }).waitFor()
+  await writeFile(join(root, 'mode'), 'project-complete')
+  await startProject(); await project.getByText('产物待独立验证', { exact: true }).waitFor()
+  await project.getByText(/SHA256 [a-f0-9]{64}/).waitFor()
+  await until(async () => !(await get()).runtime.busy, 'Project final resource release')
+  state = await get(); assert.deepEqual(state.facts, factsBefore); assert.deepEqual(state.tasks, tasksBefore)
+  assert.equal(state.projects.projects[0].attempts.length, 3)
+  assert.equal(state.projects.projects[0].attempts[2].evidence.verified, false)
+  assert.equal(state.scope.usage.outbound, beforeBossOutbound)
+  await screenshot('project-unverified.png')
+  await page.reload(); await project.getByText('产物待独立验证', { exact: true }).waitFor()
+  assert.equal(await project.getByRole('button', { name: '按当前范围启动 / 恢复项目', exact: true }).count(), 0)
+  await page.getByRole('tab', { name: '求职范围', exact: true }).click()
+  await page.getByRole('region', { name: '范围历史与动作依据', exact: true }).getByText(new RegExp(`独立项目执行（非成果入库） · ${recovered.id}`), { exact: false }).first().waitFor()
   assert.deepEqual(failures, [])
-  console.log(JSON.stringify({ root, port, browserStarts: starts.length, submitted: state.tasks.filter(t => t.state === 'SUBMITTED').length, unknown: state.tasks.filter(t => t.state === 'UNKNOWN').length, outbound: state.scope.usage.outbound, screenshots: ['workflow-exception.png', 'workflow-completed.png', 'workflow-unknown-restart.png', 'boss-capability-blocked.png', 'jobsdb-prepared-capability-blocked.png'] }, null, 2))
+  console.log(JSON.stringify({ root, projectRoot, port, browserStarts: starts.length, submitted: state.tasks.filter(t => t.state === 'SUBMITTED').length, unknown: state.tasks.filter(t => t.state === 'UNKNOWN').length, outbound: state.scope.usage.outbound, projectAttempts: state.projects.projects[0].attempts.length, projectStatus: state.projects.projects[0].status, screenshots: ['workflow-exception.png', 'workflow-completed.png', 'workflow-unknown-restart.png', 'boss-capability-blocked.png', 'jobsdb-prepared-capability-blocked.png', 'project-unverified.png'] }, null, 2))
 } finally {
   if (browser) await browser.close()
   if (server && server.exitCode === null) { server.kill('SIGTERM'); await once(server, 'exit') }

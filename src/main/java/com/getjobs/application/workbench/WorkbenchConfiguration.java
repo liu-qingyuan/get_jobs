@@ -16,12 +16,14 @@ import java.util.List;
 @Configuration(proxyBeanMethods=false)
 public class WorkbenchConfiguration {
     @Bean WorkbenchService workbenchService(@Value("${workbench.data-dir:.workbench}") String root,
-            @Value("${workbench.jobsdb-dir:.jobsdb}") String jobsdb, ObjectMapper json) {
-        return new WorkbenchService(Path.of(root), Path.of(jobsdb), json);
+            @Value("${workbench.jobsdb-dir:.jobsdb}") String jobsdb, ObjectMapper json,
+            @Value("${workbench.projects-root:}") String projectsRoot) {
+        return new WorkbenchService(Path.of(root), Path.of(jobsdb), json, projectsRoot.isBlank() ? null : Path.of(projectsRoot));
     }
     @Bean(destroyMethod="close") WorkbenchRunner workbenchRunner(WorkbenchService service, ObjectMapper json,
             ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
             @Value("${workbench.agent-command:${WORKBENCH_AGENT_COMMAND:[]}}") String command,
+            @Value("${workbench.project-command:${WORKBENCH_PROJECT_COMMAND:[]}}") String projectCommand,
             @Value("${workbench.offertoday-command:${WORKBENCH_OFFERTODAY_COMMAND:}}") String offerTodayCommand,
             @Value("${workbench.jobsdb-command:${WORKBENCH_JOBSDB_COMMAND:}}") String jobsDbCommand,
             @Value("${server.port:9527}") int port,
@@ -50,7 +52,7 @@ public class WorkbenchConfiguration {
                 return BossCandidateReader.read(browser.getBossPage(), bounded, json);
             });
         };
-        return new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss, "http://127.0.0.1:" + port + "/api/workbench", timeout);
+        return new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss, arguments(json, projectCommand), "http://127.0.0.1:" + port + "/api/workbench", timeout);
     }
 
     private static List<String> arguments(ObjectMapper json, String command) throws Exception {

@@ -120,7 +120,7 @@ export interface MaterialReview {
   missing: string[]
 }
 
-export type ScopeAction = 'DISCOVER' | 'MATCH' | 'PREPARE' | 'APPLY' | 'CONTACT' | 'SEND_CV'
+export type ScopeAction = 'DISCOVER' | 'MATCH' | 'PREPARE' | 'APPLY' | 'CONTACT' | 'SEND_CV' | 'PROJECT_EXECUTE'
 export type ScopeMeter = 'candidates' | 'modelTokens' | 'seconds' | 'outbound'
 export interface ScopeConfig {
   expectedVersion?: number
@@ -135,6 +135,8 @@ export interface ScopeConfig {
   resumeIds: string[]
   contactFactIds?: string[]
   contactVerified?: boolean
+  projectIds?: string[]
+  projectResources?: string[]
   transformations: string[]
   actions: ScopeAction[]
   budgets: Record<ScopeMeter, number>
@@ -163,7 +165,8 @@ export interface ScopeWorkspace {
   usage: Record<ScopeMeter, number>
   authorizations: Array<{
     id: string; scopeVersion: number; status: 'FROZEN' | 'CONSUMED'; source: 'SCOPE_POLICY'
-    request: { action: ScopeAction; target: { title: string; url: string } }
+    request: { action: Exclude<ScopeAction, 'PROJECT_EXECUTE'>; target: { title: string; url: string } } |
+      { action: 'PROJECT_EXECUTE'; projectId: string; directory: string }
     result?: { outcome: string; evidence: string }
   }>
 }
@@ -210,6 +213,17 @@ export interface WorkflowCycle {
   entries: Array<{ candidateId: string; status: string; reason?: string; packageId?: string; taskId?: string; execution?: Task }>
 }
 
+export interface GapProject {
+  id: string; candidateId: string; analysisId: string; requirementQuote: string; goal: string; acceptance: string
+  directory?: string; limitation: string; allowedActions: string[]; scopeVersion?: number
+  status: 'PROPOSED' | 'BLOCKED' | 'QUEUED' | 'RUNNING' | 'UNVERIFIED' | 'FAILED' | 'STOPPED'
+  stopRequested?: boolean; lastProgress?: string; updatedAt: string
+  events: Array<{ code: string; message: string; at: string }>
+  attempts: Array<{ id: string; startedAt: string; endedAt?: string; status?: string; authorizationId: string
+    evidence?: { source: string; verified: boolean; summary: string; acceptanceReport: string; artifacts: Array<{ path: string; description: string; sha256: string; bytes: number }> }
+  }>
+}
+
 export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
@@ -219,7 +233,8 @@ export interface WorkbenchState {
   candidates: CandidateWorkspace
   preparations: { packages: PreparationPackage[] }
   workflow: { cycles: WorkflowCycle[] }
-  runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string }
+  projects: { projects: GapProject[] }
+  runtime: { projectConfigured: boolean; agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string }
   platforms: {
     bossUrl: string
     offerTodayUrl: string

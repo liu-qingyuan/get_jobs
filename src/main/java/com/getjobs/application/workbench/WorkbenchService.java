@@ -27,8 +27,13 @@ public final class WorkbenchService {
     final WorkbenchMatching matching;
     final WorkbenchPreparation preparation;
     final WorkbenchWorkflow workflow;
+    final WorkbenchProjects projects;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
+        this(root, jobsdb, json, null);
+    }
+
+    public WorkbenchService(Path root, Path jobsdb, ObjectMapper json, Path projectsRoot) {
         this.store = new WorkbenchStore(root, json);
         this.json = json;
         this.jobsdb = jobsdb.toAbsolutePath().normalize();
@@ -39,6 +44,7 @@ public final class WorkbenchService {
         this.matching = new WorkbenchMatching(this);
         this.preparation = new WorkbenchPreparation(this);
         this.workflow = new WorkbenchWorkflow(this);
+        this.projects = new WorkbenchProjects(this, projectsRoot);
     }
 
     public ObjectNode state() {
@@ -51,6 +57,7 @@ public final class WorkbenchService {
             result.set("candidates", candidates.workspace(c));
             result.set("preparations", preparation.workspace(c));
             result.set("workflow", workflow.workspace(c));
+            result.set("projects", projects.workspace(c));
             var tasks = store.list(c, "task");
             tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
             result.set("tasks", tasks);

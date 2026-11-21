@@ -16,6 +16,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final List<String> command;
     private final List<String> offerTodayCommand;
     private final List<String> jobsDbCommand;
+    private final List<String> projectCommand;
     private final WorkbenchCandidates.Reader bossReader;
     private final String callback;
     private final long timeoutSeconds;
@@ -41,6 +42,14 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
             WorkbenchCandidates.Reader bossReader, String callback, long timeoutSeconds) {
+        this(service, command, offerTodayCommand, jobsDbCommand, bossReader, List.of(), callback, timeoutSeconds);
+    }
+
+    WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
+            WorkbenchCandidates.Reader bossReader, List<String> projectCommand, String callback, long timeoutSeconds) {
+        this.projectCommand = List.copyOf(projectCommand);
+        if (!projectCommand.isEmpty() && (projectCommand.stream().noneMatch(arg -> arg.contains("{taskFile}")) || projectCommand.stream().anyMatch(String::isBlank)))
+            throw new IllegalArgumentException("项目执行器参数必须包含 {taskFile} 且不能为空");
         this.service = service; this.command = List.copyOf(command); this.offerTodayCommand = List.copyOf(offerTodayCommand);
         this.jobsDbCommand = List.copyOf(jobsDbCommand); this.bossReader = bossReader;
         this.callback = callback; this.timeoutSeconds = timeoutSeconds;
@@ -53,6 +62,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             if (lock == null) throw new IllegalStateException("已有工作台使用此数据目录");
             recoverProcessLease();
             service.recoverInterrupted();
+            service.projects.recover();
         } catch (Exception e) {
             try { if (lock != null) lock.release(); if (lockChannel != null) lockChannel.close(); } catch (Exception ignored) { }
             throw new IllegalStateException("工作台数据目录已被使用或无法锁定", e);
@@ -61,7 +71,7 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     public ObjectNode runtime() {
         return service.json.createObjectNode().put("agentConfigured", !command.isEmpty())
-                .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get())
+                .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get()).put("projectConfigured", !projectCommand.isEmpty())
                 .put("jobsDbConfigured", !jobsDbCommand.isEmpty()).put("jobsDbProductionVerified", false)
                 .put("jobsDbOutboundSupported", false).put("jobsDbCapabilityReason", JobsDbTarget.OUTBOUND_BLOCK_REASON)
                 .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
@@ -98,6 +108,79 @@ public final class WorkbenchRunner implements AutoCloseable {
             });
             return cycle;
         } catch (RuntimeException e) { busy.set(false); throw e; }
+    }
+
+    /** Independent queue, serialized with existing resource users; never an application task or callback. */
+    public synchronized ObjectNode startProject(String id, ObjectNode input) {
+        if (closed || projectCommand.isEmpty()) throw new WorkbenchException(409, "尚未配置可信项目执行器，不能借用官网或申请执行器");
+        var project = service.projects.queue(id, input);
+        if (project.path("status").asText().equals("QUEUED")) executor.submit(() -> executeProject(id, project.path("queueId").asText()));
+        return project;
+    }
+    private void executeProject(String id, String queueId) {
+        if (closed) return;
+        // Existing asynchronous cycles finish in this same executor before queued project work.
+        if (!busy.compareAndSet(false, true)) { service.projects.end(id, "BLOCKED", "共享资源正在使用；未开始项目，稍后显式恢复", null); return; }
+        try {
+            var project = service.projects.begin(id, queueId);
+            if (project == null || !project.path("status").asText().equals("RUNNING")) return;
+            var bundle = service.projects.bundle(project);
+            long seconds = Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong());
+            ((ObjectNode) bundle.path("limits")).put("seconds", seconds);
+            Path directory = Path.of(bundle.path("directory").asText());
+            Path run = service.store.root.resolve("runs").resolve("project-" + bundle.path("attemptId").asText()); Files.createDirectories(run);
+            Path task = run.resolve("task.json"); Files.writeString(task, service.json.writeValueAsString(bundle));
+            try { Files.setPosixFilePermissions(task, PosixFilePermissions.fromString("rw-------")); }
+            catch (UnsupportedOperationException ignored) { }
+            var arguments = projectCommand.stream().map(arg -> arg.replace("{taskFile}", task.toString())).toList();
+            Process child;
+            // Serialize explicit stop with the final pre-launch check: cancelled queued work never spawns.
+            synchronized (service.projects) {
+                service.projects.checkRunning(id);
+                if (closed || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                child = spawn(new ProcessBuilder(arguments).directory(directory.toFile()).redirectErrorStream(true).redirectOutput(run.resolve("execution.log").toFile()));
+                child.getOutputStream().close();
+            }
+            long deadline = System.nanoTime() + seconds * 1_000_000_000L;
+            while (true) {
+                service.projects.checkRunning(id);
+                if (closed || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                Path progress = Path.of(bundle.path("progressPath").asText());
+                if (Files.exists(progress)) {
+                    try {
+                        var update = projectJson(directory, progress);
+                        if (update != null) service.projects.progress(id, WorkbenchService.text(update, "message", 1000, true));
+                    }
+                    catch (com.fasterxml.jackson.core.JsonProcessingException ignored) { /* A progress writer may be between bytes; never use progress as completion evidence. */ }
+                }
+                if (child.waitFor(75, TimeUnit.MILLISECONDS)) break;
+                if (System.nanoTime() >= deadline) throw new WorkbenchException(409, "项目执行时间预算耗尽；本次不退款，可按当前范围显式恢复");
+            }
+            service.projects.checkRunning(id);
+            if (child.exitValue() != 0) throw new WorkbenchException(409, "项目执行器失败；产物未验证，不增加经历");
+            releaseProcess();
+            var evidence = service.projects.evidence(project, projectJson(directory, Path.of(bundle.path("resultPath").asText())));
+            service.projects.end(id, "UNVERIFIED", "执行器报告及产物已留证，仍须独立验证；没有新增事实、简历或申请", evidence);
+        } catch (InterruptedException e) {
+            releaseProcess();
+            service.projects.end(id, "STOPPED", "项目执行中断，保留未验证检查点；显式恢复会重新扣量", null);
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            String status = "FAILED";
+            try { service.projects.checkRunning(id); }
+            catch (Exception denied) { status = "STOPPED"; }
+            releaseProcess();
+            service.projects.end(id, status, e instanceof WorkbenchException ? e.getMessage() : "项目执行或产物读取失败，未确认经历", null);
+        } finally {
+            try { releaseProcess(); } finally { busy.set(false); }
+        }
+    }
+    private ObjectNode projectJson(Path directory, Path file) throws Exception {
+        Path path = directory;
+        for (var part : directory.relativize(file)) { path = path.resolve(part); WorkbenchService.require(!Files.isSymbolicLink(path), "项目输出不能是符号链接"); }
+        WorkbenchService.require(Files.isRegularFile(file) && Files.size(file) <= 64 * 1024 && file.toRealPath().startsWith(directory), "项目未返回有界有效进度/结果");
+        var value = service.json.readTree(Files.readString(file));
+        WorkbenchService.require(value == null || value instanceof ObjectNode, "项目进度/结果格式无效"); return (ObjectNode) value;
     }
 
     private void waitForTask(String id, Process child) {

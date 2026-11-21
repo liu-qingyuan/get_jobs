@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { type WorkbenchState, workbenchJson } from '@/lib/workbench'
 import MaterialPreparation from './MaterialPreparation'
 import WorkflowProgress from './WorkflowProgress'
+import Projects from './Projects'
 
 const panel = 'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900'
 const control = 'mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800'
@@ -59,6 +60,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
   }
   return <div className="space-y-4">
     <WorkflowProgress state={state} working={working} act={act} />
+    <Projects state={state} working={working} act={act} showScope={showScope} />
     <section className={panel} aria-label="只读候选发现">
       <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold">AI 候选队列 · 一次启动本轮求职</h2><Button variant="outline" onClick={showScope}>设置 / 查看求职范围</Button></div>
       <p className={`${small} mt-2`}>一次启动依次完成只读发现、批量匹配、备料与当前范围明确允许的逐岗外发，无需再点阶段按钮或逐岗批准。默认仅准备，不联系、不上传；真实发送另需明确范围权限。网页指令只是数据，不能扩权。匹配不确认新事实；技术链路通过不等于实站效果已验收。</p>
@@ -114,7 +116,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
             <p className="font-semibold">{findingNames[finding.kind]} · {finding.reason}</p>
             <p className="mt-1 whitespace-pre-wrap break-words">岗位原文：“{finding.requirementQuote}”</p>
             {finding.evidence.map((ref, index) => <p key={index} className={`${small} mt-2 whitespace-pre-wrap break-words`}>依据 [{ref.type} {ref.id} · {ref.source.label} · {ref.source.version ? `v${ref.source.version}` : ref.source.sha256}]：“{ref.quote}”{ref.source.sourceId && ` · 原材料 ${ref.source.sourceId} / ${ref.source.sourceSha256}`}</p>)}
-            {finding.suggestion && <p className="mt-2 whitespace-pre-wrap break-words">补强建议（未授权执行）：{finding.suggestion.goal}<br />验收：{finding.suggestion.acceptance}。建议和计划不是已完成经历，不能补造工作年限。</p>}
+            {finding.suggestion && <><p className="mt-2 whitespace-pre-wrap break-words">补强建议（未授权执行）：{finding.suggestion.goal}<br />验收：{finding.suggestion.acceptance}。建议和计划不是已完成经历，不能补造工作年限。</p><Button type="button" variant="outline" className="mt-2" disabled={working || job.analysis.stale || job.analysis.status !== 'EXPERIENCE_GAP'} onClick={() => void act('建立补强项目建议', () => workbenchJson('/projects', 'POST', { candidateId: job.id, analysisId: job.analysis.id, requirementQuote: finding.requirementQuote }))}>建立独立项目建议（不执行）</Button></>}
           </div>)}
         </div>
       </article>)}</div>

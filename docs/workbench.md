@@ -38,7 +38,7 @@ bash gradlew --no-daemon workbench -x installPatchrightDriver \
 4. **候选与发现（默认主屏）**：一次填写获准官网入口和 OfferToday 港区列表，设置本次页面、每页及匹配/备料/执行资源上限，点击「一次启动本轮求职」。自动衔接发现、匹配、备料及范围明确允许的逐岗执行，不要求二次启动、逐阶段推进或逐岗审批；仅准备权限停留可见材料，不创建发送任务。整轮进展展示单岗材料版本、阶段、例外与回执；处理必要例外或补充范围累计预算后恢复**同一轮**，只继续已知未外发断点，已完成和 UNKNOWN 不重放。独立阶段按钮收纳为高级入口，不是主流程。在同一独占槽读取两种来源及必要详情；完整候选显示规范链接、平台身份、全文 JD、取得时间。描述不足/失效/范围拒绝不会进入匹配。达到页面或累计资源上限、连接/版本例外时保留进度；可按当前范围继续，不清零计量。官网必须配置支持 `CANDIDATE_READ` 的可信通用执行器；OfferToday 复用已授权连接，不创建登录态，不点 Chat/Apply、不上传/发送。技术通过不代表真实覆盖或匹配质量已验收。
 5. **手工任务与历史（次要入口）**：选地区、语言、方向、链接及已批准的匹配简历；读 JD 后决定是否批准。批准冻结当前材料，不自动同步其他版本。未选简历的任务仅可作为待办；需另建绑定正确版本的任务后执行。去重以详情路径和可识别的岗位编号参数为准，不用推广/来源参数区分岗位；同路径仅靠非标准参数区分职位时先人工核对规范详情链接，宁可暂停也不自动重投。
 6. **官网/简历 AI**：必须另外配置执行器。旧人工任务仍保留批准后显式启动；新整轮由当前范围与可证实材料策略核准，不伪造人审，启动后自动逐岗执行。未配置时按钮禁用，不显示虚构进展。模型生成的新简历由 `DRAFT` 事件另存为未批准版本，不能直接用于申请。
-7. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
+7. **项目补强**：当前 GAP 的目标/验收可建立独立项目建议；先在范围中选定具体项目、固定目录、本地资源及累计预算，再显式入队。缺可信项目执行器或独立目录时不执行，不借用官网命令。进度、失败、停止/恢复和产物哈希在默认候选屏可见；执行器自报完成仅待独立验证，不新增经历、不伪造商业任职年限。旧 GAP 卡片仍只记录。
 8. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
 
 JobsDB 默认候选页已接入有界只读列表/完整详情、统一匹配与独立备料；平台页仍只读显示最近 100 条原账本并保留 CLI 交接。**工作台不通过 HTTP 直接启动 Boss/JobsDB 的交互式 apply 或批次**；一个岗位的批准不是整个批次的授权。OfferToday 是另行受控的单岗脚本路径，使用原审核/回执合同，不触及 Boss/JobsDB 批次。原平台配置、在线简历和 Cookie 不会因工作台资料更新自动改写。
@@ -85,7 +85,7 @@ bash gradlew --no-daemon workbench --console=plain
 ## 范围策略 Interface（#10）
 
 - `POST /api/workbench/scope`：用户一次确认新范围或变更。字段为 `channels`（`OFFICIAL/OFFERTODAY/BOSS/JOBSDB`）、`hosts`（小写精确域名，无通配符/路径/端口）、`regions`、`languages`、`directions`、`includeTerms`、`excludeTerms`、`factIds`、`resumeIds`、`transformations`（`ORIGINAL/REORDER/REPHRASE`）、`actions`、`budgets`、`expiresAt`。数组最多 100 项。选择词任一命中公司/标题/JD 即符合，排除词任一命中即拒绝，均为不区分大小写子串，不执行正则/指令。允许变换不得新增主张或覆盖其他地区/语言版本。事实必须当前已确认，简历必须独立核准并通过附件哈希校验；仅上传新简历不会自动替换所选不可变版本。
-- `actions` 省略时为 `DISCOVER/MATCH/PREPARE`，外发须明确选择 `APPLY/CONTACT/SEND_CV`。`PROJECT_EXECUTE` 和成果入库不支持，不得借用其他动作权限。`budgets` 的 `candidates/modelTokens/seconds/outbound` 必须全部为 0–1000000000 的整数，`expiresAt` 是未来 90 天内的 ISO instant。已有范围时必须提供当前 `expectedVersion`，陈旧编辑拒绝；固定材料由服务端读取，模型的额外 confirmed/source/actions 字段不能改变既存范围。
+- `actions` 省略时为 `DISCOVER/MATCH/PREPARE`，外发须明确选择 `APPLY/CONTACT/SEND_CV`。`PROJECT_EXECUTE` 须按下文 #17 的具体项目/目录/资源合同另行明确选择，不得借用岗位动作权限；成果入库仍未开放。`budgets` 的 `candidates/modelTokens/seconds/outbound` 必须全部为 0–1000000000 的整数，`expiresAt` 是未来 90 天内的 ISO instant。已有范围时必须提供当前 `expectedVersion`，陈旧编辑拒绝；固定材料由服务端读取，模型的额外 confirmed/source/actions 字段不能改变既存范围。
 - `GET /api/workbench/scope`（也包含在 `/state.scope`）：返回 `current/history/usage/authorizations`。当前 `status` 是用户生命周期，`effectiveStatus` 还反映到期、材料变化或所有允许动作均预算不足；历史版本仅追溯，不能作为当前许可。预算累计属于此工作台范围序列，新版本/暂停/重启均不清零。
 - `POST /api/workbench/scope/{version}/pause|resume|revoke`：仅接受当前版本。每次生成新版本；已撤销不可恢复，只能重新确认，过期/材料变化的暂停范围须重新设置。
 - `POST /api/workbench/scope/preview`：`{scopeVersion,action,target,cost?}`。`target` 包括单个 `url/channel/region/language/direction/company/title/description/resumeId/transformation`；发现/匹配可不选简历；若携带简历，也须为所选且适用的版本（包括岗位专属链接）。备料/外发必须选择适用简历。返回 `allowed/reasons/reasonCodes/source=SCOPE_POLICY/scopeVersion/cost`；不保存授权、不扣量、不执行。来源精确匹配且不接受非标准端口，OfferToday 不得换成官网渠道。
@@ -159,6 +159,26 @@ Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发�
 `runtime.jobsDbConfigured` 仅表示只读命令配置，读取时才核验会话；`jobsDbProductionVerified=false`、`jobsDbOutboundSupported=false` 与 `jobsDbCapabilityReason` 展示真实限制。JobsDB 原 Profile 会随申请发送，目前无法证明没有任务外资料，review 文件名不证明冻结附件字节，积极回执文案也未绑定本次材料。因此 APPLY/CONTACT/SEND_CV 返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim、不占外发量、不运行旧 apply/batch，也不回退官网 AI 或自动进度查询。
 
 #16 保持 open / needs-triage；受控单岗申请尚未完成，需另获授权的只读核对或脱敏回放来确认精确 Profile/附件/回执合同。开发假站/HTTP 测试不是生产能力或推荐质量验收，没有上传真实 CV、实投或切换可见工作台。局部八图以 #16 本增量评论为准。
+
+## 独立项目 Interface（#17）
+
+默认候选页在当前有效 GAP 建议处点击「建立独立项目建议（不执行）」，在独立项目队列查看不可变目标、可复核验收、固定目录、原分析与 GAP 历史引用。原 GAP/硬性条件判断不消除；旧手工 GAP 卡片不会升级成执行许可。项目独立于候选/申请生命周期，不等待所有渠道；共用进程/模型资源时串行，不因某项目失败禁止其他合格岗位继续匹配、准备或获准执行。
+
+操作人须**另外配置**：
+
+- `workbench.projects-root`：已由操作人创建的独立目录，不能与当前源码/启动目录、同级原 `get_jobs`、当前工作台或渠道私有目录重叠，也不能是这些目录的祖先。服务器为每项目固定 `<root>/<server-generated-project-id>`；请求、JD 和模型不能传目录或命令。未配置时只能建立提议；更换/启用目录配置后旧项目不执行；对同一当前 GAP 再建提议会生成新项目 ID，重新明确授权，旧记录不改写、不迁移私有状态。
+- `WORKBENCH_PROJECT_COMMAND`（或 `workbench.project-command`）：单独可信本机命令的 JSON 参数数组，含 `{taskFile}`，绝不经过 shell。默认 `[]` 禁用，不回退官网/申请执行器。所有命令/脚本路径应绝对，因为进程 cwd 固定为此项目目录。它是可信 Adapter，**不是 OS/网络/模型沙箱**，必须能执行所授文件、进程、时间/token 限制；无法做到则报告失败。无网络、下载/安装、账号、浏览器、外发、事实确认、简历修改或申请权限。
+
+HTTP 合同：
+
+- `POST /api/workbench/projects`：只接受 `{candidateId,analysisId,requirementQuote}`，必须指向当前非陈旧的有依据 `EXPERIENCE_GAP` 建议。服务器固定原 GAP/引用、目标及验收，重复请求返回同一项目；不能覆盖目标、目录、命令或权限。提议 `PROPOSED` 不启动进程、不增加事实。
+- `/scope` 新增 `actions:[...,PROJECT_EXECUTE]`、`projectIds:[具体提议ID]`、`projectResources:[LOCAL_FILES,LOCAL_PROCESS,MODEL?]`；本地文件与进程均须明确允许，MODEL 可选。授权页面展示每个项目目标、验收和唯一目录，一次确认选定集合。目录在消费前重核；符号链接、未配置目录、未知资源（如 NETWORK）拒绝。项目仍复用原范围的版本、已选事实/材料、有效期、暂停/撤销和累计 `seconds/modelTokens` 预算，不另定义第二套事实/范围。通用 `/scope/authorize` 不支持项目目标，不能绕过专用队列。
+- `POST /projects/{id}/start`：只接受 `{scopeVersion,seconds?,modelTokens?}`，秒数 1–120（默认30），模型 0–100000（默认0；非零须 MODEL 许可）。无许可/超限返回可见 `BLOCKED`，不调用执行器；允许后 `QUEUED`，在共享槽可用、开始前再次核对并原子预扣整次资源，失败/中断不退款。共享同步资源忙碌可变为 BLOCKED，稍后显式恢复；异步求职周期/项目在同一 executor 串行。调用方可读取状态但不能以轮询触发启动。
+- `POST /projects/{id}/stop`：排队项目直接停止；运行项目请求停止并等待自有进程及后代确认释放。执行期间持续检查范围，暂停/撤销/到期/变更或材料失效不继续项目。保留未验证检查点；`STOPPED/FAILED/BLOCKED` 可按当前范围同一路径显式恢复，重扣新次资源；`RUNNING/QUEUED/UNVERIFIED` 拒绝重复启动。重启先复用现有精确进程租约/释放凭据，旧排队/运行项目标为 STOPPED，不自动启动、不重置预算。
+- `GET /projects` 和 `/state.projects` 返回 `{projects:[...]}`，含目标/验收、原 GAP 依据、状态、最多200条近期事件和各次 `attempts` 的资源授权 ID/时间/结果。执行器仅收到 `kind=PROJECT_EXECUTE`、project/attempt ID、goal/acceptance、directory、resources、limits、instructions、progressPath/resultPath，无事实全库、附件、账号或申请回调 token。
+- Adapter 向 `progressPath` 写 `{message}`（建议原子替换；未写完整的 JSON 等下次读取），向 `resultPath` 写 `{summary,acceptanceReport,artifacts:[{path,description}]}`。进度/结果不接受指令字段；最终结果最大64KB，必须至少1、最多20份允许目录内相对路径的普通文件，每份不超过10MB，不经符号链接读取其他目录，也不能把 `.execution` 元数据当成果。产物保存 SHA256/字节数与 `source=PROJECT_EXECUTOR,verified=false`，状态仅 `UNVERIFIED`；退出0、自述通过或模型 `facts/confirmed/actions` 字段都不构成独立验证/事实。本票不实现 #18 的独立验证及有限成果回流，不覆盖历史材料/回执。
+
+开发验证只用临时目录和 fake 程序。`workflow-smoke.mjs` 另通过打包默认页面建立具体 GAP 项目、验证未授权不执行、一次选定项目/固定目录/资源、拒绝无产物的虚假完成，在本次临时 Java 进程被强制中断后确认只释放自有项目进程、保留检查点和预算，显式恢复后显示待验证产物/哈希。新增三次合成项目尝试、0 新事实/申请/外发，不切换用户正在运行的版本。
 
 ## 执行器报告合同
 
