@@ -59,6 +59,16 @@ bash gradlew --no-daemon jobsdbTest --console=plain
 
 真实账号是否已登录、雇主动态表单和真实投递结果，须由后续账号测试证明；fixture 通过不代表投递成功。
 
+## 工作台只读候选（#16 增量，单岗外发尚未接通）
+
+默认候选页可一次提交 `https://hk.jobsdb.com/jobs?...` 或 `https://hk.jobsdb.com/<keywords>-jobs`，范围须明确 `JOBSDB`、`hk.jobsdb.com`、HK 及 DISCOVER/MATCH/PREPARE。新增 CLI `read-candidates taskFile --data-dir <当前副本目录>` 仅由可信 Runner 调用；不调用原 `search` 的文件写入、`apply` 或 `batch`，不加载全局 answers/联系方式，不创建或修改申请账本。
+
+默认只在本副本所配 JobsDB 目录已有 `venv/bin/python` 且源码脚本存在时配置；`WORKBENCH_JOBSDB_COMMAND` JSON 参数数组可覆盖，`[]` 禁用。Runner 追加 `read-candidates taskFile --data-dir ...`，不是 shell。只复用此目录已显式登录的 `scrapling-profile/` 与原 `run.lock`；缺会话时明确停止，不创建新 profile、不复制 Cookie。与其他工作台操作串行，原 CLI 忙碌时也由同一锁拒绝。
+
+每页最多 40 个详情、当前加载列表最多 200 个链接；超过列表上限明确报错，不静默截断。续读仅遍历已加载列表并绑定 ID 指纹，列表变化要求重启只读轮次，不推测下一页。导航前整个 BrowserContext 的网络守卫（含 popup 首次请求）只放行支持的列表/详情及窄范围静态 GET，其他网络请求拒绝，不运行 CF solver。只读 Browser 阻止新 Service Worker 注册；现有 profile 包含 Service Worker 存储目录时在 Chrome 启动前保守拒绝，原 worker 可能绕过路由，不能仅依赖注册 block 选项。不会删除会话或 worker 状态，目录存在但无活跃 worker 也会明确停止。动态页面、CF、未知 schema 或缺标题/公司会报读取例外；短/缺失 `jobAdDetails` 保留描述不足。生产连接、DOM 覆盖和推荐质量未验收。
+
+完整候选可统一匹配及另存可核验 DOCX；需在一次范围中选定核对的适用港区联系方式。**材料策略核准不是渠道可执行能力**：原线上 Profile、附件实际字节和材料绑定回执尚未核实，工作台 APPLY/CONTACT/SEND_CV 明确拒绝，不 claim、不回退官网或调用旧批次。#16 仍 open / needs-triage，受控单岗申请是剩余项；只读接入不是实投交付。
+
 ## 全自动批次
 
 新增命令（一次配置，批次内不读取 stdin）：

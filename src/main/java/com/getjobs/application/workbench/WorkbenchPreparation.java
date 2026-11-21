@@ -109,7 +109,7 @@ final class WorkbenchPreparation {
             var decision = service.scope.preparedDecision(c, scope.path("version").asInt(), target, "PREPARE", true);
             require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
             service.duplicate(c, object().put("id", taskId).put("kind", "APPLICATION").put("url", target.path("url").asText()));
-            if (target.path("channel").asText().equals("OFFERTODAY")) contactFacts(scope, context);
+            if (Set.of("OFFERTODAY", "JOBSDB").contains(target.path("channel").asText())) contactFacts(scope, context);
         } catch (WorkbenchException e) { item.put("exception", e.getMessage()); }
         return item;
     }
@@ -162,11 +162,11 @@ final class WorkbenchPreparation {
                     store.save(c, "resume", resume);
                 }
                 verifyAutomaticFile(resume);
-                if (target.path("channel").asText().equals("OFFERTODAY")) require(resume.path("filename").asText().endsWith(".docx"), "OfferToday 必须使用可核验的 PDF/DOCX 附件，文本草稿不可核准外发");
+                if (Set.of("OFFERTODAY", "JOBSDB").contains(target.path("channel").asText())) require(resume.path("filename").asText().endsWith(".docx"), "港区渠道必须使用可核验的 DOCX 附件，文本草稿不可核准外发");
                 var snapshot = object().put("approvedAt", now()).put("source", "SCOPE_POLICY")
                         .put("initialMessage", message).put("initialMessageSha256", hash(message.getBytes(StandardCharsets.UTF_8)));
                 snapshot.set("resume", resume.deepCopy()); snapshot.set("facts", context.path("facts"));
-                if (target.path("channel").asText().equals("OFFERTODAY")) {
+                if (Set.of("OFFERTODAY", "JOBSDB").contains(target.path("channel").asText())) {
                     snapshot.put("contactVerified", true); snapshot.set("contactFacts", contactFacts(scope, context));
                 }
                 record.set("snapshot", snapshot); record.put("status", "POLICY_APPROVED").put("reason", transformation.equals("ORIGINAL")
@@ -178,7 +178,7 @@ final class WorkbenchPreparation {
     }
 
     private com.fasterxml.jackson.databind.node.ArrayNode contactFacts(ObjectNode scope, ObjectNode context) {
-        require(scope.path("contactVerified").asBoolean() && scope.path("contactFactIds").isArray() && !scope.path("contactFactIds").isEmpty(), "须在一次范围确认中核对 OfferToday 实际联系方式、最新偏好与线上资料，并固定联系方式事实");
+        require(scope.path("contactVerified").asBoolean() && scope.path("contactFactIds").isArray() && !scope.path("contactFactIds").isEmpty(), "须在一次范围确认中核对港区渠道实际联系方式、最新偏好与线上资料，并固定联系方式事实");
         var contacts = service.json.createArrayNode();
         for (var id : scope.path("contactFactIds")) {
             JsonNode found = null;

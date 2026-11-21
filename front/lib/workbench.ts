@@ -219,7 +219,7 @@ export interface WorkbenchState {
   candidates: CandidateWorkspace
   preparations: { packages: PreparationPackage[] }
   workflow: { cycles: WorkflowCycle[] }
-  runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string }
+  runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string }
   platforms: {
     bossUrl: string
     offerTodayUrl: string

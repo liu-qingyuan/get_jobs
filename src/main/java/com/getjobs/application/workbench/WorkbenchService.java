@@ -188,6 +188,8 @@ public final class WorkbenchService {
         String region = choice(input, "region", Set.of("HK", "MAINLAND"));
         if (Set.of("JOBSDB", "OFFERTODAY").contains(channel) && !region.equals("HK")) throw new WorkbenchException(400, "当前所选平台仅支持港区");
         String taskUrl = url(text(input, "url", 3000, kind.equals("APPLICATION")), kind.equals("APPLICATION"));
+        if (kind.equals("APPLICATION") && JobsDbTarget.isHost(taskUrl) && !channel.equals("JOBSDB"))
+            throw new WorkbenchException(400, "JobsDB 岗位不能借用官网 AI 或其他渠道；外发能力待核实");
         if (kind.equals("APPLICATION") && BossCandidateReader.isHost(taskUrl) && !channel.equals("BOSS"))
             throw new WorkbenchException(400, "Boss 岗位不能借用官网 AI 或其他渠道；外发能力待核实");
         OfferTodayTarget offerToday = null;
@@ -254,6 +256,8 @@ public final class WorkbenchService {
     public ObjectNode createStatusCheck(String applicationId) {
         return store.write(c -> {
             var application = store.get(c, "task", applicationId);
+            require(!application.path("channel").asText().equals("JOBSDB") && !JobsDbTarget.isHost(application.path("url").asText()),
+                    "JobsDB 暂不自动查询招聘进度；不会回退官网 AI，请在原平台人工核对后记录证据");
             require(!application.path("channel").asText().equals("BOSS") && !BossCandidateReader.isHost(application.path("url").asText()),
                     "Boss 暂不自动查询招聘进度；不会回退官网 AI，请在原平台人工核对后记录证据");
             require(!application.path("channel").asText().equals("OFFERTODAY") && !OfferTodayTarget.isHost(application.path("url").asText()),
@@ -281,6 +285,8 @@ public final class WorkbenchService {
         }
     }
 
+    Path jobsDbDirectory() { return legacy.directory(); }
+
     public ObjectNode context(String id) {
         return store.write(c -> {
             var task = store.get(c, "task", id);
@@ -297,6 +303,8 @@ public final class WorkbenchService {
             if (!task.path("state").asText().equals("APPROVED")) throw new WorkbenchException(409, "只能启动已批准且尚未执行的任务");
             if (task.path("kind").asText().equals("GAP") || (task.path("kind").asText().equals("APPLICATION") && !Set.of("OFFICIAL", "OFFERTODAY").contains(task.path("channel").asText())))
                 throw new WorkbenchException(409, "平台申请请使用原有审核入口；此执行器只处理官网、OfferToday 单岗或简历草稿任务");
+            if (task.path("kind").asText().equals("APPLICATION") && JobsDbTarget.isHost(task.path("url").asText()))
+                throw new WorkbenchException(409, JobsDbTarget.OUTBOUND_BLOCK_REASON);
             if (task.path("kind").asText().equals("APPLICATION") && BossCandidateReader.isHost(task.path("url").asText()))
                 throw new WorkbenchException(409, BossCandidateReader.OUTBOUND_BLOCK_REASON);
             if (task.path("kind").asText().equals("APPLICATION") && OfferTodayTarget.isHost(task.path("url").asText()) && !task.path("channel").asText().equals("OFFERTODAY"))

@@ -15,6 +15,8 @@ final class WorkbenchLegacy {
     private final ObjectMapper json;
     WorkbenchLegacy(Path jobsdb, ObjectMapper json) { this.jobsdb = jobsdb; this.json = json; }
 
+    Path directory() { return jobsdb.toAbsolutePath().normalize(); }
+
     ObjectNode preview() {
         var facts = json.createArrayNode();
         var profile = read("application-facts.json");

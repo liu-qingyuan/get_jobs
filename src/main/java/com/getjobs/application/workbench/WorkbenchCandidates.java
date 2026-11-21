@@ -40,7 +40,7 @@ final class WorkbenchCandidates {
                 var saved = result.putArray("sources");
                 for (var row : sources) {
                     if (!(row instanceof ObjectNode source)) throw new WorkbenchException(400, "来源格式无效");
-                    var selected = object().put("channel", choice(source, "channel", Set.of("OFFICIAL", "OFFERTODAY", "BOSS")))
+                    var selected = object().put("channel", choice(source, "channel", Set.of("OFFICIAL", "OFFERTODAY", "BOSS", "JOBSDB")))
                             .put("url", url(text(source, "url", 3000, true), true))
                             .put("region", choice(source, "region", Set.of("HK", "MAINLAND")))
                             .put("language", choice(source, "language", Set.of("zh", "en")))
@@ -152,6 +152,7 @@ final class WorkbenchCandidates {
             record.put("firstSeenAt", previous == null ? record.path("retrievedAt").asText() : previous.path("firstSeenAt").asText());
             if (source.path("channel").asText().equals("OFFERTODAY")) record.put("platformJobId", OfferTodayTarget.parse(link).id());
             if (source.path("channel").asText().equals("BOSS")) record.put("platformJobId", BossCandidateReader.jobId(link));
+            if (source.path("channel").asText().equals("JOBSDB")) record.put("platformJobId", JobsDbTarget.parse(link).id());
             record.set("reasons", decision.path("reasons"));
             if (status.equals("INCOMPLETE")) record.putArray("reasons").add("未取得足够完整的 JD；不能用标题或摘要参与匹配/备料");
             if (status.equals("EXPIRED")) record.putArray("reasons").add("来源报告岗位已失效");
@@ -161,6 +162,7 @@ final class WorkbenchCandidates {
 
     static String canonicalUrl(String value, String channel) {
         if (channel.equals("OFFERTODAY")) return OfferTodayTarget.parse(value).url();
+        if (channel.equals("JOBSDB")) return JobsDbTarget.parse(value).url();
         if (channel.equals("BOSS")) {
             try { return BossCandidateReader.detailUrl(value); }
             catch (IllegalArgumentException e) { throw new WorkbenchException(400, e.getMessage()); }

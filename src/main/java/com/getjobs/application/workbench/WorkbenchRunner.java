@@ -15,6 +15,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final WorkbenchService service;
     private final List<String> command;
     private final List<String> offerTodayCommand;
+    private final List<String> jobsDbCommand;
     private final WorkbenchCandidates.Reader bossReader;
     private final String callback;
     private final long timeoutSeconds;
@@ -35,12 +36,17 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand,
             WorkbenchCandidates.Reader bossReader, String callback, long timeoutSeconds) {
+        this(service, command, offerTodayCommand, List.of(), bossReader, callback, timeoutSeconds);
+    }
+
+    WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
+            WorkbenchCandidates.Reader bossReader, String callback, long timeoutSeconds) {
         this.service = service; this.command = List.copyOf(command); this.offerTodayCommand = List.copyOf(offerTodayCommand);
-        this.bossReader = bossReader;
+        this.jobsDbCommand = List.copyOf(jobsDbCommand); this.bossReader = bossReader;
         this.callback = callback; this.timeoutSeconds = timeoutSeconds;
         if (!command.isEmpty() && (command.stream().noneMatch(arg -> arg.contains("{taskFile}")) || command.stream().anyMatch(String::isBlank)))
             throw new IllegalArgumentException("官网执行器参数必须包含 {taskFile} 且不能为空");
-        if (offerTodayCommand.stream().anyMatch(String::isBlank)) throw new IllegalArgumentException("OfferToday 脚本前缀参数不能为空");
+        if (offerTodayCommand.stream().anyMatch(String::isBlank) || jobsDbCommand.stream().anyMatch(String::isBlank)) throw new IllegalArgumentException("渠道脚本前缀参数不能为空");
         try {
             lockChannel = FileChannel.open(service.store.root.resolve("runner.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             lock = lockChannel.tryLock();
@@ -56,6 +62,8 @@ public final class WorkbenchRunner implements AutoCloseable {
     public ObjectNode runtime() {
         return service.json.createObjectNode().put("agentConfigured", !command.isEmpty())
                 .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get())
+                .put("jobsDbConfigured", !jobsDbCommand.isEmpty()).put("jobsDbProductionVerified", false)
+                .put("jobsDbOutboundSupported", false).put("jobsDbCapabilityReason", JobsDbTarget.OUTBOUND_BLOCK_REASON)
                 .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
     }
 
@@ -195,8 +203,10 @@ public final class WorkbenchRunner implements AutoCloseable {
             return bossReader.read(bundle);
         }
         boolean offerToday = bundle.path("source").path("channel").asText().equals("OFFERTODAY");
-        if (offerToday ? offerTodayCommand.isEmpty() : command.isEmpty()) throw new WorkbenchException(409,
-                offerToday ? "OfferToday 未配置或没有已授权会话；不会新建登录态" : "尚未配置通用官网只读执行器");
+        boolean jobsDb = bundle.path("source").path("channel").asText().equals("JOBSDB");
+        var readerCommand = jobsDb ? jobsDbCommand : offerToday ? offerTodayCommand : command;
+        if (readerCommand.isEmpty()) throw new WorkbenchException(409,
+                jobsDb ? "JobsDB 未配置独立脚本/会话；不会回退官网 AI 或创建登录态" : offerToday ? "OfferToday 未配置或没有已授权会话；不会新建登录态" : "尚未配置通用官网只读执行器");
         Path directory = service.store.root.resolve("runs").resolve("candidates-" + UUID.randomUUID());
         Files.createDirectories(directory);
         Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
@@ -208,8 +218,9 @@ public final class WorkbenchRunner implements AutoCloseable {
         try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
         catch (UnsupportedOperationException ignored) { }
         List<String> arguments;
-        if (offerToday) {
-            arguments = new ArrayList<>(offerTodayCommand); arguments.add("read-candidates"); arguments.add(file.toString());
+        if (offerToday || jobsDb) {
+            arguments = new ArrayList<>(readerCommand); arguments.add("read-candidates"); arguments.add(file.toString());
+            if (jobsDb) { arguments.add("--data-dir"); arguments.add(service.jobsDbDirectory().toString()); }
         } else arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
         Process child = null;
         try {

@@ -52,6 +52,12 @@ if offer:
     report('CV_DELIVERED',proof=dict(common,messageId='cv',resumeSha256=s['resume']['sha256']))
 else: report('SUBMITTED',proof='Synthetic application acknowledgement')
 `)
+const jobsdbFake = join(root, 'jobsdb-fake.py')
+await writeFile(jobsdbFake, `import json,sys
+assert sys.argv[1]=='read-candidates' and sys.argv[3]=='--data-dir'
+b=json.load(open(sys.argv[2]));assert b['source']['channel']=='JOBSDB' and 'token' not in b and 'resumePath' not in b
+json.dump({'jobs':[{'url':'https://hk.jobsdb.com/job/12345678?ref=search','company':'Synthetic JobsDB','title':'Python engineer','description':'Responsibilities: build Python search applications with repeatable tests. Requirements: Python projects, evaluation and documentation, with synthetic data only.','descriptionComplete':True}]},open(b['resultPath'],'w'))
+`)
 execFileSync('python3', ['-c', `import sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as c:
     c.executescript('CREATE TABLE default_page_config_seed(id INTEGER PRIMARY KEY); INSERT INTO default_page_config_seed VALUES(1); CREATE TABLE config(id INTEGER PRIMARY KEY, config_key TEXT, config_value TEXT, config_type TEXT, category TEXT, description TEXT, created_at TEXT, updated_at TEXT);')
@@ -61,7 +67,7 @@ let server, browser
 function launch() {
   server = spawn(process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java', ['-jar', jar, `--server.port=${port}`, '--server.address=127.0.0.1', '--browser.auto-start=false',
     `--spring.datasource.url=jdbc:sqlite:${join(root, 'empty-legacy.db')}`, `--workbench.data-dir=${join(root, 'state')}`, `--workbench.jobsdb-dir=${join(root, 'empty-jobsdb')}`,
-    `--workbench.offertoday-command=${JSON.stringify(['python3', fake])}`, `--workbench.agent-command=${JSON.stringify(['python3', fake, '{taskFile}'])}`, `--logging.file.name=${join(root, 'application.log')}`,
+    `--workbench.jobsdb-command=${JSON.stringify(['python3', jobsdbFake])}`, `--workbench.offertoday-command=${JSON.stringify(['python3', fake])}`, `--workbench.agent-command=${JSON.stringify(['python3', fake, '{taskFile}'])}`, `--logging.file.name=${join(root, 'application.log')}`,
   ], { cwd: root, stdio: ['ignore', log.fd, log.fd] })
 }
 async function until(check, label) {
@@ -175,8 +181,33 @@ try {
   assert.equal(state.scope.usage.outbound, beforeBossOutbound)
   assert.equal(await readFile(join(root, 'calls'), 'utf8'), beforeBossCalls)
   await screenshot('boss-capability-blocked.png')
+  // #16: configured fake JobsDB read, unified matching/materials, no original CLI apply/batch or fallback.
+  await post('/scope', { ...state.scope.current, expectedVersion: 2, channels: ['JOBSDB'], hosts: ['hk.jobsdb.com'], regions: ['HK'] })
+  await page.reload()
+  await discovery.getByRole('button', { name: '载入当前范围来源', exact: true }).click()
+  assert.equal(await discovery.getByLabel('官网只读入口（每行一个）').inputValue(), '')
+  assert.equal(await discovery.getByLabel('JobsDB 只读列表（每行一个）').inputValue(), 'https://hk.jobsdb.com/jobs')
+  await discovery.getByRole('button', { name: '一次启动本轮求职', exact: true }).click()
+  await progress.getByText('Synthetic JobsDB · Python engineer · 逐岗例外待处理', { exact: true }).waitFor()
+  await until(async () => !(await get()).runtime.busy, 'JobsDB unified preparation')
+  state = await get()
+  assert.equal(state.runtime.jobsDbOutboundSupported, false)
+  assert.equal(state.runtime.jobsDbProductionVerified, false)
+  assert.equal(state.scope.usage.outbound, beforeBossOutbound)
+  assert.equal(state.tasks.length, 5)
+  const jobsdbCandidate = state.candidates.jobs.find(job => job.channel === 'JOBSDB')
+  assert.equal(jobsdbCandidate.platformJobId, '12345678')
+  assert.equal(jobsdbCandidate.analysis.status, 'ANALYSIS_READY')
+  const jobsdbPackage = state.preparations.packages.find(pkg => pkg.target.channel === 'JOBSDB')
+  assert.equal(jobsdbPackage.status, 'POLICY_APPROVED')
+  await page.locator('summary').filter({ hasText: '高级：独立备料与冻结包详情' }).click()
+  const material = page.getByRole('article', { name: `材料包 Synthetic JobsDB ${jobsdbPackage.id}`, exact: true })
+  await material.getByText('策略核准 · 未发送', { exact: true }).waitFor()
+  await material.getByRole('button', { name: '只核验 APPLY（不执行）', exact: true }).click()
+  await material.getByText('APPLY：拒绝执行资格', { exact: true }).waitFor()
+  await screenshot('jobsdb-prepared-capability-blocked.png')
   assert.deepEqual(failures, [])
-  console.log(JSON.stringify({ root, port, browserStarts: starts.length, submitted: state.tasks.filter(t => t.state === 'SUBMITTED').length, unknown: state.tasks.filter(t => t.state === 'UNKNOWN').length, outbound: state.scope.usage.outbound, screenshots: ['workflow-exception.png', 'workflow-completed.png', 'workflow-unknown-restart.png', 'boss-capability-blocked.png'] }, null, 2))
+  console.log(JSON.stringify({ root, port, browserStarts: starts.length, submitted: state.tasks.filter(t => t.state === 'SUBMITTED').length, unknown: state.tasks.filter(t => t.state === 'UNKNOWN').length, outbound: state.scope.usage.outbound, screenshots: ['workflow-exception.png', 'workflow-completed.png', 'workflow-unknown-restart.png', 'boss-capability-blocked.png', 'jobsdb-prepared-capability-blocked.png'] }, null, 2))
 } finally {
   if (browser) await browser.close()
   if (server && server.exitCode === null) { server.kill('SIGTERM'); await once(server, 'exit') }

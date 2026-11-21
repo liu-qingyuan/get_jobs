@@ -23,6 +23,7 @@ public class WorkbenchConfiguration {
             ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
             @Value("${workbench.agent-command:${WORKBENCH_AGENT_COMMAND:[]}}") String command,
             @Value("${workbench.offertoday-command:${WORKBENCH_OFFERTODAY_COMMAND:}}") String offerTodayCommand,
+            @Value("${workbench.jobsdb-command:${WORKBENCH_JOBSDB_COMMAND:}}") String jobsDbCommand,
             @Value("${server.port:9527}") int port,
             @Value("${workbench.agent-timeout-seconds:1800}") long timeout) throws Exception {
         if (timeout < 1) throw new IllegalArgumentException("执行器超时须为正数");
@@ -31,6 +32,12 @@ public class WorkbenchConfiguration {
             Path script = Path.of("scripts/offertoday/offertoday.py").toAbsolutePath().normalize();
             offerToday = Files.isRegularFile(script) ? List.of("python3", script.toString()) : List.of();
         } else offerToday = arguments(json, offerTodayCommand);
+        List<String> jobsDb;
+        if (jobsDbCommand.isBlank()) {
+            Path script = Path.of("scripts/jobsdb/jobsdb.py").toAbsolutePath().normalize();
+            Path python = service.jobsDbDirectory().resolve("venv/bin/python");
+            jobsDb = Files.isRegularFile(script) && Files.isExecutable(python) ? List.of(python.toString(), script.toString()) : List.of();
+        } else jobsDb = arguments(json, jobsDbCommand);
         var browser = browsers.getIfAvailable(); var legacyBoss = bossJobs.getIfAvailable();
         WorkbenchCandidates.Reader boss = browser == null || legacyBoss == null ? null : bundle -> {
             WorkbenchService.require(!legacyBoss.isRunning(), "Boss 原任务正在运行，不能同时读取；不会停止或接管旧任务");
@@ -43,7 +50,7 @@ public class WorkbenchConfiguration {
                 return BossCandidateReader.read(browser.getBossPage(), bounded, json);
             });
         };
-        return new WorkbenchRunner(service, arguments(json, command), offerToday, boss, "http://127.0.0.1:" + port + "/api/workbench", timeout);
+        return new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss, "http://127.0.0.1:" + port + "/api/workbench", timeout);
     }
 
     private static List<String> arguments(ObjectMapper json, String command) throws Exception {

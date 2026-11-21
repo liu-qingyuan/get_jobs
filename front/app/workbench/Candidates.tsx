@@ -20,9 +20,10 @@ export default function Candidates({ state, working, act, showScope }: Props) {
   const current = state.scope.current
   function sources() {
     return {
-      official: current?.channels.includes('OFFICIAL') ? current.hosts.filter(host => host !== 'www.offertoday.com' && host !== 'zhipin.com' && !host.endsWith('.zhipin.com')).map(host => `https://${host}`).join('\n') : '',
+      official: current?.channels.includes('OFFICIAL') ? current.hosts.filter(host => host !== 'www.offertoday.com' && host !== 'zhipin.com' && !host.endsWith('.zhipin.com') && host !== 'jobsdb.com' && !host.endsWith('.jobsdb.com')).map(host => `https://${host}`).join('\n') : '',
       offer: current?.channels.includes('OFFERTODAY') && current.hosts.includes('www.offertoday.com') ? 'https://www.offertoday.com/hk/recommend' : '',
       boss: current?.channels.includes('BOSS') && current.hosts.includes('www.zhipin.com') ? 'https://www.zhipin.com/web/geek/jobs' : '',
+      jobsdb: current?.channels.includes('JOBSDB') && current.hosts.includes('hk.jobsdb.com') ? 'https://hk.jobsdb.com/jobs' : '',
     }
   }
   const [entry, setEntry] = useState(sources)
@@ -42,6 +43,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
         ...lines(entry.official).map(url => ({ channel: 'OFFICIAL', url, region, language, direction })),
         ...lines(entry.offer).map(url => ({ channel: 'OFFERTODAY', url, region, language, direction })),
         ...lines(entry.boss).map(url => ({ channel: 'BOSS', url, region, language, direction })),
+        ...lines(entry.jobsdb).map(url => ({ channel: 'JOBSDB', url, region, language, direction })),
       ] }),
     }))
   }
@@ -51,6 +53,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
         ...lines(entry.official).map(url => ({ channel: 'OFFICIAL', url, region, language, direction })),
         ...lines(entry.offer).map(url => ({ channel: 'OFFERTODAY', url, region, language, direction })),
         ...lines(entry.boss).map(url => ({ channel: 'BOSS', url, region, language, direction })),
+        ...lines(entry.jobsdb).map(url => ({ channel: 'JOBSDB', url, region, language, direction })),
       ],
     }))
   }
@@ -65,13 +68,15 @@ export default function Candidates({ state, working, act, showScope }: Props) {
         <label className={small}>官网只读入口（每行一个）<textarea className={control} value={entry.official} onChange={e => setEntry({ ...entry, official: e.target.value })} placeholder="https://careers.example.com/jobs" /></label>
         <label className={small}>OfferToday 只读列表（每行一个）<textarea className={control} value={entry.offer} onChange={e => setEntry({ ...entry, offer: e.target.value })} placeholder="https://www.offertoday.com/hk/recommend" /></label>
         <label className={small}>Boss 只读列表（每行一个）<textarea className={control} value={entry.boss} onChange={e => setEntry({ ...entry, boss: e.target.value })} placeholder="https://www.zhipin.com/web/geek/jobs?query=Python" /></label>
+        <label className={small}>JobsDB 只读列表（每行一个）<textarea className={control} value={entry.jobsdb} onChange={e => setEntry({ ...entry, jobsdb: e.target.value })} placeholder="https://hk.jobsdb.com/python-jobs" /></label>
+        <p className={`${small} md:col-span-2`} role="note">JobsDB：仅复用本副本独立 CLI 已有会话及锁，不创建登录态、不加载原批次 answers。{state.runtime.jobsDbConfigured ? '已配置只读脚本，连接在读取时核验。' : '只读脚本未配置。'} {state.runtime.jobsDbCapabilityReason} 搜索覆盖与真实推荐质量尚未验收。</p>
         <p className={`${small} md:col-span-2`} role="note">Boss：仅支持本副本显式登录后的内地只读列表及同岗详情；不自动创建浏览器、不读原目录、不滚动或猜测翻页。{state.runtime.bossReadConfigured ? '已安装只读 Adapter，连接在读取时核验。' : '只读 Adapter 未配置。'} {state.runtime.bossCapabilityReason} 材料核准只表示材料可用，不表示渠道可执行。</p>
         <div className="flex flex-wrap gap-2 md:col-span-2"><Button type="button" variant="outline" disabled={working || !current} onClick={() => { setEntry(sources()); setRegion(current?.regions[0] ?? 'HK'); setLanguage(current?.languages[0] ?? 'en'); setDirection(current?.directions[0] ?? 'AI_APPLICATION') }}>载入当前范围来源</Button><p className={small}>官网复用已配置通用只读执行器，不造公司驱动；OfferToday 仅复用已授权现有会话，不新建登录态。列表入口一次提供，不需逐岗抄 JD。</p></div>
         <label className={small}>本次地区<select className={control} value={region} onChange={e => setRegion(e.target.value)}><option value="HK">香港</option><option value="MAINLAND">内地</option></select></label>
         <label className={small}>本次语言<select className={control} value={language} onChange={e => setLanguage(e.target.value)}><option value="en">英文</option><option value="zh">中文</option></select></label>
         <label className={small}>本次方向<select className={control} value={direction} onChange={e => setDirection(e.target.value)}><option value="AI_APPLICATION">AI 应用</option><option value="ML">机器学习</option><option value="EMBODIED">具身智能</option></select></label>
         {([['maxPages', '本次最多页面', 20], ['jobsPerPage', '每页候选槽位', 40], ['secondsPerPage', '每页秒数上限', 120], ['modelTokensPerPage', '官网每页模型 token 上限', 100000]] as const).map(([key, label, max]) => <label key={key} className={small}>{label}<input className={control} type="number" min="1" max={max} required value={limits[key]} onChange={e => setLimits({ ...limits, [key]: Number(e.target.value) })} /></label>)}
-        <p className={`${small} md:col-span-2`}>每页包含必要详情，开始前预扣整页候选槽、秒数及官网模型上限（OfferToday 零模型），失败/重复不退款。页面上限只限制本次推进；续读保留游标，仍重核当前范围及累计预算，重启不清零。OfferToday 不猜测尚未加载的翻页接口，连接/版本或详情不足均明确列为例外。</p>
+        <p className={`${small} md:col-span-2`}>每页包含必要详情，开始前预扣整页候选槽、秒数及官网模型上限（OfferToday / Boss / JobsDB 零模型），失败/重复不退款。页面上限只限制本次推进；续读保留游标，仍重核当前范围及累计预算，重启不清零。OfferToday 不猜测尚未加载的翻页接口，连接/版本或详情不足均明确列为例外。</p>
         {([['secondsPerBatch', '匹配 / 备料批次秒数上限', 120], ['modelTokensPerCandidate', '每岗每阶段匹配 / 备料 token 上限', 100000]] as const).map(([key, label, max]) => <label key={key} className={small}>{label}<input className={control} type="number" min="1" max={max} required value={matchLimits[key]} onChange={e => setMatchLimits({ ...matchLimits, [key]: Number(e.target.value) })} /></label>)}
         {([['secondsPerJob', '单岗执行秒数上限', 120], ['modelTokensPerJob', '官网单岗执行 token 上限', 100000]] as const).map(([key, label, max]) => <label key={key} className={small}>{label}<input className={control} type="number" min="1" max={max} required value={jobLimits[key]} onChange={e => setJobLimits({ ...jobLimits, [key]: Number(e.target.value) })} /></label>)}
         <p className={`${small} md:col-span-2`}>匹配 / 备料逐岗预扣完整额度；执行器启动前预扣完整时间及官网 token（OfferToday 零模型），失败不退款。每次不可逆动作另外扣一次外发量；联系与 CV 各计一次。预算耗尽先暂停，补充总上限不清零累计消耗。</p>

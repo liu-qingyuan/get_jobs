@@ -64,12 +64,16 @@ def deadline(seconds=90):
 
 class Browser:
     """Owns one pinned Scrapling session. Never attaches to another browser."""
-    def __init__(self, data):
-        self.data = data
+    def __init__(self, data, *, read_only=False):
+        self.data, self.read_only = data, read_only
     def __enter__(self):
+        # A persisted worker can bypass routing. Refuse before Chrome starts, never delete user state.
+        if self.read_only and any((self.data / 'scrapling-profile').glob('*/Service Worker')):
+            raise RuntimeError('JobsDB existing Service Worker state prevents verified read-only access; original session untouched')
         from scrapling.fetchers import StealthySession
+        options = {'additional_args': {'service_workers': 'block'}} if self.read_only else {}
         self.session = StealthySession(headless=False, real_chrome=True, google_search=False,
-            user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1)
+            user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1, **options)
         self.session.__enter__()
         return self
     def __exit__(self, *args):
@@ -79,7 +83,7 @@ class Browser:
             # Pinned private seam: preserves the current form instead of re-fetching it.
             with deadline(): self.session._cloudflare_solver(page)
         if challenge(page): raise RuntimeError('CF challenge remains; no automatic retry')
-    def run(self, url, action):
+    def run(self, url, action, *, setup=None):
         result, errors = [], []
         def perform(page):
             signal.alarm(0)  # User login/form input is not subject to the navigation deadline.
@@ -91,7 +95,8 @@ class Browser:
             finally:
                 screenshot(page, self.data, 'last-page')
         with deadline():
-            self.session.fetch(url, solve_cloudflare=True, page_action=perform)
+            options = {'page_setup': setup} if setup is not None else {}
+            self.session.fetch(url, solve_cloudflare=setup is None, page_action=perform, **options)
         if errors: raise errors[0]
         if not result: raise RuntimeError('Browser action did not run')
         return result[0]
@@ -343,7 +348,13 @@ def main(argv=None):
         subs.add_parser(name).add_argument('url')
     bulk = subs.add_parser('batch')
     bulk.add_argument('--config', required=True)
+    read = subs.add_parser('read-candidates', help='Bounded workbench read; never apply or load global answers')
+    read.add_argument('task_file')
+    read.add_argument('--data-dir', required=True, type=Path)
     args = parser.parse_args(argv or ['help'])
+    if args.command == 'read-candidates':
+        from workbench_read import execute
+        return execute(args.task_file, args.data_dir)
     if args.command == 'help': parser.print_help(); return 0
     id = job_id(args.url) if args.command in ('prepare','apply') else None
     if args.command == 'search' and not args.keywords.strip(): parser.error('keywords must not be blank')

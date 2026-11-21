@@ -54,11 +54,12 @@ final class WorkbenchScopePolicy {
             require(!input.has("contactVerified") || input.path("contactVerified").isBoolean(), "contactVerified 须为显式核对标记");
             scope.put("contactVerified", input.path("contactVerified").asBoolean(false));
             if (scope.path("contactVerified").asBoolean()) {
-                require(contains(scope.path("channels"), "OFFERTODAY") && !scope.path("contactFactIds").isEmpty(), "请明确选定本范围的 OfferToday 联系方式事实再核对");
+                require((contains(scope.path("channels"), "OFFERTODAY") || contains(scope.path("channels"), "JOBSDB")) && !scope.path("contactFactIds").isEmpty(), "请明确选定本范围的港区渠道联系方式事实再核对");
                 for (var contactId : scope.path("contactFactIds")) {
                     boolean applicable = false;
                     for (var fact : scope.path("materials").path("facts")) if (fact.path("id").equals(contactId)
-                            && WorkbenchMaterials.applicable(fact.path("scope").asText(), "HK", "www.offertoday.com") && contactValue(fact)) applicable = true;
+                            && (contains(scope.path("channels"), "OFFERTODAY") && WorkbenchMaterials.applicable(fact.path("scope").asText(), "HK", "www.offertoday.com")
+                            || contains(scope.path("channels"), "JOBSDB") && WorkbenchMaterials.applicable(fact.path("scope").asText(), "HK", "hk.jobsdb.com")) && contactValue(fact)) applicable = true;
                     require(applicable, "联系方式须为范围内适用的已确认邮箱/电话字段及可识别完整值，经历事实不能冒充联系方式");
                 }
             }
@@ -337,6 +338,12 @@ final class WorkbenchScopePolicy {
         if (port >= 0 && !(port == 443 && uri.getScheme().equals("https") || port == 80 && uri.getScheme().equals("http")))
             deny(reasons, codes, "SOURCE_DENIED", "范围未授权非标准来源端口");
         String channel = text(target, "channel", 50, true);
+        if (JobsDbTarget.isHost(link) && !channel.equals("JOBSDB")) deny(reasons, codes, "CHANNEL_DENIED", "JobsDB 不能借用其他渠道授权或官网 AI");
+        if (channel.equals("JOBSDB")) {
+            try { JobsDbTarget.validate(link, sourceRead); }
+            catch (WorkbenchException e) { deny(reasons, codes, "CHANNEL_DENIED", e.getMessage()); }
+            if (OUTBOUND.contains(action)) deny(reasons, codes, "CAPABILITY_UNVERIFIED", JobsDbTarget.OUTBOUND_BLOCK_REASON);
+        }
         if (BossCandidateReader.isHost(link) && !channel.equals("BOSS")) deny(reasons, codes, "CHANNEL_DENIED", "Boss 不能借用其他渠道授权或官网 AI");
         if (channel.equals("BOSS")) {
             try {

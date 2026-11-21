@@ -41,7 +41,7 @@ bash gradlew --no-daemon workbench -x installPatchrightDriver \
 7. **项目补强**：先登记差距、计划、建议目录，不自动执行代码，也不把计划当作已完成经历。
 8. **招聘状态**：官网渠道已投递或结果未知的申请可显式点击“检查最新进度”，启动只读 AI 查询。查询不上传材料、不修改官网资料、不允许申请；真实观察及证据回写原申请的招聘状态和检查时间，不改写执行结果。OfferToday 本版只支持在平台人工核对后登记证据，不自动借用官网 AI 查询。
 
-JobsDB 页只读显示最近 100 条原账本并保留 CLI 交接。**工作台不通过 HTTP 直接启动 Boss/JobsDB 的交互式 apply 或批次**；一个岗位的批准不是整个批次的授权。OfferToday 是另行受控的单岗脚本路径，使用原审核/回执合同，不触及 Boss/JobsDB 批次。原平台配置、在线简历和 Cookie 不会因工作台资料更新自动改写。
+JobsDB 默认候选页已接入有界只读列表/完整详情、统一匹配与独立备料；平台页仍只读显示最近 100 条原账本并保留 CLI 交接。**工作台不通过 HTTP 直接启动 Boss/JobsDB 的交互式 apply 或批次**；一个岗位的批准不是整个批次的授权。OfferToday 是另行受控的单岗脚本路径，使用原审核/回执合同，不触及 Boss/JobsDB 批次。原平台配置、在线简历和 Cookie 不会因工作台资料更新自动改写。
 
 ## OfferToday HK
 
@@ -99,7 +99,7 @@ bash gradlew --no-daemon workbench --console=plain
 ## 候选读取 Interface（#11）
 
 - `GET /api/workbench/candidates` 和 `/state.candidates`：`jobs/runs`。候选状态为 `READY/INCOMPLETE/EXPIRED/REFUSED`，包含 `url/channel/platformJobId?`、来源列表、地区/语言/方向、全文、取得时间、范围版本及合并次数；同身份后续只返回卡片时保留已取得全文、原来源及原取得时间，单列 `lastSeenAt/lastReadComplete` 并在主屏提示未取得新全文；旧全文与本次新卡片描述共同核验当前范围，不丢弃任一侧排除词；`lastReadDescription` 保留并展示本次卡片描述，不冒充新全文。这是只读资料，不是申请、匹配或送达证明。
-- `POST /api/workbench/candidates/discover`：`{scopeVersion,sources:[{channel,url,region,language,direction}],maxPages?,jobsPerPage?,secondsPerPage?,modelTokensPerPage?}`。只支持 `OFFICIAL/OFFERTODAY`，最多 10 个固定来源；本次页面 1–20（默认 2），每页槽位 1–40（默认 5）、秒数 1–120（默认 30）、官网模型 token 1–100000（默认 1000）。详情属于本页资源；每页开始前按整页上限原子消费，重复/失败/不足不退款，OfferToday 不消费模型额度。每个候选再按真实内容重核范围，不接受模型额外 actions/confirmed/路径。仅剥离 `utm_* / ref / referrer / source / trackingid / gclid / fbclid` 推广参数，其余 opaque 查询身份保留；不改变旧申请防重。
+- `POST /api/workbench/candidates/discover`：`{scopeVersion,sources:[{channel,url,region,language,direction}],maxPages?,jobsPerPage?,secondsPerPage?,modelTokensPerPage?}`。支持 `OFFICIAL/OFFERTODAY/BOSS/JOBSDB`，最多 10 个固定来源；本次页面 1–20（默认 2），每页槽位 1–40（默认 5）、秒数 1–120（默认 30）、官网模型 token 1–100000（默认 1000）。详情属于本页资源；每页开始前按整页上限原子消费，重复/失败/不足不退款，OfferToday 不消费模型额度。每个候选再按真实内容重核范围，不接受模型额外 actions/confirmed/路径。仅剥离 `utm_* / ref / referrer / source / trackingid / gclid / fbclid` 推广参数，其余 opaque 查询身份保留；不改变旧申请防重。
 - 返回轮次为 `DISCOVERING → COMPLETED` 或 `CHECKPOINT`，附逐来源游标与可见事件；来源没有更多已知只读页面才标记结束，不承诺全站覆盖。`{scopeVersion,runId,...本次资源上限}` 继续旧断点；来源不变、当前范围重新核验、累计预算不重置。进程中断后保留已存完整页、恢复 CHECKPOINT，不自动重试或启动其他渠道。
 - 官网命令收到 `kind=CANDIDATE_READ`、`source`（本页 URL 和 cursor）、`limits`（四个计量）、`instructions/resultPath`；没有材料、申请任务、回调 token 或 claim。可信命令必须能限制实际模型消耗/读取来源，否则返回 `{exception:原因}`；本机程序不是沙箱。只写 `{jobs:[{url,title,company,description,descriptionComplete,available?}],nextUrl?,cursor?,note?}`，每页不超过已授候选槽，结果最大 2MB。完整 JD 需正向 `descriptionComplete` 且至少 120 字符，超过 30000 字符拒绝；仅标题/卡片不冒充完整描述。下一页仍按当前精确来源/渠道重核，未授权不启动进程。
 - OfferToday 使用现有已附着会话，固定已知原生客户端版本，独立 `candidate_page` 只调用公开 `get_getJobDetail`，不打开聊天/附件选择器。`jobDesc` 非已支持全文 schema 时保留 INCOMPLETE，不猜测字段或使用投递按钮探查；只遍历当前已加载卡片的有界游标，尚未加载的远端分页不猜测。没会话、版本变化、身份不符或当前有未保存草稿/弹窗均为可见例外。真实只读采样另需授权。
@@ -149,6 +149,16 @@ bash gradlew --no-daemon workbench --console=plain
 Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim，不占外发量、不调用原批次，也不回退官网任务/查询。Boss 草稿消息不声称已随附 CV。原 Boss 单岗审核、配置和历史数据仍保留；只证明联系时不能记 CV 送达或申请完成，退出码或模型判断也不能替代证明。`runtime.bossReadConfigured` 只表示只读 Adapter 已安装，连接在读取时检查；`bossOutboundSupported=false` 与 `bossCapabilityReason` 明示限制。
 
 本票尚欠精确单岗外发验收，保持待能力核实；后续须另获授权的只读核对或脱敏回放证明动作前的精确消息控制与真实回执。开发授权不包含真实联系、上传或试投，也不切换正在运行的工作台。原因及局部目标图见 #15，取舍见 ADR 0003。
+
+## JobsDB 候选与未核实的单岗外发（#16 增量）
+
+默认候选页增加 JobsDB 只读列表；当前范围必须包含 `JOBSDB`、`hk.jobsdb.com`、HK 和允许的语言/方向。来源为 `https://hk.jobsdb.com/jobs?...` 或 `<keywords>-jobs`；不能将 JobsDB 填入官网来源规避渠道检查。默认仅在所配 `workbench.jobsdb-dir` 存在 `venv/bin/python` 且本 checkout 有脚本时安装只读命令；也可用 `WORKBENCH_JOBSDB_COMMAND`（JSON 参数前缀）或 `workbench.jobsdb-command` 配置，`[]` 禁用。Runner 追加 `read-candidates taskFile --data-dir <服务端所配目录>`，请求和网页不能选择执行器或私有目录。
+
+只读任务包无材料/申请 token，仅含固定来源与有界资源。原 CLI 独立会话必须已显式存在，缺会话不新建 profile；同一 `run.lock` 拒绝与原 CLI 并发。导航前整个 BrowserContext（含 popup 首次请求）的守卫仅放行受支持列表/数字详情及窄静态 GET，拒绝所有其他方法、XHR/fetch 和外部请求；只读 Browser 阻止新 Service Worker 注册；如持久 profile 存在 Service Worker 存储目录则在 Chrome 启动前保守拒绝（包括可能没有活跃 worker 的目录），不删除或迁移旧状态；不在此路径解 CF、登录或猜测翻页。每页槽位/时限和累计预算沿用统一候选 Interface，零模型；当前加载列表超过 200 链接报例外，不静默截断。游标绑定列表身份指纹，仅续读已加载项；列表变化时显式重新启动只读轮次。标题/公司/身份 schema 缺失是读取例外，缺/短全文仍 INCOMPLETE，不冒充可匹配。完整候选统一进入匹配与独立 DOCX 准备，沿用一次范围核对的适用港区联系方式与原账本/工作台 UNKNOWN 防重。
+
+`runtime.jobsDbConfigured` 仅表示只读命令配置，读取时才核验会话；`jobsDbProductionVerified=false`、`jobsDbOutboundSupported=false` 与 `jobsDbCapabilityReason` 展示真实限制。JobsDB 原 Profile 会随申请发送，目前无法证明没有任务外资料，review 文件名不证明冻结附件字节，积极回执文案也未绑定本次材料。因此 APPLY/CONTACT/SEND_CV 返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim、不占外发量、不运行旧 apply/batch，也不回退官网 AI 或自动进度查询。
+
+#16 保持 open / needs-triage；受控单岗申请尚未完成，需另获授权的只读核对或脱敏回放来确认精确 Profile/附件/回执合同。开发假站/HTTP 测试不是生产能力或推荐质量验收，没有上传真实 CV、实投或切换可见工作台。局部八图以 #16 本增量评论为准。
 
 ## 执行器报告合同
 
@@ -205,6 +215,6 @@ PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/w
 
 脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；然后通过界面准备独立岗位 DOCX，查看正文/依据、下载文件、只读动作拒绝与跨刷新复用，并在岗位条件变化后展示失效；共 8 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 3 次/备料 1 次、3 包（核准1/例外2，核准包后来失效）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png`、`preparation.png` 与 `prepared-job.docx` 的临时证据目录和实际计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
-#14 的 `workflow-smoke.mjs` 使用同样隔离约束，从默认页面一次启动官网与 OfferToday，自动连续推进两岗并保留第三岗的登录例外；处理必要例外后在同一轮恢复，不重放已完成阶段/岗位。另在联系后强制终止自己启动的临时 Java 进程，重启确认旧子进程已释放、旧 token 拒绝，保留联系/UNKNOWN 且不发 CV，并可推进其他岗。#15 另在同一临时实例经默认候选页面提交 Boss 只读来源（不提供任何 Boss 会话），验证明确读取例外、可见能力限制、无官网回退和新增外发。共输出四张合成页面截图及实际计数；不会切换当前工作台，也不是实站发送验收。
+#14 的 `workflow-smoke.mjs` 使用同样隔离约束，从默认页面一次启动官网与 OfferToday，自动连续推进两岗并保留第三岗的登录例外；处理必要例外后在同一轮恢复，不重放已完成阶段/岗位。另在联系后强制终止自己启动的临时 Java 进程，重启确认旧子进程已释放、旧 token 拒绝，保留联系/UNKNOWN 且不发 CV，并可推进其他岗。#15 另在同一临时实例经默认候选页面提交 Boss 只读来源（不提供任何 Boss 会话），验证明确读取例外、可见能力限制、无官网回退和新增外发。#16 再通过默认页面读取合成 JobsDB 候选，验证统一匹配、独立材料与 APPLY 拒绝、0 新任务/外发；JobsDB 假命令只读取临时任务包，不提供账号或原账本。共输出五张合成页面截图及实际计数；不会切换当前工作台，也不是实站发送验收。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。
