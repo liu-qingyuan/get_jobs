@@ -20,8 +20,9 @@ export default function Candidates({ state, working, act, showScope }: Props) {
   const current = state.scope.current
   function sources() {
     return {
-      official: current?.channels.includes('OFFICIAL') ? current.hosts.filter(host => host !== 'www.offertoday.com').map(host => `https://${host}`).join('\n') : '',
+      official: current?.channels.includes('OFFICIAL') ? current.hosts.filter(host => host !== 'www.offertoday.com' && host !== 'zhipin.com' && !host.endsWith('.zhipin.com')).map(host => `https://${host}`).join('\n') : '',
       offer: current?.channels.includes('OFFERTODAY') && current.hosts.includes('www.offertoday.com') ? 'https://www.offertoday.com/hk/recommend' : '',
+      boss: current?.channels.includes('BOSS') && current.hosts.includes('www.zhipin.com') ? 'https://www.zhipin.com/web/geek/jobs' : '',
     }
   }
   const [entry, setEntry] = useState(sources)
@@ -40,6 +41,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
       ...limits, scopeVersion: current?.version, ...(runId ? { runId } : { sources: [
         ...lines(entry.official).map(url => ({ channel: 'OFFICIAL', url, region, language, direction })),
         ...lines(entry.offer).map(url => ({ channel: 'OFFERTODAY', url, region, language, direction })),
+        ...lines(entry.boss).map(url => ({ channel: 'BOSS', url, region, language, direction })),
       ] }),
     }))
   }
@@ -48,6 +50,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
       ...limits, ...matchLimits, ...jobLimits, scopeVersion: current?.version, sources: [
         ...lines(entry.official).map(url => ({ channel: 'OFFICIAL', url, region, language, direction })),
         ...lines(entry.offer).map(url => ({ channel: 'OFFERTODAY', url, region, language, direction })),
+        ...lines(entry.boss).map(url => ({ channel: 'BOSS', url, region, language, direction })),
       ],
     }))
   }
@@ -61,6 +64,8 @@ export default function Candidates({ state, working, act, showScope }: Props) {
       <form className="mt-4 grid gap-3 md:grid-cols-2" onSubmit={event => { event.preventDefault(); startCycle() }}>
         <label className={small}>官网只读入口（每行一个）<textarea className={control} value={entry.official} onChange={e => setEntry({ ...entry, official: e.target.value })} placeholder="https://careers.example.com/jobs" /></label>
         <label className={small}>OfferToday 只读列表（每行一个）<textarea className={control} value={entry.offer} onChange={e => setEntry({ ...entry, offer: e.target.value })} placeholder="https://www.offertoday.com/hk/recommend" /></label>
+        <label className={small}>Boss 只读列表（每行一个）<textarea className={control} value={entry.boss} onChange={e => setEntry({ ...entry, boss: e.target.value })} placeholder="https://www.zhipin.com/web/geek/jobs?query=Python" /></label>
+        <p className={`${small} md:col-span-2`} role="note">Boss：仅支持本副本显式登录后的内地只读列表及同岗详情；不自动创建浏览器、不读原目录、不滚动或猜测翻页。{state.runtime.bossReadConfigured ? '已安装只读 Adapter，连接在读取时核验。' : '只读 Adapter 未配置。'} {state.runtime.bossCapabilityReason} 材料核准只表示材料可用，不表示渠道可执行。</p>
         <div className="flex flex-wrap gap-2 md:col-span-2"><Button type="button" variant="outline" disabled={working || !current} onClick={() => { setEntry(sources()); setRegion(current?.regions[0] ?? 'HK'); setLanguage(current?.languages[0] ?? 'en'); setDirection(current?.directions[0] ?? 'AI_APPLICATION') }}>载入当前范围来源</Button><p className={small}>官网复用已配置通用只读执行器，不造公司驱动；OfferToday 仅复用已授权现有会话，不新建登录态。列表入口一次提供，不需逐岗抄 JD。</p></div>
         <label className={small}>本次地区<select className={control} value={region} onChange={e => setRegion(e.target.value)}><option value="HK">香港</option><option value="MAINLAND">内地</option></select></label>
         <label className={small}>本次语言<select className={control} value={language} onChange={e => setLanguage(e.target.value)}><option value="en">英文</option><option value="zh">中文</option></select></label>
@@ -87,7 +92,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
       <div className="mt-3 space-y-3">{[...workspace.jobs].sort((a, b) => b.retrievedAt.localeCompare(a.retrievedAt)).map(job => <article key={job.id} className="rounded-xl border border-slate-200 p-4 dark:border-slate-700">
         <label className={`${small} mb-2 flex items-center gap-2`}><input type="checkbox" aria-label={`选择匹配 ${job.company} ${job.title}`} checked={selectedIds.includes(job.id)} disabled={!selectedIds.includes(job.id) && selectedIds.length >= 20} onChange={e => setSelected(e.target.checked ? [...selectedIds, job.id] : selectedIds.filter(id => id !== job.id))} />参与本批匹配 / 备料</label>
         <h3 className="font-semibold">{job.company} · {job.title}</h3><p className="mt-1 text-sm font-semibold text-indigo-700 dark:text-indigo-300">{statuses[job.status]}</p>
-        <p className={`${small} mt-1`}>{job.channel === 'OFFERTODAY' ? 'OfferToday HK' : '公司官网'} · {job.region}/{job.language} · {job.direction} · 范围 v{job.scopeVersion}</p>
+        <p className={`${small} mt-1`}>{({ OFFICIAL: '公司官网', OFFERTODAY: 'OfferToday HK', BOSS: 'Boss', JOBSDB: 'JobsDB' })[job.channel]} · {job.region}/{job.language} · {job.direction} · 范围 v{job.scopeVersion}</p>
         <a href={job.url} target="_blank" rel="noopener noreferrer" className="mt-2 block break-all text-sm text-indigo-700 underline dark:text-indigo-300">{job.url}</a>
         {job.platformJobId && <p className={`${small} break-all`}>平台身份：{job.platformJobId}</p>}
         <p className={`${small} mt-1 break-all`}>读取来源：{job.sourceUrl} · 取得时间：{new Date(job.retrievedAt).toLocaleString('zh-CN')} · 合并发现 {job.discoveries} 次</p>

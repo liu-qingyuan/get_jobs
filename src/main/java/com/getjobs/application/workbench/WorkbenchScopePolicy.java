@@ -3,6 +3,7 @@ package com.getjobs.application.workbench;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.getjobs.worker.boss.BossCandidateReader;
 import java.net.URI;
 import java.sql.Connection;
 import java.time.Instant;
@@ -336,6 +337,14 @@ final class WorkbenchScopePolicy {
         if (port >= 0 && !(port == 443 && uri.getScheme().equals("https") || port == 80 && uri.getScheme().equals("http")))
             deny(reasons, codes, "SOURCE_DENIED", "范围未授权非标准来源端口");
         String channel = text(target, "channel", 50, true);
+        if (BossCandidateReader.isHost(link) && !channel.equals("BOSS")) deny(reasons, codes, "CHANNEL_DENIED", "Boss 不能借用其他渠道授权或官网 AI");
+        if (channel.equals("BOSS")) {
+            try {
+                if (sourceRead) BossCandidateReader.validateSource(link); else BossCandidateReader.detailUrl(link);
+            } catch (IllegalArgumentException e) { deny(reasons, codes, "CHANNEL_DENIED", e.getMessage()); }
+            if (!target.path("region").asText().equals("MAINLAND")) deny(reasons, codes, "CHANNEL_DENIED", "Boss 只读候选仅支持内地范围");
+            if (OUTBOUND.contains(action)) deny(reasons, codes, "CAPABILITY_UNVERIFIED", BossCandidateReader.OUTBOUND_BLOCK_REASON);
+        }
         if (OfferTodayTarget.isHost(link) && !channel.equals("OFFERTODAY")) deny(reasons, codes, "CHANNEL_DENIED", "OfferToday 不能借用其他渠道授权");
         if (channel.equals("OFFERTODAY")) try {
             if (sourceRead) {

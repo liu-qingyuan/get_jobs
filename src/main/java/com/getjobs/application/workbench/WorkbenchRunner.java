@@ -1,6 +1,7 @@
 package com.getjobs.application.workbench;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.getjobs.worker.boss.BossCandidateReader;
 import java.nio.file.*;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -14,6 +15,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final WorkbenchService service;
     private final List<String> command;
     private final List<String> offerTodayCommand;
+    private final WorkbenchCandidates.Reader bossReader;
     private final String callback;
     private final long timeoutSeconds;
     private final AtomicBoolean busy = new AtomicBoolean();
@@ -28,7 +30,13 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
 
     public WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, String callback, long timeoutSeconds) {
+        this(service, command, offerTodayCommand, null, callback, timeoutSeconds);
+    }
+
+    WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand,
+            WorkbenchCandidates.Reader bossReader, String callback, long timeoutSeconds) {
         this.service = service; this.command = List.copyOf(command); this.offerTodayCommand = List.copyOf(offerTodayCommand);
+        this.bossReader = bossReader;
         this.callback = callback; this.timeoutSeconds = timeoutSeconds;
         if (!command.isEmpty() && (command.stream().noneMatch(arg -> arg.contains("{taskFile}")) || command.stream().anyMatch(String::isBlank)))
             throw new IllegalArgumentException("官网执行器参数必须包含 {taskFile} 且不能为空");
@@ -47,7 +55,8 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     public ObjectNode runtime() {
         return service.json.createObjectNode().put("agentConfigured", !command.isEmpty())
-                .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get());
+                .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get())
+                .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
     }
 
     public synchronized ObjectNode start(String id) {
@@ -180,6 +189,11 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     private ObjectNode readCandidatePage(ObjectNode bundle) throws Exception {
         if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止");
+        if (bundle.path("source").path("channel").asText().equals("BOSS")) {
+            if (bossReader == null) throw new WorkbenchException(409, "Boss 只读来源未连接本副本已授权会话；不会新建登录态或回退官网 AI");
+            ((ObjectNode) bundle.path("limits")).put("seconds", Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong()));
+            return bossReader.read(bundle);
+        }
         boolean offerToday = bundle.path("source").path("channel").asText().equals("OFFERTODAY");
         if (offerToday ? offerTodayCommand.isEmpty() : command.isEmpty()) throw new WorkbenchException(409,
                 offerToday ? "OfferToday 未配置或没有已授权会话；不会新建登录态" : "尚未配置通用官网只读执行器");

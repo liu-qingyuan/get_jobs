@@ -78,7 +78,7 @@ final class WorkbenchWorkflow {
                     }
                     entry.put("packageId", record.path("id").asText());
                     var scope = service.scope.workspace().path("current");
-                    String action = record.path("target").path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
+                    String action = Set.of("OFFERTODAY", "BOSS").contains(record.path("target").path("channel").asText()) ? "CONTACT" : "APPLY";
                     boolean allowedAction = false;
                     for (var allowed : scope.path("actions")) if (allowed.asText().equals(action)) allowedAction = true;
                     if (!allowedAction) {
@@ -109,7 +109,7 @@ final class WorkbenchWorkflow {
                         if (entry.has("packageId")) record = store.get(c, "preparation", entry.path("packageId").asText());
                         if (record == null) continue;
                         var target = (ObjectNode) record.path("target");
-                        String action = target.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
+                        String action = Set.of("OFFERTODAY", "BOSS").contains(target.path("channel").asText()) ? "CONTACT" : "APPLY";
                         if (entry.has("taskId") && store.get(c, "task", entry.path("taskId").asText()).has("contactReceipt")) action = "SEND_CV";
                         var decision = service.scope.executionDecision(c, cycle.path("scopeVersion").asInt(), target, action, entry.path("taskId").asText("preparation"), false);
                         for (var code : decision.path("reasonCodes")) if (Set.of("VERSION_CHANGED", "INACTIVE", "EXPIRED", "MATERIAL_CHANGED", "BUDGET_EXHAUSTED", "NO_SCOPE").contains(code.asText())) cycle.put("pauseReason", decision.path("reasons").toString());
@@ -134,7 +134,7 @@ final class WorkbenchWorkflow {
                 task.putArray("events");
             }
             for (String field : List.of("url", "company", "title", "description", "channel", "region", "language", "direction")) task.set(field, record.path("target").path(field));
-            String action = task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
+            String action = Set.of("OFFERTODAY", "BOSS").contains(task.path("channel").asText()) ? "CONTACT" : "APPLY";
             var decision = service.preparation.check(c, record, action, task.path("id").asText());
             require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
             task.put("state", "APPROVED").put("approvalSource", "SCOPE_POLICY").put("packageId", record.path("id").asText())

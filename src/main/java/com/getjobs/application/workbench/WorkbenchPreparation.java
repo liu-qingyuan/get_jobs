@@ -144,7 +144,9 @@ final class WorkbenchPreparation {
                 }
                 supported = String.join("\n\n", values);
             }
-            String message = message(target.path("language").asText());
+            String message = target.path("channel").asText().equals("BOSS")
+                    ? (target.path("language").asText().equals("zh") ? "您好，我希望了解此职位。谢谢。" : "Hello, I would like to learn about this position. Thank you.")
+                    : message(target.path("language").asText());
             boolean provable = (!proposal.has("initialMessage") || proposal.path("initialMessage").isTextual() && proposal.path("initialMessage").asText().equals(message))
                     && !transformation.equals("REPHRASE") && (!proposal.has("content") || proposal.path("content").isTextual() && proposal.path("content").asText().equals(supported))
                     && (!transformation.equals("ORIGINAL") || !proposal.has("factIds"));

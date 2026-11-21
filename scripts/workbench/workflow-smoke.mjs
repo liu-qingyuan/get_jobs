@@ -153,8 +153,30 @@ try {
   assert.equal(state.tasks.find(task => task.company === 'Synthetic crash-d').state, 'SUBMITTED')
   await page.reload(); await progress.getByText('Synthetic crash-c · Python engineer · 外发结果未知 · 禁止重投', { exact: true }).waitFor()
   await screenshot('workflow-unknown-restart.png')
+  // #15: no Boss login/session is ever provided. The real HTTP path must show a read exception,
+  // capability limits and no official-AI fallback or additional send, even with a scope that allows CONTACT.
+  const beforeBossOutbound = state.scope.usage.outbound
+  await post('/scope', { ...state.scope.current, expectedVersion: 1, channels: ['OFFICIAL', 'OFFERTODAY', 'BOSS'], hosts: ['careers.example.test', 'www.offertoday.com', 'www.zhipin.com'], regions: ['HK', 'MAINLAND'] })
+  await page.reload()
+  const discovery = page.getByRole('region', { name: '只读候选发现', exact: true })
+  await discovery.getByRole('button', { name: '载入当前范围来源', exact: true }).click()
+  await discovery.getByLabel('官网只读入口（每行一个）').fill('')
+  await discovery.getByLabel('OfferToday 只读列表（每行一个）').fill('')
+  assert.equal(await discovery.getByLabel('Boss 只读列表（每行一个）').inputValue(), 'https://www.zhipin.com/web/geek/jobs')
+  await discovery.getByLabel('本次地区').selectOption('MAINLAND')
+  await until(async () => !(await get()).runtime.busy, 'Scope-driven read-only reassessment')
+  const beforeBossCalls = await readFile(join(root, 'calls'), 'utf8')
+  await discovery.locator('summary').filter({ hasText: '高级：仅发现，不衔接后续' }).click()
+  await discovery.getByRole('button', { name: '一次启动范围内只读发现', exact: true }).click()
+  await page.getByText(/Boss 只读需要本副本已显式登录且空闲的浏览器/).waitFor()
+  await discovery.getByText(/Boss 外发能力待核实/).waitFor()
+  state = await get()
+  assert.equal(state.runtime.bossOutboundSupported, false)
+  assert.equal(state.scope.usage.outbound, beforeBossOutbound)
+  assert.equal(await readFile(join(root, 'calls'), 'utf8'), beforeBossCalls)
+  await screenshot('boss-capability-blocked.png')
   assert.deepEqual(failures, [])
-  console.log(JSON.stringify({ root, port, browserStarts: starts.length, submitted: state.tasks.filter(t => t.state === 'SUBMITTED').length, unknown: state.tasks.filter(t => t.state === 'UNKNOWN').length, outbound: state.scope.usage.outbound, screenshots: ['workflow-exception.png', 'workflow-completed.png', 'workflow-unknown-restart.png'] }, null, 2))
+  console.log(JSON.stringify({ root, port, browserStarts: starts.length, submitted: state.tasks.filter(t => t.state === 'SUBMITTED').length, unknown: state.tasks.filter(t => t.state === 'UNKNOWN').length, outbound: state.scope.usage.outbound, screenshots: ['workflow-exception.png', 'workflow-completed.png', 'workflow-unknown-restart.png', 'boss-capability-blocked.png'] }, null, 2))
 } finally {
   if (browser) await browser.close()
   if (server && server.exitCode === null) { server.kill('SIGTERM'); await once(server, 'exit') }

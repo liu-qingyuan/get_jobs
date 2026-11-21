@@ -38,6 +38,7 @@ export default function MaterialPreparation({ state, selectedIds, working, act }
     <div className="mt-4 space-y-3">{[...state.preparations.packages].reverse().map(pkg => <article key={pkg.id} className="rounded-xl border border-slate-200 p-4 dark:border-slate-700" aria-label={`材料包 ${pkg.target.company} ${pkg.id}`}>
       <h3 className="font-semibold">{pkg.target.company} · {pkg.target.title}</h3><p className="mt-1 font-semibold">{statuses[pkg.status]}</p>
       <p className={`${small} mt-1 whitespace-pre-wrap break-words`}>{pkg.reason}</p>
+      {pkg.target.channel === 'BOSS' && <p className="mt-2 text-sm text-amber-800 dark:text-amber-200">{state.runtime.bossCapabilityReason} 本包仅用于准备，不证明在线资料或 CV 送达。</p>}
       <p className={`${small} mt-2 break-all`}>包 {pkg.id} · 来源 {pkg.source}（策略，不是人审） · 范围 v{pkg.scopeVersion} · {pkg.rulesVersion} · {new Date(pkg.createdAt).toLocaleString('zh-CN')}</p>
       <p className={`${small} break-all`}>{pkg.target.url} · {pkg.target.region}/{pkg.target.language} · 变换 {pkg.target.transformation} · 所选基线 {pkg.target.resumeId} · 匹配依据 {pkg.analysisId || '无'}</p>
       {pkg.proposal && !pkg.snapshot && <details className="mt-3 text-sm"><summary>查看未核准提案（不作为可发送材料）</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(pkg.proposal, null, 2)}</pre></details>}
@@ -51,7 +52,7 @@ export default function MaterialPreparation({ state, selectedIds, working, act }
         <p className="mt-3 font-semibold">冻结精确消息（未发送）</p><pre className="mt-1 whitespace-pre-wrap break-words">{pkg.snapshot.initialMessage}</pre>
         <p className={`${small} break-all`}>消息 SHA256 {pkg.snapshot.initialMessageSha256}</p>
         {pkg.target.channel === 'OFFERTODAY' && <p className={`${small} mt-2 whitespace-pre-wrap break-words`}>范围内联系方式核对：{pkg.snapshot.contactVerified ? '已核对' : '未核对'} · {pkg.snapshot.contactFacts?.map(fact => `${fact.label} v${fact.version ?? 1}：${fact.value}`).join('；')}</p>}
-        <div className="mt-3 flex flex-wrap gap-2"><Button type="button" variant="outline" disabled={disabled} onClick={() => download(pkg.snapshot!.resume)}>下载此独立版本</Button>{(pkg.target.channel === 'OFFERTODAY' ? ['CONTACT', 'SEND_CV'] as const : ['APPLY'] as const).map(action => <Button key={action} type="button" variant="outline" disabled={disabled} onClick={() => inspect(pkg.id, action)}>只核验 {action}（不执行）</Button>)}</div>
+        <div className="mt-3 flex flex-wrap gap-2"><Button type="button" variant="outline" disabled={disabled} onClick={() => download(pkg.snapshot!.resume)}>下载此独立版本</Button>{(pkg.target.channel === 'OFFERTODAY' ? ['CONTACT', 'SEND_CV'] as const : pkg.target.channel === 'BOSS' ? ['CONTACT'] as const : ['APPLY'] as const).map(action => <Button key={action} type="button" variant="outline" disabled={disabled} onClick={() => inspect(pkg.id, action)}>只核验 {action}（不执行）</Button>)}</div>
       </div>}
       {check?.id === pkg.id && <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800" role="status"><p>{check.action}：{check.decision.allowed ? '此刻符合条件，仍未授权 / 执行' : '拒绝执行资格'}</p><p>结果不持久有效；实际动作前必须重核。</p><ul>{check.decision.reasons.map((reason, i) => <li key={i} className="whitespace-pre-wrap break-words">{reason}</li>)}</ul></div>}
     </article>)}</div>
