@@ -114,6 +114,16 @@ bash gradlew --no-daemon workbench --console=plain
 - 写出 `{results:[{candidateId,jdSha256,findings:[{kind,requirementQuote,reason,evidence:[{type:"FACT"|"RESUME",id,quote}],suggestion?:{goal,acceptance}}]}]}`；每岗最多30理由、每理由最多20引用，整份输出最多2MB。`kind` 为 `SUPPORTED/PARTIAL/NEEDS_FACTS/EXPERIENCE_GAP/HARD_REQUIREMENT/NOT_APPLICABLE`。必须回显本次完整 JD 哈希，岗位原文必须来自全文，引用必须逐字来自该岗的事实值/核准简历正文；支持、部分支持、硬性不足及真实缺口必须有引用，缺证据不能推断经验不足。任何额外 score/actions/facts/路径等字段均为越权例外。每岗也可返回 `{candidateId,exception}`；该岗伪造引用、遗漏 JD 或失败不阻断其他有效结果；整个进程失败则逐岗保存例外。
 - `jobs[].analysis` 包含 `id/status/stale/scopeVersion/rulesVersion/jdSha256/questions/findings/exception`。状态为 `NOT_ANALYZED/ANALYSIS_READY/NEEDS_FACTS/EXPERIENCE_GAP/ANALYSIS_EXCEPTION/INELIGIBLE`；当前输入可复用旧分析，历史引用不改写。`GET /api/workbench/candidates/gaps` 返回 `{suggestions:[{candidateId,analysisId,scopeVersion,requirementQuote,suggestion}]}`，只提供当前有效缺口建议供项目切片读取；不创建任务、不执行项目、不生成/批准可外发材料，也不产生新事实。
 
+## 自动备料与单岗核准 Interface（#13）
+
+- 默认候选主屏沿用本批勾选，一次准备 1–20 岗；展示策略核准、仅草稿、材料例外及当前失效状态，独立文件/父版本/正文/实际附件和正文 SHA256、匹配 ID、适用事实及其版本、精确消息。可下载实际独立文件，不覆盖四类基线。没有创建申请、启动执行器外发或送达断言；已有人工任务/人审事件不改写。
+- `POST /api/workbench/candidates/prepare`：`{scopeVersion,candidateIds?,secondsPerBatch?,modelTokensPerCandidate?}`。省略 IDs 选择全部（仍限 1–20）；秒数 1–120（默认30），每岗 token 1–100000（默认1000）。仅当前完整 JD、有依据的有效匹配且无必要核实/经验缺口/硬性不足/不适用的候选进入准备。预扣每岗全部秒数/token，批次硬截止受更短执行器超时约束，失败不退款；相同范围/岗位/匹配/事实/材料/规则输入跨重启复用（含失败），不会因为状态读取重跑模型或自动续签。范围已变化时须重新确认。
+- 准备命令复用已配可信通用 AI 和独占槽，`kind=MATERIAL_PREPARE` 包含 `rulesVersion/limits/instructions/resultPath/candidates`；每岗只提供 `candidateId/target/facts/resumes/findings`，事实/简历均适用且已选，不含附件路径、申请回调、token 或资料全库。可信命令不是 OS/模型沙箱，须执行总 token/时间上限，否则报例外。
+- 输出 `{results:[{candidateId,resumeId,transformation,content?,factIds?,initialMessage?}]}`，每岗也可 `{candidateId,exception}`。`ORIGINAL` 复用所选核准基线的原字节，若有 content 必须精确等于基线正文；自动正文核验只支持 UTF-8 TXT/MD 和本 Module 的规范 DOCX，不以侧车文本证明任意 PDF/Office 正文。`REORDER` 的 `factIds` 必须唯一且属于该岗适用已确认集合，正文只能是所选 `fact.value` 的完整原值按顺序以两个换行连接，服务器确定性另存 DOCX。`REPHRASE`、新增主张、不精确相等的正文或消息仅存 `DRAFT_ONLY`；未知字段（含 verifier/approved）、不适用材料/事实、文件核验失败为 `MATERIAL_EXCEPTION`。有效 ID 或 AI 自称通过不等于语义支持。
+- OfferToday 还须在 `/scope` 一次提交 `contactFactIds:[范围 factIds 内适用已确认联系方式]`、`contactVerified:true`，代表核对实际联系方式、最新偏好和线上资料；字段仅支持 `email/contact_email`、`phone/contact_phone/mainland_phone` 且值须为完整邮箱/电话格式，普通经历事实或格式不符会拒绝范围确认，缺少时先澄清资料。字段/格式不是平台实际资料的独立证明；界面提供明确选材与核对，不继承旧逐岗人审。最终附件须可核验 PDF/DOCX（当前窄路径生成 DOCX），文本稿不得核准。消息固定为 `您好，我希望申请此职位，随附简历供参考。谢谢。` 或 `Hello, I would like to apply for this position. Please find my CV attached. Thank you.`，按岗位语言冻结精确原文和 SHA256；模型只能原样建议，不可改写经历。
+- `GET /api/workbench/preparations` 与 `/state.preparations` 返回 `{packages:[...]}`。每包包含 `id/candidateId/analysisId/scopeVersion/source=SCOPE_POLICY/rulesVersion/target/status/reason/proposal?/snapshot?`；`snapshot` 包含独立 `resume/facts/initialMessage/initialMessageSha256` 及 OfferToday 的 `contactVerified/contactFacts`。`target.resumeId` 是范围所选基线 ID；`snapshot.resume.id` 是实际冻结文件的版本 ID，派生时不同。后续授权按范围基线核验，实际执行只能使用该包冻结文件，不偷偷换回原文件。
+- `POST /api/workbench/preparations/{id}/check`：`{action:PREPARE|APPLY|CONTACT|SEND_CV}`，返回 `allowed/source/packageId/reasons`。每个不可逆阶段必须重核范围版本/有效期/暂停撤销、动作与变换许可、动作预算、当前匹配/事实/文件、原申请和策略已消费外发目标的防重；文件或事实变化不能重新授权 UNKNOWN。此入口只读、不创建授权、不扣量、不 claim/启动/发送，也不代表渠道执行能力可用。后续消费者须另行消费单阶段授权、确认 claim 并收集相应真实回执；不能复用核验响应作重试或下一阶段许可。`INVALIDATED` 是当前读取视图，历史核准依据不覆盖。局部八图以 `liu-qingyuan/get_jobs#13` 发布合同为准。
+
 ## 执行器报告合同
 
 任务包包含 `taskId`、`instructions`、`task`、`callbackUrl`、`token`、`reporterPath`。申请/简历任务有 `resumePath`；只读状态查询不交付附件。所有路径都属于本地私有材料，禁止向网站或日志公开 token。
@@ -156,7 +166,7 @@ cd front
 node node_modules/next/dist/bin/next build
 ```
 
-Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9–#12 的打包应用冒烟：
+Java 测试使用临时 SQLite、fake 外部进程、localhost 回调。#9–#13 的打包应用冒烟：
 
 ```bash
 # 先用正常配置构建；不会把测试端口/fake 配置编入正式产物。
@@ -164,6 +174,6 @@ bash gradlew --no-daemon test bootJar -PrebuildFrontend -x installPatchrightDriv
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/baseline-smoke.mjs
 ```
 
-脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；共 7 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 2 次、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png` 的临时证据目录与计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
+脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；然后通过界面准备独立岗位 DOCX，查看正文/依据、下载文件、只读动作拒绝与跨刷新复用，并在岗位条件变化后展示失效；共 8 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 3 次/备料 1 次、3 包（核准1/例外2，核准包后来失效）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png`、`preparation.png` 与 `prepared-job.docx` 的临时证据目录和实际计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
 设计与 8 张 Mermaid 图：`workbench-v1-design.md`；决策：ADR 0003；GitHub issue #4。

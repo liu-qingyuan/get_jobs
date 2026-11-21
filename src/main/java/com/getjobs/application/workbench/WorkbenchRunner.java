@@ -193,6 +193,12 @@ public final class WorkbenchRunner implements AutoCloseable {
         try { return service.matching.start(input, this::analyzeCandidates); }
         finally { busy.set(false); }
     }
+    /** Preparation shares the exclusive slot, but has no application callback or external-action capability. */
+    public synchronized ObjectNode prepareCandidates(ObjectNode input) {
+        if (closed || !busy.compareAndSet(false, true)) throw new WorkbenchException(409, "执行器已关闭或正在处理其他任务");
+        try { return service.preparation.prepare(input, this::analyzeCandidates); }
+        finally { busy.set(false); }
+    }
     public void refreshMatching() {
         // Claim before waiting for the lifecycle monitor: an already running process must never block a GET.
         if (!busy.compareAndSet(false, true)) return;
@@ -204,7 +210,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
     private ObjectNode analyzeCandidates(ObjectNode bundle) throws Exception {
         if (command.isEmpty()) throw new WorkbenchException(409, "尚未配置匹配 AI 执行器，未生成事实或申请");
-        Path directory = service.store.root.resolve("runs").resolve("matching-" + UUID.randomUUID());
+        Path directory = service.store.root.resolve("runs").resolve((bundle.path("kind").asText().equals("MATERIAL_PREPARE") ? "preparation-" : "matching-") + UUID.randomUUID());
         Files.createDirectories(directory);
         Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
         long seconds = Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong());

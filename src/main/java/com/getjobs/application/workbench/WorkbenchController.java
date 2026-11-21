@@ -23,6 +23,10 @@ public class WorkbenchController {
     }
     @GetMapping("/candidates") public ObjectNode candidates() { runner.refreshMatching(); return service.candidates.workspace(); }
     @PostMapping("/candidates/match") public ObjectNode matchCandidates(@RequestBody ObjectNode input) { return runner.matchCandidates(input); }
+    @PostMapping("/candidates/prepare") public ObjectNode prepareCandidates(@RequestBody ObjectNode input) { return runner.prepareCandidates(input); }
+    @GetMapping("/preparations") public ObjectNode preparations() { return service.preparation.workspace(); }
+    /** A fresh eligibility check only: no grant, budget consumption, claim, runner start or delivery assertion. */
+    @PostMapping("/preparations/{id}/check") public ObjectNode checkPreparation(@PathVariable String id, @RequestBody ObjectNode input) { return service.preparation.check(id, input); }
     @GetMapping("/candidates/gaps") public ObjectNode candidateGaps() { runner.refreshMatching(); return service.matching.gaps(); }
     @PostMapping("/candidates/discover") public ObjectNode discoverCandidates(@RequestBody ObjectNode input) { return runner.discoverCandidates(input); }
     @GetMapping("/scope") public ObjectNode scope() { return service.scope.workspace(); }

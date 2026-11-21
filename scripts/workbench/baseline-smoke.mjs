@@ -49,6 +49,10 @@ if b['kind']=='CANDIDATE_MATCH':
         if kind=='EXPERIENCE_GAP': finding['suggestion']={'goal':'合成数据评估小项目','acceptance':'本地可重复运行的指标与失败用例；不冒充商业经验'}
         results.append({'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[finding]})
     json.dump({'results':results},open(b['resultPath'],'w')); sys.exit(0)
+if b['kind']=='MATERIAL_PREPARE':
+    assert b['limits']['outbound']==0 and 'resumePath' not in b
+    p=pathlib.Path(${JSON.stringify(join(root, 'preparation-calls'))}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')
+    json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[next(f['id'] for f in j['facts'] if f['key']=='project')]} for j in b['candidates']]},open(b['resultPath'],'w')); sys.exit(0)
 assert b['kind']=='MATERIAL_REVIEW'
 p=pathlib.Path(${JSON.stringify(join(root, 'calls'))}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')
 c=[]
@@ -239,6 +243,42 @@ try {
   await page.reload()
   await candidates.getByText('真实经验缺口 · 可读取补强建议 · 当前输入缓存', { exact: true }).waitFor()
   assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '2')
+  // #13: prepare through the visible batch Interface. Only the supported candidate can be approved.
+  await page.getByRole('tab', { name: '求职范围', exact: true }).click()
+  await scopePanel.getByLabel('重排已有事实', { exact: true }).check()
+  await scopePanel.getByRole('button', { name: '变更范围（新版本）', exact: true }).click()
+  await scopePanel.getByText('当前范围 v8 · 有效', { exact: true }).waitFor()
+  await page.getByRole('tab', { name: '候选与发现', exact: true }).click()
+  const preparation = page.getByRole('region', { name: '自动备料与单岗核准包', exact: true })
+  await preparation.getByRole('button', { name: '批量准备所选候选（3/20）', exact: true }).click()
+  await preparation.getByText('策略核准 · 未发送', { exact: true }).waitFor()
+  assert.equal(await preparation.getByText('材料例外 · 未核准', { exact: true }).count(), 2)
+  const prepared = (await (await fetch(`${base}/api/workbench/preparations`)).json()).packages
+  assert.equal(prepared.length, 3)
+  const approved = prepared.find(pkg => pkg.status === 'POLICY_APPROVED')
+  assert.equal(approved.source, 'SCOPE_POLICY')
+  assert.equal(approved.snapshot.resume.parentId, baseline.resumes[0].id)
+  assert.notEqual(approved.snapshot.resume.id, baseline.resumes[0].id)
+  assert.equal(approved.snapshot.resume.content, 'Built a synthetic search demo.')
+  assert(approved.snapshot.resume.filename.endsWith('.docx'))
+  await preparation.getByText('查看冻结材料正文与事实依据', { exact: true }).click()
+  await preparation.getByText('Built a synthetic search demo.', { exact: true }).waitFor()
+  const downloadEvent = page.waitForEvent('download')
+  await preparation.getByRole('button', { name: '下载此独立版本', exact: true }).click()
+  const download = await downloadEvent
+  assert.equal(download.suggestedFilename(), 'job-material.docx')
+  await download.saveAs(join(root, 'prepared-job.docx'))
+  const policyBefore = await (await fetch(`${base}/api/workbench/scope`)).json()
+  await preparation.getByRole('button', { name: '只核验 APPLY（不执行）', exact: true }).click()
+  await preparation.getByText('APPLY：拒绝执行资格', { exact: true }).waitFor()
+  assert.deepEqual(await (await fetch(`${base}/api/workbench/scope`)).json(), policyBefore)
+  await preparation.getByRole('button', { name: '批量准备所选候选（3/20）', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: '批量准备材料成功' }).waitFor()
+  await page.reload()
+  await preparation.getByText('策略核准 · 未发送', { exact: true }).waitFor()
+  assert.equal(await readFile(join(root, 'preparation-calls'), 'utf8'), '1')
+  await waitForCandidates()
+  await page.screenshot({ path: join(root, 'preparation.png'), fullPage: true })
   await discovery.getByRole('button', { name: '一次启动范围内只读发现', exact: true }).click()
   await candidates.getByText('未取得新全文；保留上次完整 JD 与原取得时间', { exact: false }).waitFor()
   await page.reload()
@@ -258,13 +298,20 @@ try {
   assert.equal(retained.lastReadDescription, '本岗位需要夜班')
   assert(retained.reasons.includes('岗位命中排除项'))
   assert.equal(retained.lastReadComplete, false)
+  await preparation.getByText('已失效 · 须按当前范围重新准备', { exact: true }).waitFor()
+  assert.equal(await readFile(join(root, 'preparation-calls'), 'utf8'), '1')
   assert.equal(discovered.tasks.length, 0)
   assert.equal(discovered.scope.usage.outbound, 0)
   assert.equal(await readFile(join(root, 'calls'), 'utf8'), '1')
   assert.deepEqual(failures, [])
   await waitForCandidates()
   await page.screenshot({ path: join(root, 'candidates.png'), fullPage: true })
-  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, matchingCalls: 2, confirmedFacts: 2, confirmedResumes: 1, tasks: 0, scopeVersions: 7, candidates: 3, fullJd: 2, refusedOnRediscovery: retained.status === 'REFUSED', outbound: 0 }))
+  console.log(JSON.stringify({ result: 'passed', root, version,
+    aiCalls: Number(await readFile(join(root, 'calls'), 'utf8')), matchingCalls: Number(await readFile(join(root, 'match-calls'), 'utf8')),
+    preparationCalls: Number(await readFile(join(root, 'preparation-calls'), 'utf8')), preparationPackages: discovered.preparations.packages.length,
+    confirmedFacts: discovered.facts.filter(fact => fact.confirmed).length, confirmedResumes: discovered.resumes.filter(resume => resume.approved).length,
+    tasks: discovered.tasks.length, scopeVersions: discovered.scope.history.length, candidates: discovered.candidates.jobs.length,
+    fullJd: discovered.candidates.jobs.filter(job => job.descriptionComplete).length, refusedOnRediscovery: retained.status === 'REFUSED', outbound: discovered.scope.usage.outbound }))
 } catch (error) {
   console.error(`Smoke evidence: ${root}`)
   if (page) {

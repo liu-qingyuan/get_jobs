@@ -131,6 +131,8 @@ export interface ScopeConfig {
   excludeTerms: string[]
   factIds: string[]
   resumeIds: string[]
+  contactFactIds?: string[]
+  contactVerified?: boolean
   transformations: string[]
   actions: ScopeAction[]
   budgets: Record<ScopeMeter, number>
@@ -190,6 +192,15 @@ export interface CandidateRun {
 }
 export interface CandidateWorkspace { jobs: CandidateJob[]; runs: CandidateRun[] }
 
+export interface PreparationPackage {
+  id: string; candidateId: string; analysisId?: string; scopeVersion: number; source: 'SCOPE_POLICY'
+  rulesVersion: string; createdAt: string; reason: string
+  status: 'POLICY_APPROVED' | 'DRAFT_ONLY' | 'MATERIAL_EXCEPTION' | 'INVALIDATED'
+  target: Pick<CandidateJob, 'url' | 'title' | 'company' | 'channel' | 'region' | 'language'> & { resumeId?: string; transformation?: string }
+  proposal?: { content?: string; initialMessage?: string; factIds?: string[]; transformation: string; resumeId: string }
+  snapshot?: { resume: Resume; facts: Fact[]; initialMessage: string; initialMessageSha256: string; contactVerified?: boolean; contactFacts?: Fact[] }
+}
+
 export interface WorkbenchState {
   facts: Fact[]
   resumes: Resume[]
@@ -197,6 +208,7 @@ export interface WorkbenchState {
   materials: { sources: MaterialSource[]; reviews: MaterialReview[] }
   scope: ScopeWorkspace
   candidates: CandidateWorkspace
+  preparations: { packages: PreparationPackage[] }
   runtime: { agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean }
   platforms: {
     bossUrl: string

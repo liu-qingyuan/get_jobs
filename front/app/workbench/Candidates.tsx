@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { type WorkbenchState, workbenchJson } from '@/lib/workbench'
+import MaterialPreparation from './MaterialPreparation'
 
 const panel = 'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900'
 const control = 'mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800'
@@ -69,7 +70,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
       {!state.runtime.agentConfigured && <p className={`${small} mt-2`}>尚未配置匹配 AI 执行器，不能用假分数代替分析。</p>}
       {!workspace.jobs.length && <p className={`${small} mt-2`}>尚无候选。先设置范围并启动只读发现；不会展示虚构岗位或成功回执。</p>}
       <div className="mt-3 space-y-3">{[...workspace.jobs].sort((a, b) => b.retrievedAt.localeCompare(a.retrievedAt)).map(job => <article key={job.id} className="rounded-xl border border-slate-200 p-4 dark:border-slate-700">
-        <label className={`${small} mb-2 flex items-center gap-2`}><input type="checkbox" aria-label={`选择匹配 ${job.company} ${job.title}`} checked={selectedIds.includes(job.id)} disabled={!selectedIds.includes(job.id) && selectedIds.length >= 20} onChange={e => setSelected(e.target.checked ? [...selectedIds, job.id] : selectedIds.filter(id => id !== job.id))} />参与本批匹配</label>
+        <label className={`${small} mb-2 flex items-center gap-2`}><input type="checkbox" aria-label={`选择匹配 ${job.company} ${job.title}`} checked={selectedIds.includes(job.id)} disabled={!selectedIds.includes(job.id) && selectedIds.length >= 20} onChange={e => setSelected(e.target.checked ? [...selectedIds, job.id] : selectedIds.filter(id => id !== job.id))} />参与本批匹配 / 备料</label>
         <h3 className="font-semibold">{job.company} · {job.title}</h3><p className="mt-1 text-sm font-semibold text-indigo-700 dark:text-indigo-300">{statuses[job.status]}</p>
         <p className={`${small} mt-1`}>{job.channel === 'OFFERTODAY' ? 'OfferToday HK' : '公司官网'} · {job.region}/{job.language} · {job.direction} · 范围 v{job.scopeVersion}</p>
         <a href={job.url} target="_blank" rel="noopener noreferrer" className="mt-2 block break-all text-sm text-indigo-700 underline dark:text-indigo-300">{job.url}</a>
@@ -93,6 +94,7 @@ export default function Candidates({ state, working, act, showScope }: Props) {
         </div>
       </article>)}</div>
     </section>
+    <MaterialPreparation state={state} selectedIds={selectedIds} working={working} act={act} />
     <section className={panel} aria-label="读取进展与例外">
       <h2 className="text-lg font-semibold">读取进展、预算与断点</h2>
       {[...workspace.runs].reverse().map(run => <div key={run.id} className="mt-3 rounded-xl border border-slate-200 p-3 dark:border-slate-700">

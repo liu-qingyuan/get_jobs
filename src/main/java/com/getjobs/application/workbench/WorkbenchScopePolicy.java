@@ -49,6 +49,18 @@ final class WorkbenchScopePolicy {
             } catch (Exception e) { throw new WorkbenchException(400, "范围有效期须在未来 90 天内"); }
             scope.put("expiresAt", expires);
             scope.set("materials", service.materials.scopeSelection(c, scope));
+            scope.set("contactFactIds", strings(input, "contactFactIds", null, false));
+            require(!input.has("contactVerified") || input.path("contactVerified").isBoolean(), "contactVerified 须为显式核对标记");
+            scope.put("contactVerified", input.path("contactVerified").asBoolean(false));
+            if (scope.path("contactVerified").asBoolean()) {
+                require(contains(scope.path("channels"), "OFFERTODAY") && !scope.path("contactFactIds").isEmpty(), "请明确选定本范围的 OfferToday 联系方式事实再核对");
+                for (var contactId : scope.path("contactFactIds")) {
+                    boolean applicable = false;
+                    for (var fact : scope.path("materials").path("facts")) if (fact.path("id").equals(contactId)
+                            && WorkbenchMaterials.applicable(fact.path("scope").asText(), "HK", "www.offertoday.com") && contactValue(fact)) applicable = true;
+                    require(applicable, "联系方式须为范围内适用的已确认邮箱/电话字段及可识别完整值，经历事实不能冒充联系方式");
+                }
+            }
             scope.put("version", previous == null ? 1 : previous.path("version").asInt() + 1);
             scope.put("id", Integer.toString(scope.path("version").asInt())).put("status", "ACTIVE").put("source", "USER_SCOPE").put("createdAt", now());
             store.save(c, "scope_version", scope);
@@ -220,6 +232,17 @@ final class WorkbenchScopePolicy {
             return decision;
         });
     }
+    /** Shared preparation/action eligibility. Derived-file checks belong to the preparation Module; policy uses its selected baseline ID. */
+    ObjectNode preparedDecision(Connection c, int version, ObjectNode target, String action, boolean reserved) throws Exception {
+        var request = object().put("scopeVersion", version).put("action", action); request.set("target", target);
+        return assess(c, request, false, reserved, target.path("lastReadDescription").asText());
+    }
+    ObjectNode reservePreparation(int version, ObjectNode target, int seconds, int tokens) {
+        var request = object().put("scopeVersion", version).put("action", "PREPARE"); request.set("target", target);
+        request.putObject("cost").put("seconds", seconds).put("modelTokens", tokens).put("candidates", 0).put("outbound", 0);
+        var decision = authorize(request);
+        return decision.path("allowed").asBoolean() ? consume(decision.path("authorization").path("id").asText()) : decision;
+    }
     private ObjectNode matchingRequest(int version, ObjectNode target) {
         var request = object().put("scopeVersion", version).put("action", "MATCH");
         request.set("target", target.deepCopy().put("resumeId", "").put("transformation", "ORIGINAL")); return request;
@@ -285,7 +308,7 @@ final class WorkbenchScopePolicy {
         if (!sourceRead && !scope.path("includeTerms").isEmpty() && !matches(scope.path("includeTerms"), content)) deny(reasons, codes, "SELECTION_DENIED", "岗位未命中已确认的选择词");
         if (!sourceRead && matches(scope.path("excludeTerms"), content)) deny(reasons, codes, "EXCLUDED", "岗位命中排除项");
         String transformation = text(target, "transformation", 50, true);
-        if (!sourceRead && !reserved && !currentMatch && !contains(scope.path("transformations"), transformation)) deny(reasons, codes, "TRANSFORMATION_DENIED", "材料变换未获允许；不能新增事实或跨地区/语言覆盖");
+        if (!sourceRead && (!reserved || action.equals("PREPARE") || OUTBOUND.contains(action)) && !currentMatch && !contains(scope.path("transformations"), transformation)) deny(reasons, codes, "TRANSFORMATION_DENIED", "材料变换未获允许；不能新增事实或跨地区/语言覆盖");
         if (!currentMatch) try {
             var selected = service.materials.scopeSelection(c, scope);
             if (!selected.equals(scope.path("materials"))) deny(reasons, codes, "MATERIAL_CHANGED", "事实或独立材料版本已变化，须重新确认范围");
@@ -316,6 +339,15 @@ final class WorkbenchScopePolicy {
         decision.put("allowed", reasons.isEmpty());
         if (reasons.isEmpty()) reasons.add("符合当前范围；仅策略核验，不替代材料冻结、执行器能力或单岗 claim");
         return decision;
+    }
+
+    private static boolean contactValue(JsonNode fact) {
+        String key = fact.path("key").asText(), value = fact.path("value").asText();
+        return switch (key) {
+            case "email", "contact_email" -> value.matches("[^\\s@]+@[^\\s@]+\\.[^\\s@]+");
+            case "phone", "contact_phone", "mainland_phone" -> value.matches("\\+?[0-9][0-9 ()-]{5,30}") && value.replaceAll("[^0-9]", "").length() >= 8;
+            default -> false;
+        };
     }
 
     private void deny(ArrayNode reasons, ArrayNode codes, String code, String reason) { reasons.add(reason); codes.add(code); }

@@ -24,6 +24,7 @@ public final class WorkbenchService {
     final WorkbenchScopePolicy scope;
     final WorkbenchCandidates candidates;
     final WorkbenchMatching matching;
+    final WorkbenchPreparation preparation;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this.store = new WorkbenchStore(root, json);
@@ -34,6 +35,7 @@ public final class WorkbenchService {
         this.scope = new WorkbenchScopePolicy(this);
         this.candidates = new WorkbenchCandidates(this);
         this.matching = new WorkbenchMatching(this);
+        this.preparation = new WorkbenchPreparation(this);
     }
 
     public ObjectNode state() {
@@ -44,6 +46,7 @@ public final class WorkbenchService {
             result.set("materials", materials.workspace(c));
             result.set("scope", scope.workspace(c));
             result.set("candidates", candidates.workspace(c));
+            result.set("preparations", preparation.workspace(c));
             var tasks = store.list(c, "task");
             tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
             result.set("tasks", tasks);
@@ -116,7 +119,7 @@ public final class WorkbenchService {
         return store.write(c -> saveResume(c, input, bytes, filename));
     }
 
-    private ObjectNode saveResume(Connection c, ObjectNode input, byte[] bytes, String filename) throws Exception {
+    ObjectNode saveResume(Connection c, ObjectNode input, byte[] bytes, String filename) throws Exception {
         String region = choice(input, "region", Set.of("HK", "MAINLAND"));
         String language = choice(input, "language", Set.of("zh", "en"));
         String content = text(input, "content", 200000, false);
