@@ -33,7 +33,7 @@ if b['kind']=='CANDIDATE_READ':
       'company':'Synthetic OfferToday Co' if offer else 'Synthetic Official Co','title':'AI engineer','description':jd,'descriptionComplete':True}]
     if not offer:
         marker=pathlib.Path(${JSON.stringify(join(root, 'official-read-marker'))})
-        if marker.exists(): jobs[0].update(description='Card only on rediscovery',descriptionComplete=False)
+        if marker.exists(): jobs[0].update(description='本岗位需要夜班',descriptionComplete=False)
         marker.write_text('read')
         jobs.append({'url':'https://careers.example.test/jobs/short','company':'Synthetic Incomplete Co','title':'AI engineer','description':'Card only','descriptionComplete':False})
     json.dump({'jobs':jobs,'nextUrl':'','cursor':''},open(b['resultPath'],'w')); sys.exit(0)
@@ -175,7 +175,7 @@ try {
   // #11: one explicit turn reads both roles, without creating applications or using any real site/session.
   await scopePanel.getByLabel('OfferToday HK', { exact: true }).check()
   await scopePanel.getByLabel('来源精确域名（每行一个）').fill('careers.example.test\nwww.offertoday.com')
-  await scopePanel.getByLabel('岗位排除词（任一命中；每行一个）').fill('')
+  await scopePanel.getByLabel('岗位排除词（任一命中；每行一个）').fill('夜班')
   await scopePanel.getByRole('button', { name: '变更范围（新版本）', exact: true }).click()
   await scopePanel.getByText('当前范围 v6 · 有效', { exact: true }).waitFor()
   await page.getByRole('tab', { name: '候选与发现', exact: true }).click()
@@ -193,13 +193,20 @@ try {
   await candidates.getByText('未取得新全文；保留上次完整 JD 与原取得时间', { exact: false }).waitFor()
   await page.reload()
   await candidates.getByRole('heading', { name: '候选岗位（3）', exact: true }).waitFor()
+  const retainedCard = candidates.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Synthetic Official Co · AI engineer', exact: true }) })
+  await retainedCard.getByText('范围拒绝', { exact: true }).waitFor()
+  await retainedCard.getByText('本次卡片 / 摘要（也参与排除条件核验）：本岗位需要夜班', { exact: true }).waitFor()
+  await retainedCard.getByText('岗位命中排除项', { exact: true }).waitFor()
   const discovered = await (await fetch(`${base}/api/workbench/state`)).json()
   assert.equal(discovered.candidates.jobs.length, 3)
   assert.equal(discovered.candidates.runs[0].status, 'COMPLETED')
   const retained = discovered.candidates.jobs.find(job => job.id === original.id)
-  assert.equal(retained.status, 'READY')
+  assert.equal(retained.status, 'REFUSED')
   assert.equal(retained.description, original.description)
   assert.equal(retained.retrievedAt, original.retrievedAt)
+  assert.equal(retained.sourceUrl, original.sourceUrl)
+  assert.equal(retained.lastReadDescription, '本岗位需要夜班')
+  assert(retained.reasons.includes('岗位命中排除项'))
   assert.equal(retained.lastReadComplete, false)
   assert.equal(discovered.tasks.length, 0)
   assert.equal(discovered.scope.usage.outbound, 0)
@@ -212,7 +219,7 @@ try {
     return true
   })
   await page.screenshot({ path: join(root, 'candidates.png'), fullPage: true })
-  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, confirmedFacts: 1, confirmedResumes: 1, tasks: 0, scopeVersions: 6, candidates: 3, fullJd: 2, outbound: 0 }))
+  console.log(JSON.stringify({ result: 'passed', root, version, aiCalls: 1, confirmedFacts: 1, confirmedResumes: 1, tasks: 0, scopeVersions: 6, candidates: 3, fullJd: 2, refusedOnRediscovery: retained.status === 'REFUSED', outbound: 0 }))
 } catch (error) {
   console.error(`Smoke evidence: ${root}`)
   if (page) {

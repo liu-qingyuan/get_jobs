@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.nio.file.Files;
@@ -149,28 +151,71 @@ class WorkbenchCandidatesHttpTest {
         }
     }
 
-    @Test void newShortCardExclusionsAreNotDiscardedWhenRetainingTheOldFullJd() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"OFFICIAL", "OFFERTODAY"})
+    void newShortCardExclusionsAreNotDiscardedWhenRetainingTheOldFullJd(String channel) throws Exception {
         var command = fake("""
                 import pathlib
                 marker=pathlib.Path(%s); complete=not marker.exists(); marker.write_text('read')
-                job={'url':'https://careers.example.test/jobs/opaque-A','title':'AI engineer','company':'Synthetic Co',
+                link='%s' if b['source']['channel']=='OFFERTODAY' else 'https://careers.example.test/jobs/opaque-A'
+                job={'url':link+'?utm_source='+('full' if complete else 'card'),'title':'AI engineer','company':'Synthetic Co',
                      'description':%s if complete else '本岗位需要夜班','descriptionComplete':complete}
                 json.dump({'jobs':[job]},open(b['resultPath'],'w'))
-                """.formatted(json.writeValueAsString(root.resolve("night-marker").toString()), json.writeValueAsString(JD)));
+                """.formatted(json.writeValueAsString(root.resolve("night-marker").toString()), OFFER, json.writeValueAsString(JD)));
+        var request = request().put("scopeVersion", 2);
+        request.withArray("sources").remove(channel.equals("OFFICIAL") ? 1 : 0);
+        String originalSourceUrl = request.path("sources").get(0).path("url").asText();
+        String id, retrievedAt;
         var service = service();
-        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 5)) {
+        try (var runner = new WorkbenchRunner(service, command, command.subList(0, 2), "http://127.0.0.1:1", 5)) {
             var http = http(service, runner); scope(http, 20, 30);
             var current = ((ObjectNode) getJson(http, "/scope").path("current")).deepCopy().put("expectedVersion", 1);
             current.putArray("excludeTerms").add("夜班"); postJson(http, "/scope", current.toString());
-            var request = request().put("scopeVersion", 2); request.withArray("sources").remove(1);
-            postJson(http, "/candidates/discover", request.toString());
-            assertEquals("READY", getJson(http, "/candidates").path("jobs").get(0).path("status").asText());
-            postJson(http, "/candidates/discover", request.toString());
-            var updated = getJson(http, "/candidates").path("jobs").get(0);
+            assertEquals("COMPLETED", postJson(http, "/candidates/discover", request.toString()).path("status").asText());
+            var jobs = getJson(http, "/candidates").path("jobs");
+            assertEquals(1, jobs.size());
+            var acquired = jobs.get(0);
+            assertEquals("READY", acquired.path("status").asText());
+            assertEquals(JD, acquired.path("description").asText());
+            assertEquals(originalSourceUrl, acquired.path("sourceUrl").asText());
+            id = acquired.path("id").asText(); retrievedAt = acquired.path("retrievedAt").asText();
+            assertFalse(id.isBlank()); assertFalse(retrievedAt.isBlank());
+        }
+        ((ObjectNode) request.path("sources").get(0)).put("url", channel.equals("OFFICIAL")
+                ? "https://careers.example.test/jobs?page=2" : "https://www.offertoday.com/hk/recommend");
+        service = service();
+        try (var runner = new WorkbenchRunner(service, command, command.subList(0, 2), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner);
+            assertEquals("COMPLETED", postJson(http, "/candidates/discover", request.toString()).path("status").asText());
+            var jobs = getJson(http, "/candidates").path("jobs");
+            assertEquals(1, jobs.size(), channel);
+            var updated = jobs.get(0);
+            assertEquals(id, updated.path("id").asText());
             assertEquals("REFUSED", updated.path("status").asText());
+            assertTrue(updated.path("reasons").toString().contains("岗位命中排除项"));
             assertEquals(JD, updated.path("description").asText());
             assertEquals("本岗位需要夜班", updated.path("lastReadDescription").asText());
+            assertEquals(retrievedAt, updated.path("retrievedAt").asText());
+            assertEquals(originalSourceUrl, updated.path("sourceUrl").asText());
+            assertTrue(updated.path("descriptionComplete").asBoolean());
+            assertFalse(updated.path("lastReadComplete").asBoolean());
+            assertEquals(2, updated.path("discoveries").asInt());
+        }
+        service = service();
+        try (var runner = new WorkbenchRunner(service, command, command.subList(0, 2), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); var jobs = getJson(http, "/candidates").path("jobs");
+            assertEquals(1, jobs.size(), channel);
+            var persisted = jobs.get(0);
+            assertEquals(id, persisted.path("id").asText());
+            assertEquals("REFUSED", persisted.path("status").asText());
+            assertTrue(persisted.path("reasons").toString().contains("岗位命中排除项"));
+            assertEquals(JD, persisted.path("description").asText());
+            assertEquals("本岗位需要夜班", persisted.path("lastReadDescription").asText());
+            assertEquals(retrievedAt, persisted.path("retrievedAt").asText());
+            assertEquals(originalSourceUrl, persisted.path("sourceUrl").asText());
+            assertEquals(2, persisted.path("discoveries").asInt());
             assertEquals(0, getJson(http, "/state").path("tasks").size());
+            assertEquals(0, getJson(http, "/scope").path("usage").path("outbound").asInt());
         }
     }
 
