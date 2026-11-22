@@ -4,10 +4,12 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import json
+import os
 from pathlib import Path
 import re
 import signal
 import sqlite3
+import stat
 import sys
 from urllib.parse import urljoin, urlencode, urlsplit
 
@@ -62,14 +64,35 @@ def deadline(seconds=90):
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
 
+def require_read_profile(profile):
+    """Metadata only: unknown/unreadable/linked state is not worker absence."""
+    try:
+        if not stat.S_ISDIR(profile.lstat().st_mode):
+            raise OSError('Not an independent profile directory')
+        with os.scandir(profile) as children:
+            for child in children:
+                mode = child.stat(follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise OSError('Linked profile entry cannot be verified without traversal')
+                if not stat.S_ISDIR(mode):
+                    continue
+                try:
+                    (Path(child.path) / 'Service Worker').lstat()
+                except FileNotFoundError:
+                    continue
+                raise RuntimeError('JobsDB existing Service Worker state prevents verified read-only access; original session untouched')
+    except OSError as error:
+        raise RuntimeError('JobsDB independent profile metadata unavailable; read-only access refused; original session untouched') from error
+
+
 class Browser:
     """Owns one pinned Scrapling session. Never attaches to another browser."""
     def __init__(self, data, *, read_only=False):
         self.data, self.read_only = data, read_only
     def __enter__(self):
         # A persisted worker can bypass routing. Refuse before Chrome starts, never delete user state.
-        if self.read_only and any((self.data / 'scrapling-profile').glob('*/Service Worker')):
-            raise RuntimeError('JobsDB existing Service Worker state prevents verified read-only access; original session untouched')
+        if self.read_only:
+            require_read_profile(self.data / 'scrapling-profile')
         from scrapling.fetchers import StealthySession
         options = {'additional_args': {'service_workers': 'block'}} if self.read_only else {}
         self.session = StealthySession(headless=False, real_chrome=True, google_search=False,

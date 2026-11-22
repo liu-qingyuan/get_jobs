@@ -72,7 +72,9 @@ class WorkbenchJobsDbHttpTest {
                 """.formatted(json.writeValueAsString(JD)));
         return List.of("python3", path.toString());
     }
-    @Test void managedJobsDbProfileGuardIsVisibleAndLeavesOtherSourcesRunning() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"worker-directory", "dangling-worker", "linked-profile"})
+    void managedJobsDbProfileGuardIsVisibleAndLeavesOtherSourcesRunning(String fixture) throws Exception {
         var service = service();
         var jobsRoot = root.resolve("legacy");
         var python = jobsRoot.resolve("venv/bin/python");
@@ -80,7 +82,15 @@ class WorkbenchJobsDbHttpTest {
         Files.createDirectories(python.getParent());
         Files.writeString(python, "#!/bin/sh\ntouch '" + marker + "'\nexit 1\n");
         assertTrue(python.toFile().setExecutable(true));
-        Files.createDirectories(jobsRoot.resolve("scrapling-profile/Default/Service Worker"));
+        var profile = Files.createDirectories(jobsRoot.resolve("scrapling-profile"));
+        var defaultProfile = profile.resolve("Default");
+        if (fixture.equals("linked-profile")) {
+            Files.createSymbolicLink(defaultProfile, Files.createDirectory(root.resolve("outside-profile")));
+        } else {
+            Files.createDirectory(defaultProfile);
+            if (fixture.equals("dangling-worker")) Files.createSymbolicLink(defaultProfile.resolve("Service Worker"), root.resolve("absent-worker"));
+            else Files.createDirectory(defaultProfile.resolve("Service Worker"));
+        }
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         try (var runner = new WorkbenchConfiguration().workbenchRunner(service, json,
                 beans.getBeanProvider(com.getjobs.worker.manager.PlaywrightManager.class),
@@ -92,7 +102,7 @@ class WorkbenchJobsDbHttpTest {
             saved.withArray("hosts").add("www.offertoday.com");
             ((ObjectNode) saved.path("budgets")).put("candidates", 1);
             post(http, "/scope", saved);
-            assertEquals("READ_GUARD_BLOCKED", state(http).at("/runtime/connections/jobsDb/status").asText());
+            assertEquals(fixture.equals("linked-profile") ? "PROFILE_UNAVAILABLE" : "READ_GUARD_BLOCKED", state(http).at("/runtime/connections/jobsDb/status").asText());
             var sources = input().put("scopeVersion", 2).put("maxPages", 1).put("jobsPerPage", 1);
             sources.withArray("sources").addObject().put("channel", "OFFERTODAY").put("url", "https://www.offertoday.com/hk/recommend")
                     .put("region", "HK").put("language", "en").put("direction", "AI_APPLICATION");
@@ -106,7 +116,10 @@ class WorkbenchJobsDbHttpTest {
             assertEquals("POLICY_APPROVED", current.at("/preparations/packages/0/status").asText());
             assertTrue(current.path("tasks").isEmpty());
             assertEquals(0, current.at("/scope/usage/outbound").asInt(-1));
-            assertTrue(Files.isDirectory(jobsRoot.resolve("scrapling-profile/Default/Service Worker")));
+            assertTrue(Files.exists(defaultProfile, LinkOption.NOFOLLOW_LINKS));
+            assertEquals(fixture.equals("linked-profile"), Files.isSymbolicLink(defaultProfile));
+            if (!fixture.equals("linked-profile")) assertTrue(Files.exists(defaultProfile.resolve("Service Worker"), LinkOption.NOFOLLOW_LINKS));
+            assertFalse(Files.exists(root.resolve("absent-worker")));
         }
     }
     @Test void missingJobsDbCommandIsVisibleAndNeverUsesTheOfficialCommand() throws Exception {

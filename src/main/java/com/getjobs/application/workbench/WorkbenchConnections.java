@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.function.Supplier;
 
 /** Local connection preflight only. Never opens a browser, reads credential files, or grants an action. */
@@ -51,8 +52,13 @@ final class WorkbenchConnections {
     }
 
     static Status profile(Path directory) {
-        if (Files.notExists(directory, LinkOption.NOFOLLOW_LINKS)) return Status.PROFILE_MISSING;
-        return Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) ? Status.CHECK_AT_READ : Status.PROFILE_UNAVAILABLE;
+        try {
+            return metadata(directory).isDirectory() ? Status.CHECK_AT_READ : Status.PROFILE_UNAVAILABLE;
+        } catch (NoSuchFileException e) {
+            return Status.PROFILE_MISSING;
+        } catch (IOException | SecurityException e) {
+            return Status.PROFILE_UNAVAILABLE;
+        }
     }
 
     static Status jobsDb(Path directory) {
@@ -62,11 +68,23 @@ final class WorkbenchConnections {
         // guard under the profile lock immediately before opening Chrome.
         try (var children = Files.newDirectoryStream(directory)) {
             for (var child : children) {
-                if (Files.exists(child.resolve("Service Worker"))) return Status.READ_GUARD_BLOCKED;
+                var entry = metadata(child);
+                if (entry.isSymbolicLink()) return Status.PROFILE_UNAVAILABLE;
+                if (!entry.isDirectory()) continue;
+                try {
+                    metadata(child.resolve("Service Worker"));
+                    return Status.READ_GUARD_BLOCKED;
+                } catch (NoSuchFileException absent) {
+                    // Only proven absence is admissible; do not follow links or ignore I/O errors.
+                }
             }
             return Status.CHECK_AT_READ;
-        } catch (IOException | DirectoryIteratorException e) {
+        } catch (IOException | DirectoryIteratorException | SecurityException e) {
             return Status.PROFILE_UNAVAILABLE;
         }
+    }
+
+    private static BasicFileAttributes metadata(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
     }
 }

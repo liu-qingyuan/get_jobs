@@ -145,6 +145,29 @@ class WorkbenchReadTests(unittest.TestCase):
                 finally:
                     context.close()
 
+                # Registration blocking does NOT stop the saved worker. Reopen only this
+                # synthetic profile and prove its response bypasses a deny-all request route.
+                context = self.pw.chromium.launch_persistent_context(str(data / 'scrapling-profile'), channel='chrome', headless=True, service_workers='block')
+                routed_probes = []
+                def deny_probe(route):
+                    if route.request.url == base + '/probe':
+                        routed_probes.append(route.request.url)
+                        route.abort()
+                    elif route.request.url == base + '/':
+                        route.continue_()
+                    else:
+                        route.abort()
+                context.route('**/*', deny_probe)
+                try:
+                    page = context.new_page()
+                    page.goto(base)
+                    page.add_script_tag(content="fetch('/probe').then(r=>r.text()).then(t=>document.body.dataset.probe=t).catch(()=>document.body.dataset.probe='route blocked')")
+                    page.wait_for_function("document.body.dataset.probe!==undefined")
+                    self.assertEqual('worker intercepted', page.locator('body').get_attribute('data-probe'))
+                    self.assertEqual([], routed_probes, 'Saved worker response bypasses even a context-level deny route')
+                finally:
+                    context.close()
+
                 # A separate owned process avoids nesting Scrapling's synchronous Playwright loop.
                 child = subprocess.run([sys.executable, '-c', '''
 import json,sys
@@ -163,7 +186,7 @@ with patch('scrapling.fetchers.StealthySession', side_effect=AssertionError('mus
                 self.assertTrue((data / 'scrapling-profile/Default/Service Worker').is_dir())
                 # A fresh temporary read profile must also refuse NEW worker registration.
                 fresh = data / 'fresh'
-                fresh.mkdir()
+                (fresh / 'scrapling-profile').mkdir(parents=True)
                 child = subprocess.run([sys.executable, '-c', '''
 import json,sys
 from pathlib import Path
