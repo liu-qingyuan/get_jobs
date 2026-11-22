@@ -12,7 +12,11 @@ import static com.getjobs.application.workbench.WorkbenchService.*;
 
 /** Persistent read-only candidates and checkpoints. Never creates an application, approval or submission claim. */
 final class WorkbenchCandidates {
-    @FunctionalInterface interface Reader { ObjectNode read(ObjectNode bundle) throws Exception; }
+    @FunctionalInterface interface Reader {
+        /** Cheap local check; must not contact a platform or acquire a browser. */
+        default void checkConnection(String channel) { }
+        ObjectNode read(ObjectNode bundle) throws Exception;
+    }
     private final WorkbenchService service;
     private final WorkbenchStore store;
     WorkbenchCandidates(WorkbenchService service) { this.service = service; this.store = service.store; }
@@ -64,7 +68,7 @@ final class WorkbenchCandidates {
         });
         var failed = new HashSet<Integer>();
         try {
-            for (int page = 0; page < pages; page++) {
+            for (int page = 0; page < pages;) {
                 var sources = (ArrayNode) run.path("sources");
                 int index = -1;
                 for (int offset = 0; offset < sources.size(); offset++) {
@@ -73,9 +77,19 @@ final class WorkbenchCandidates {
                 }
                 if (index < 0) break;
                 var source = (ObjectNode) sources.get(index);
-                var target = source.deepCopy().put("url", source.path("nextUrl").asText());
-                var decision = service.scope.reserveDiscovery(version, target, slots, seconds, source.path("channel").asText().equals("OFFICIAL") ? tokens : 0);
+                String channel = source.path("channel").asText();
                 run.put("nextSource", (index + 1) % sources.size());
+                try {
+                    reader.checkConnection(channel);
+                } catch (WorkbenchException e) {
+                    event(run, "READ_EXCEPTION", source, e.getMessage());
+                    failed.add(index);
+                    saveRun(run);
+                    continue;
+                }
+                page++;
+                var target = source.deepCopy().put("url", source.path("nextUrl").asText());
+                var decision = service.scope.reserveDiscovery(version, target, slots, seconds, channel.equals("OFFICIAL") ? tokens : 0);
                 if (!decision.path("allowed").asBoolean()) {
                     event(run, "REFUSED", source, decision.path("reasons").toString()); failed.add(index);
                     if (decision.path("reasonCodes").toString().matches(".*(?:BUDGET_EXHAUSTED|VERSION_CHANGED|INACTIVE|EXPIRED|MATERIAL_CHANGED|NO_SCOPE).*")) break;

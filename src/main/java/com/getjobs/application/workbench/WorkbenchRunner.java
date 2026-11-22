@@ -19,6 +19,11 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final List<String> projectCommand;
     private final List<String> verifierCommand;
     private final WorkbenchCandidates.Reader bossReader;
+    private final WorkbenchConnections connections;
+    private final WorkbenchCandidates.Reader candidateReader = new WorkbenchCandidates.Reader() {
+        @Override public void checkConnection(String channel) { connections.requireRead(channel); }
+        @Override public ObjectNode read(ObjectNode bundle) throws Exception { return readCandidatePage(bundle); }
+    };
     private final String callback;
     private final long timeoutSeconds;
     private final AtomicBoolean busy = new AtomicBoolean();
@@ -53,6 +58,16 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
             WorkbenchCandidates.Reader bossReader, List<String> projectCommand, List<String> verifierCommand, String callback, long timeoutSeconds) {
+        this(service, command, offerTodayCommand, jobsDbCommand, bossReader, projectCommand, verifierCommand, callback, timeoutSeconds,
+                new WorkbenchConnections(
+                        () -> bossReader == null ? WorkbenchConnections.Status.NOT_CONFIGURED : WorkbenchConnections.Status.CHECK_AT_READ,
+                        () -> jobsDbCommand.isEmpty() ? WorkbenchConnections.Status.NOT_CONFIGURED : WorkbenchConnections.Status.CHECK_AT_READ));
+    }
+
+    WorkbenchRunner(WorkbenchService service, List<String> command, List<String> offerTodayCommand, List<String> jobsDbCommand,
+            WorkbenchCandidates.Reader bossReader, List<String> projectCommand, List<String> verifierCommand, String callback, long timeoutSeconds,
+            WorkbenchConnections connections) {
+        this.connections = connections;
         this.verifierCommand = List.copyOf(verifierCommand);
         if (!verifierCommand.isEmpty() && (verifierCommand.stream().noneMatch(arg -> arg.contains("{taskFile}")) || verifierCommand.stream().anyMatch(String::isBlank)
                 || verifierCommand.equals(projectCommand) || verifierCommand.equals(command)))
@@ -81,11 +96,13 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
 
     public ObjectNode runtime() {
-        return service.json.createObjectNode().put("agentConfigured", !command.isEmpty())
+        var result = service.json.createObjectNode().put("agentConfigured", !command.isEmpty())
                 .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get()).put("projectConfigured", !projectCommand.isEmpty()).put("verifierConfigured", !verifierCommand.isEmpty())
                 .put("jobsDbConfigured", !jobsDbCommand.isEmpty()).put("jobsDbProductionVerified", false)
                 .put("jobsDbOutboundSupported", false).put("jobsDbCapabilityReason", JobsDbTarget.OUTBOUND_BLOCK_REASON)
                 .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
+        result.set("connections", connections.view(service.json));
+        return result;
     }
 
     public synchronized ObjectNode start(String id) {
@@ -111,7 +128,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             var cycle = service.workflow.begin(input, cycleId);
             executor.submit(() -> {
                 try {
-                    service.workflow.advance(cycle.path("id").asText(), this::readCandidatePage, this::analyzeCandidates, id -> {
+                    service.workflow.advance(cycle.path("id").asText(), candidateReader, this::analyzeCandidates, id -> {
                         if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止；保留安全断点");
                         waitForTask(id, launch(id));
                     });
@@ -361,13 +378,15 @@ public final class WorkbenchRunner implements AutoCloseable {
     /** One bounded read-only turn, including required details; no application callback, materials or claim. */
     public synchronized ObjectNode discoverCandidates(ObjectNode input) {
         if (closed || !busy.compareAndSet(false, true)) throw new WorkbenchException(409, "执行器已关闭或正在处理其他任务");
-        try { return service.candidates.discover(input, this::readCandidatePage); }
+        try { return service.candidates.discover(input, candidateReader); }
         finally { busy.set(false); }
     }
 
     private ObjectNode readCandidatePage(ObjectNode bundle) throws Exception {
         if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止");
-        if (bundle.path("source").path("channel").asText().equals("BOSS")) {
+        String channel = bundle.path("source").path("channel").asText();
+        connections.requireRead(channel);
+        if (channel.equals("BOSS")) {
             if (bossReader == null) throw new WorkbenchException(409, "Boss 只读来源未连接本副本已授权会话；不会新建登录态或回退官网 AI");
             ((ObjectNode) bundle.path("limits")).put("seconds", Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong()));
             return bossReader.read(bundle);

@@ -72,6 +72,43 @@ class WorkbenchJobsDbHttpTest {
                 """.formatted(json.writeValueAsString(JD)));
         return List.of("python3", path.toString());
     }
+    @Test void managedJobsDbProfileGuardIsVisibleAndLeavesOtherSourcesRunning() throws Exception {
+        var service = service();
+        var jobsRoot = root.resolve("legacy");
+        var python = jobsRoot.resolve("venv/bin/python");
+        var marker = root.resolve("jobsdb-started");
+        Files.createDirectories(python.getParent());
+        Files.writeString(python, "#!/bin/sh\ntouch '" + marker + "'\nexit 1\n");
+        assertTrue(python.toFile().setExecutable(true));
+        Files.createDirectories(jobsRoot.resolve("scrapling-profile/Default/Service Worker"));
+        var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        try (var runner = new WorkbenchConfiguration().workbenchRunner(service, json,
+                beans.getBeanProvider(com.getjobs.worker.manager.PlaywrightManager.class),
+                beans.getBeanProvider(com.getjobs.worker.service.BossJobService.class),
+                json.writeValueAsString(model()), "[]", "[]", json.writeValueAsString(reader()), "", 1, 10)) {
+            var http = http(service, runner); setup(http, false);
+            var saved = (ObjectNode) state(http).at("/scope/current");
+            saved.put("expectedVersion", 1).withArray("channels").add("OFFERTODAY");
+            saved.withArray("hosts").add("www.offertoday.com");
+            ((ObjectNode) saved.path("budgets")).put("candidates", 1);
+            post(http, "/scope", saved);
+            assertEquals("READ_GUARD_BLOCKED", state(http).at("/runtime/connections/jobsDb/status").asText());
+            var sources = input().put("scopeVersion", 2).put("maxPages", 1).put("jobsPerPage", 1);
+            sources.withArray("sources").addObject().put("channel", "OFFERTODAY").put("url", "https://www.offertoday.com/hk/recommend")
+                    .put("region", "HK").put("language", "en").put("direction", "AI_APPLICATION");
+            post(http, "/cycles", sources);
+            await().atMost(Duration.ofSeconds(15)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http);
+            assertFalse(Files.exists(marker), "A known unsafe managed profile must not launch the reader");
+            assertEquals("CHECKPOINT", current.at("/candidates/runs/0/status").asText());
+            assertEquals("OFFERTODAY", current.at("/candidates/jobs/0/channel").asText());
+            assertEquals(1, current.at("/scope/usage/candidates").asInt(-1));
+            assertEquals("POLICY_APPROVED", current.at("/preparations/packages/0/status").asText());
+            assertTrue(current.path("tasks").isEmpty());
+            assertEquals(0, current.at("/scope/usage/outbound").asInt(-1));
+            assertTrue(Files.isDirectory(jobsRoot.resolve("scrapling-profile/Default/Service Worker")));
+        }
+    }
     @Test void missingJobsDbCommandIsVisibleAndNeverUsesTheOfficialCommand() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, List.of("must-not-start-official", "{taskFile}"), "http://127.0.0.1:1", 10)) {

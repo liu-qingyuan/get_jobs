@@ -1840,9 +1840,10 @@ public class PlaywrightManager {
         }
     }
 
-    /**
-     * 检查Playwright是否已初始化
-     */
+    /** The persistent profile path; this accessor does not start or inspect the browser. */
+    public Path profileDirectory() { return USER_DATA_DIR; }
+
+    /** 检查Playwright是否已初始化 */
     public boolean isInitialized() {
         return playwright != null && context != null && bossPage != null
                 && !browserClosed && !bossPage.isClosed();

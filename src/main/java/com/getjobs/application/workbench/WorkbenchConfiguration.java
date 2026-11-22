@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import static com.getjobs.application.workbench.WorkbenchConnections.Status.*;
 
 @Configuration(proxyBeanMethods=false)
 public class WorkbenchConfiguration {
@@ -36,7 +37,8 @@ public class WorkbenchConfiguration {
             offerToday = Files.isRegularFile(script) ? List.of("python3", script.toString()) : List.of();
         } else offerToday = arguments(json, offerTodayCommand);
         List<String> jobsDb;
-        if (jobsDbCommand.isBlank()) {
+        boolean managedJobsDb = jobsDbCommand.isBlank();
+        if (managedJobsDb) {
             Path script = Path.of("scripts/jobsdb/jobsdb.py").toAbsolutePath().normalize();
             Path python = service.jobsDbDirectory().resolve("venv/bin/python");
             jobsDb = Files.isRegularFile(script) && Files.isExecutable(python) ? List.of(python.toString(), script.toString()) : List.of();
@@ -53,7 +55,17 @@ public class WorkbenchConfiguration {
                 return BossCandidateReader.read(browser.getBossPage(), bounded, json);
             });
         };
-        return new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss, arguments(json, projectCommand), arguments(json, verifierCommand), "http://127.0.0.1:" + port + "/api/workbench", timeout);
+        var connections = new WorkbenchConnections(() -> {
+            if (boss == null) return NOT_CONFIGURED;
+            if (legacyBoss.isRunning()) return BUSY;
+            var profile = WorkbenchConnections.profile(browser.profileDirectory());
+            // Only cached flags here: live Playwright checks stay on the owning thread below the read Seam.
+            return profile != CHECK_AT_READ || browser.isLoggedIn("boss") ? profile : BROWSER_NOT_CONNECTED;
+        }, () -> {
+            if (jobsDb.isEmpty()) return NOT_CONFIGURED;
+            return managedJobsDb ? WorkbenchConnections.jobsDb(service.jobsDbDirectory().resolve("scrapling-profile")) : CHECK_AT_READ;
+        });
+        return new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss, arguments(json, projectCommand), arguments(json, verifierCommand), "http://127.0.0.1:" + port + "/api/workbench", timeout, connections);
     }
 
     private static List<String> arguments(ObjectMapper json, String command) throws Exception {
