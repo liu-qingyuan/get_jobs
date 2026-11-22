@@ -210,6 +210,43 @@ with patch('scrapling.fetchers.StealthySession', side_effect=headless_session):
             server.server_close()
             thread.join()
 
+    def test_verification_page_is_reported_to_workbench_without_results_or_retry(self):
+        import json
+        from unittest.mock import patch
+
+        for challenged_path, headers in [('/python-jobs', {}), ('/job/12345678', {}), ('/job/12345678', {'cf-mitigated': 'challenge'})]:
+            with self.subTest(path=challenged_path, headers=headers), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp)
+                (data / 'scrapling-profile').mkdir()
+                file = data / 'task.json'
+                result = data / 'result.json'
+                file.write_text(json.dumps(self.bundle() | {'resultPath': str(result)}))
+                challenged = []
+
+                def route(route):
+                    if route.request.url == jobsdb.SITE + challenged_path:
+                        challenged.append(route.request.url)
+                        body = '<title>Access restricted</title>' if headers else '<title>Just a moment...</title>'
+                        route.fulfill(status=403, headers=headers, content_type='text/html', body=body)
+                    else:
+                        self.route(route)
+
+                def fetch(url, *, solve_cloudflare, page_action, page_setup):
+                    self.assertFalse(solve_cloudflare)
+                    with self.browser.new_context() as context:
+                        context.route('**/*', route)
+                        page = context.new_page()
+                        page_setup(page)
+                        page.goto(url)
+                        page_action(page)
+
+                with patch('scrapling.fetchers.StealthySession') as session:
+                    session.return_value.fetch.side_effect = fetch
+                    self.assertEqual(0, jobsdb.main(['read-candidates', str(file), '--data-dir', str(data)]))
+                self.assertEqual({'exception': 'JobsDB 要求平台验证；本轮停止读取此来源，不自动验证、重试或重新登录'}, json.loads(result.read_text()))
+                self.assertEqual([jobsdb.SITE + challenged_path], challenged)
+                self.assertEqual(0, self.effects)
+
     def test_missing_session_never_creates_a_profile_or_opens_browser(self):
         from unittest.mock import patch
         import json

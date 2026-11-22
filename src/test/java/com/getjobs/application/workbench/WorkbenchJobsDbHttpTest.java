@@ -122,6 +122,45 @@ class WorkbenchJobsDbHttpTest {
             assertFalse(Files.exists(root.resolve("absent-worker")));
         }
     }
+    @Test void platformVerificationIsVisibleAndOnlyStopsJobsDbInTheCurrentRound() throws Exception {
+        var verificationReader = root.resolve("jobsdb-verification.py");
+        Files.writeString(verificationReader, """
+                import json,sys
+                with open(sys.argv[2]) as task:
+                    bundle=json.load(task)
+                assert bundle['source']['channel']=='JOBSDB'
+                with open(bundle['resultPath'],'w') as result:
+                    json.dump({'exception':'JobsDB 要求平台验证；本轮停止读取此来源，不自动验证、重试或重新登录'},result)
+                """);
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), reader(), List.of("python3", verificationReader.toString()),
+                null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, false);
+            var scope = ((ObjectNode) state(http).at("/scope/current")).put("expectedVersion", 1);
+            scope.withArray("channels").add("OFFERTODAY"); scope.withArray("hosts").add("www.offertoday.com");
+            post(http, "/scope", scope);
+            var request = input().put("scopeVersion", 2).put("maxPages", 3).put("jobsPerPage", 1);
+            request.withArray("sources").addObject().put("channel", "OFFERTODAY").put("url", "https://www.offertoday.com/hk/recommend")
+                    .put("region", "HK").put("language", "en").put("direction", "AI_APPLICATION");
+            post(http, "/cycles", request);
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http);
+            var run = current.at("/candidates/runs/0");
+            assertEquals("CHECKPOINT", run.path("status").asText());
+            assertEquals("JOBSDB", run.at("/events/0/channel").asText());
+            assertEquals("READ_EXCEPTION", run.at("/events/0/code").asText());
+            assertTrue(run.at("/events/0/message").asText().contains("平台验证"));
+            assertEquals("OFFERTODAY", run.at("/events/1/channel").asText());
+            assertEquals("CHECKPOINT", run.at("/events/2/code").asText());
+            assertFalse(run.at("/sources/0/done").asBoolean(true));
+            assertEquals("https://hk.jobsdb.com/python-jobs", run.at("/sources/0/nextUrl").asText());
+            assertEquals(2, current.at("/scope/usage/candidates").asInt(-1), "An attempted read is charged; there is no retry");
+            assertEquals("OFFERTODAY", current.at("/preparations/packages/0/target/channel").asText());
+            assertEquals("POLICY_APPROVED", current.at("/preparations/packages/0/status").asText());
+            assertTrue(current.path("tasks").isEmpty());
+            assertEquals(0, current.at("/scope/usage/outbound").asInt(-1));
+        }
+    }
     @Test void missingJobsDbCommandIsVisibleAndNeverUsesTheOfficialCommand() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, List.of("must-not-start-official", "{taskFile}"), "http://127.0.0.1:1", 10)) {

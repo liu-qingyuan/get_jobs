@@ -88,7 +88,9 @@ def read_candidates(bundle, browser):
         selected = list(rows.values())[offset:offset + slots]
         for row in selected:
             remaining(page)
-            page.goto(row['url'], wait_until='domcontentloaded')
+            response = page.goto(row['url'], wait_until='domcontentloaded')
+            if (response is not None and response.headers.get('cf-mitigated') == 'challenge') or jobsdb.challenge(page):
+                raise jobsdb.VerificationRequired('CF challenge remains')
             if jobsdb.job_id(page.url) != jobsdb.job_id(row['url']):
                 raise RuntimeError('JobsDB detail changed job identity')
             title = page.locator('[data-automation="job-detail-title"]')
@@ -119,7 +121,11 @@ def execute(task_file, data):
     # Missing connection is not permission to create a new login/session.
     if not (data / 'scrapling-profile').is_dir():
         raise RuntimeError('JobsDB independent session missing; explicitly login with the original CLI first')
-    with jobsdb.profile_lock(data), jobsdb.Browser(data, read_only=True) as browser:
-        output = read_candidates(bundle, browser)
+    try:
+        with jobsdb.profile_lock(data), jobsdb.Browser(data, read_only=True) as browser:
+            output = read_candidates(bundle, browser)
+    except jobsdb.VerificationRequired:
+        # Report a fixed diagnostic through the existing read-result contract, never page text.
+        output = {'exception': 'JobsDB 要求平台验证；本轮停止读取此来源，不自动验证、重试或重新登录'}
     result.write_text(json.dumps(output, ensure_ascii=False))
     return 0

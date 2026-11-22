@@ -48,6 +48,10 @@ def job_id(url):
 def first_visible(locator):
     return next((item for item in locator.all() if item.is_visible()), None)
 
+class VerificationRequired(RuntimeError):
+    """A recognizable platform challenge, not merely a timeout or missing job cards."""
+
+
 def challenge(page):
     title = page.title().lower()
     if any(s in title for s in ('just a moment', '请稍候', '請稍候', 'security verification')):
@@ -111,7 +115,10 @@ class Browser:
         def perform(page):
             signal.alarm(0)  # User login/form input is not subject to the navigation deadline.
             try:
-                if challenge(page): raise RuntimeError('CF challenge remains')
+                if challenge(page):
+                    if self.read_only:
+                        raise VerificationRequired('CF challenge remains')
+                    raise RuntimeError('CF challenge remains')
                 result.append(action(page))
             except Exception as exc:
                 errors.append(exc)  # Scrapling otherwise logs and swallows action exceptions.
