@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.nio.charset.StandardCharsets;
@@ -57,14 +59,16 @@ class WorkbenchJobsDbHttpTest {
                 """);
         return List.of("python3", path.toString(), "{taskFile}");
     }
-    List<String> jobsdb() throws Exception {
-        var path = root.resolve("jobsdb-fake.py");
+    List<String> reader() throws Exception {
+        var path = root.resolve("channel-reader.py");
         Files.writeString(path, """
                 import json,sys
                 b=json.load(open(sys.argv[2])); assert sys.argv[1]=='read-candidates'
-                assert b['source']['channel']=='JOBSDB' and 'token' not in b and 'resumePath' not in b
+                channel=b['source']['channel']
+                assert channel in ('JOBSDB','OFFERTODAY') and 'token' not in b and 'resumePath' not in b
                 assert b['limits']['modelTokens']==0
-                json.dump({'jobs':[{'url':'https://hk.jobsdb.com/job/12345678?ref=search','title':'Python engineer','company':'Synthetic Corp','description':%s,'descriptionComplete':True}]},open(b['resultPath'],'w'))
+                url='https://hk.jobsdb.com/job/12345678?ref=search' if channel=='JOBSDB' else 'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv=='
+                json.dump({'jobs':[{'url':url,'title':'Python engineer','company':'Synthetic Corp','description':%s,'descriptionComplete':True}]},open(b['resultPath'],'w'))
                 """.formatted(json.writeValueAsString(JD)));
         return List.of("python3", path.toString());
     }
@@ -81,7 +85,7 @@ class WorkbenchJobsDbHttpTest {
     }
     @Test void legacyUnknownAndWorkbenchUnknownBothPreventPreparingOrReplayingJobsDb() throws Exception {
         var service = service();
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), jobsdb(), null, "http://127.0.0.1:1", 10)) {
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); setup(http, false);
             Files.createDirectories(root.resolve("legacy"));
             try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db")); var s = c.createStatement()) {
@@ -109,7 +113,7 @@ class WorkbenchJobsDbHttpTest {
     }
     @Test void unverifiedJobsDbOutboundCannotAuthorizeClaimOrFallBackToOfficial() throws Exception {
         var service = service();
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), jobsdb(), null, "http://127.0.0.1:1", 10)) {
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http);
@@ -132,7 +136,7 @@ class WorkbenchJobsDbHttpTest {
     }
     @Test void jobsDbSearchDetailsUseUnifiedMatchingAndIsolatedPreparedMaterialsWithoutSending() throws Exception {
         var service = service();
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), jobsdb(), null, "http://127.0.0.1:1", 10)) {
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); setup(http, false); post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http);
@@ -146,6 +150,51 @@ class WorkbenchJobsDbHttpTest {
             assertTrue(pkg.path("snapshot").path("resume").path("filename").asText().endsWith(".docx"));
             assertTrue(state.path("tasks").isEmpty());
             assertEquals("PREPARED", state.path("workflow").path("cycles").get(0).path("status").asText());
+            assertEquals(0, state.path("scope").path("usage").path("outbound").asInt());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void mixedScopeRequiresAnExplicitVerifiedContactForEachJobSite(boolean verifyJobsDbContact) throws Exception {
+        var service = service(); var reader = reader();
+        try (var runner = new WorkbenchRunner(service, model(), reader, reader, null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, false);
+            var scope = ((ObjectNode) state(http).path("scope").path("current")).deepCopy().put("expectedVersion", 1);
+            scope.withArray("channels").add("OFFERTODAY"); scope.withArray("hosts").add("www.offertoday.com");
+            // Replace the shared HK contact with separate contacts for each site.
+            scope.withArray("factIds").remove(1); scope.putArray("contactFactIds");
+            for (String host : List.of("hk.jobsdb.com", "www.offertoday.com")) {
+                var contact = post(http, "/facts", json.createObjectNode().put("key", "contact_email").put("label", host + " contact")
+                        .put("value", host + "@example.test").put("scope", "SITE:" + host).put("confirmed", true));
+                scope.withArray("factIds").add(contact.path("id").asText());
+                if (verifyJobsDbContact || host.equals("www.offertoday.com")) scope.withArray("contactFactIds").add(contact.path("id").asText());
+            }
+            post(http, "/scope", scope);
+            var request = input().put("scopeVersion", 2).put("maxPages", 2);
+            request.withArray("sources").addObject().put("channel", "OFFERTODAY").put("url", "https://www.offertoday.com/hk/recommend")
+                    .put("region", "HK").put("language", "en").put("direction", "AI_APPLICATION");
+            post(http, "/cycles", request);
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http); var packages = state.path("preparations").path("packages");
+            assertEquals(2, packages.size(), state.path("workflow").toPrettyString());
+            assertNotEquals(packages.get(0).path("target").path("channel"), packages.get(1).path("target").path("channel"));
+            for (var pkg : packages) {
+                String host = java.net.URI.create(pkg.path("target").path("url").asText()).getHost();
+                if (host.equals("hk.jobsdb.com") && !verifyJobsDbContact) {
+                    assertEquals("MATERIAL_EXCEPTION", pkg.path("status").asText(), pkg.toPrettyString());
+                    assertTrue(pkg.path("reason").asText().contains("联系方式均不适用于该岗位"));
+                    assertFalse(pkg.has("snapshot"));
+                    continue;
+                }
+                assertEquals("POLICY_APPROVED", pkg.path("status").asText(), pkg.toPrettyString());
+                var contacts = pkg.path("snapshot").path("contactFacts");
+                assertEquals(1, contacts.size());
+                assertEquals(host + "@example.test", contacts.get(0).path("value").asText());
+                assertTrue(post(http, "/preparations/" + pkg.path("id").asText() + "/check", json.createObjectNode().put("action", "PREPARE")).path("allowed").asBoolean());
+            }
+            assertEquals(verifyJobsDbContact ? "PREPARED" : "EXCEPTION", state.path("workflow").path("cycles").get(0).path("status").asText());
+            assertTrue(state.path("tasks").isEmpty());
             assertEquals(0, state.path("scope").path("usage").path("outbound").asInt());
         }
     }

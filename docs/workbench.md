@@ -156,6 +156,8 @@ Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发�
 
 只读任务包无材料/申请 token，仅含固定来源与有界资源。原 CLI 独立会话必须已显式存在，缺会话不新建 profile；同一 `run.lock` 拒绝与原 CLI 并发。导航前整个 BrowserContext（含 popup 首次请求）的守卫仅放行受支持列表/数字详情及窄静态 GET，拒绝所有其他方法、XHR/fetch 和外部请求；只读 Browser 阻止新 Service Worker 注册；如持久 profile 存在 Service Worker 存储目录则在 Chrome 启动前保守拒绝（包括可能没有活跃 worker 的目录），不删除或迁移旧状态；不在此路径解 CF、登录或猜测翻页。每页槽位/时限和累计预算沿用统一候选 Interface，零模型；当前加载列表超过 200 链接报例外，不静默截断。游标绑定列表身份指纹，仅续读已加载项；列表变化时显式重新启动只读轮次。标题/公司/身份 schema 缺失是读取例外，缺/短全文仍 INCOMPLETE，不冒充可匹配。完整候选统一进入匹配与独立 DOCX 准备，沿用一次范围核对的适用港区联系方式与原账本/工作台 UNKNOWN 防重。
 
+若同一范围包含 JobsDB 和 OfferToday，可分别勾选两个网站的已核对联系方式。每个岗位的材料包只冻结适用于其网站、地区和语言的已核对联系方式；缺少适用项时只阻止该岗位备料，不借用另一站资料。
+
 `runtime.jobsDbConfigured` 仅表示只读命令配置，读取时才核验会话；`jobsDbProductionVerified=false`、`jobsDbOutboundSupported=false` 与 `jobsDbCapabilityReason` 展示真实限制。JobsDB 原 Profile 会随申请发送，目前无法证明没有任务外资料，review 文件名不证明冻结附件字节，积极回执文案也未绑定本次材料。因此 APPLY/CONTACT/SEND_CV 返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim、不占外发量、不运行旧 apply/batch，也不回退官网 AI 或自动进度查询。
 
 #16 保持 open / needs-triage；受控单岗申请尚未完成，需另获授权的只读核对或脱敏回放来确认精确 Profile/附件/回执合同。开发假站/HTTP 测试不是生产能力或推荐质量验收，没有上传真实 CV、实投或切换可见工作台。局部八图以 #16 本增量评论为准。

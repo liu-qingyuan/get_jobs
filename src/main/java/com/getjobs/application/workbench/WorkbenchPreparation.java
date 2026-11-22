@@ -180,11 +180,11 @@ final class WorkbenchPreparation {
     private com.fasterxml.jackson.databind.node.ArrayNode contactFacts(ObjectNode scope, ObjectNode context) {
         require(scope.path("contactVerified").asBoolean() && scope.path("contactFactIds").isArray() && !scope.path("contactFactIds").isEmpty(), "须在一次范围确认中核对港区渠道实际联系方式、最新偏好与线上资料，并固定联系方式事实");
         var contacts = service.json.createArrayNode();
+        // Context has already excluded facts for other sites, regions or languages.
         for (var id : scope.path("contactFactIds")) {
-            JsonNode found = null;
-            for (var fact : context.path("facts")) if (fact.path("id").equals(id)) found = fact;
-            require(found != null, "范围核对的联系方式不适用或已变化"); contacts.add(found.deepCopy());
+            for (var fact : context.path("facts")) if (fact.path("id").equals(id)) contacts.add(fact.deepCopy());
         }
+        require(!contacts.isEmpty(), "范围核对的联系方式均不适用于该岗位；请选择该网站、地区和语言适用的联系方式");
         return contacts;
     }
 
