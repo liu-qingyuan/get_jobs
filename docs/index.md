@@ -10,8 +10,8 @@ hero:
       text: 本地审核版启动
       link: /guide/quick-start
     - theme: alt
-      text: ⭐ GitHub 点赞支持
-      link: https://github.com/loks666/get_jobs
+      text: 查看当前项目源码
+      link: https://github.com/liu-qingyuan/get_jobs
 
 features:
   - icon: 🌐

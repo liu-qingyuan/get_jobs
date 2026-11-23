@@ -58,6 +58,7 @@ export default defineConfig({
     // 顶部导航栏
     nav: [
       { text: '首页', link: '/' },
+      { text: '本地工作台', link: '/workbench' },
       { text: '项目介绍', link: '/guide/introduction' },
       { text: '🚀 快速开始', link: '/guide/quick-start' },
       { text: '⚙️ 核心配置', link: '/guide/config' },
@@ -65,7 +66,8 @@ export default defineConfig({
       {
         text: '相关资源',
         items: [
-          { text: 'GitHub 仓库', link: 'https://github.com/loks666/get_jobs' },
+          { text: 'GitHub 仓库', link: 'https://github.com/liu-qingyuan/get_jobs' },
+          { text: '上游项目', link: 'https://github.com/loks666/get_jobs' },
           { text: 'Gitee 镜像', link: 'https://gitee.com/lok666/get_jobs' },
           { text: '界面截图', link: '/guide/screenshots' },
           { text: '社区与贡献', link: '/guide/community' },
@@ -77,6 +79,14 @@ export default defineConfig({
 
     // 侧边栏结构化配置
     sidebar: [
+      {
+        text: '本地工作台与港区渠道',
+        items: [
+          { text: '工作台使用', link: '/workbench' },
+          { text: 'OfferToday 接入与限制', link: '/offertoday-v1' },
+          { text: 'JobsDB 使用与限制', link: '/jobsdb' }
+        ]
+      },
       {
         text: '📖 指南与入门',
         items: [
@@ -105,7 +115,7 @@ export default defineConfig({
 
     // 编辑与更新配置
     editLink: {
-      pattern: 'https://github.com/loks666/get_jobs/edit/main/docs/:path',
+      pattern: 'https://github.com/liu-qingyuan/get_jobs/edit/main/docs/:path',
       text: '在 GitHub 上编辑此页'
     },
     lastUpdated: {
@@ -118,7 +128,7 @@ export default defineConfig({
 
     // 社交链接
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/loks666/get_jobs' }
+      { icon: 'github', link: 'https://github.com/liu-qingyuan/get_jobs' }
     ],
 
     // 页脚配置

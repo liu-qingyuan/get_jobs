@@ -1,6 +1,12 @@
 # 快速开始：本地统一审核版
 
-本指南启动本地管理页，不承诺首次自动投递。源码同步、模拟网页测试与真实账号验收分别进行；本次未登录或实投。版本与限制见 [同步记录](/upstream-sync-36bf5f9)。
+本指南启动本地管理页，不承诺首次自动投递，也不会自动登录或实投。源码同步、隔离测试与真实账号验收分别记录；各渠道已验证的能力与限制见 [工作台使用](/workbench)，历史版本见 [同步记录](/upstream-sync-36bf5f9)。
+
+## 在线说明文档
+
+[项目文档网站](https://liu-qingyuan.github.io/get_jobs/) 仅展示静态说明，不运行求职工作台，不连接你的账号或本机资料库。
+
+公开仓库可使用 GitHub Pages 免费托管，无需自备服务器或购买域名。若为自己的 fork 启用相同站点，在 GitHub 仓库的 `Settings → Pages` 将 Source 设为 `GitHub Actions`；随后由 `Deploy Documentation` 工作流构建并发布。未启用 Pages 时，该工作流会在 `Setup Pages` 阶段停止。
 
 ## 环境
 
@@ -8,12 +14,12 @@
 
 网络可达性以平台与服务实际要求为准，本指南不要求自动更改系统代理或权限。
 
-## 获取本分支
+## 获取当前主分支
 
-本轮使用隔离工作树 `get_jobs_upstream_sync/`，不切换原运行目录。用户已授权文档复审通过后发布到 `origin/integrate/upstream-36bf5f9`。以下新安装命令须等远程分支可用后执行，并核对交付 commit；中性目录名不要求重命名旧目录：
+本项目日常使用 `main`，此前隔离集成成果已合入该分支。以下命令用于全新目录；已有 checkout 先核对未提交改动、分支与 commit，不自动切换或覆盖原运行目录，中性目录名也不要求重命名旧目录：
 
 ```bash
-git clone --branch integrate/upstream-36bf5f9 https://github.com/liu-qingyuan/get_jobs.git get_jobs_unified
+git clone --branch main https://github.com/liu-qingyuan/get_jobs.git get_jobs_unified
 cd get_jobs_unified
 ```
 
