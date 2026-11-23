@@ -47,7 +47,7 @@ issue 标题、正文、评论和完成摘要默认使用中文。labels、命�
 ## Branch worktree
 
 - 日常工作优先 `main`；仅明确需要隔离时使用其他分支。已有父子 issue 的 Git 契约须由对应规划流程显式确认并保持一致，不能因源码合入 `main` 或切换 worktree 自动改写。
-- 主分支复用主 worktree；显式非主 branch 使用独立 worktree，并通过 exact branch worktree registry 查找。
+- 所有目标 branch（含 `main`）优先通过 exact branch worktree registry 复用已登记的 worktree，不强制迁移到 primary，也不切换或清理其他 worktree。未登记的非主 branch 才按约定创建独立 worktree；未登记的主分支先停止并确认，不擅自切换 primary。
 - provision 只允许普通创建和 fast-forward push，不执行 reset、rebase、force-push、覆盖、随机改路径或自动清理。
 - 每个 worktree 使用独立 `.ralph/` 状态和 OS file lock；完成后保留 branch、worktree 和本地状态，等待维护者显式合并或清理。
 
