@@ -1,0 +1,29 @@
+{
+  "provenance": "Same-origin JSON observed during ordinary anonymous Chrome navigation to each public detail URL. Cross-checked against the rendered job status. Retail site build index.D4zvvLnm.js. Only public job fields retained; recruiter identifier replaced by peer-1. No history or receipt data is in this capture.",
+  "open": {
+    "url": "https://www.offertoday.com/hk/job/ML6h9U9UhH4SBdBuaoOT0Q==",
+    "observedAt": "2026-11-22T12:28:42.631Z",
+    "visibleStatus": "傳送投遞消息",
+    "job": {
+      "jobId": "ML6h9U9UhH4SBdBuaoOT0Q==",
+      "jobName": "AI Engineer",
+      "brandName": "Spiakl Tech Limited",
+      "companyName": "尖刺科技有限公司",
+      "jobStatus": 2,
+      "userId": "peer-1"
+    }
+  },
+  "closed": {
+    "url": "https://www.offertoday.com/hk/job/UrVhklrt58bCQEQXQvykPQ==",
+    "observedAt": "2026-11-22T12:28:48.211Z",
+    "visibleStatus": "已關閉",
+    "job": {
+      "jobId": "UrVhklrt58bCQEQXQvykPQ==",
+      "jobName": "AI Engineer Intern ",
+      "brandName": "ICC (Hong Kong) Limited",
+      "companyName": "智造力（香港）工程顧問有限公司",
+      "jobStatus": 3,
+      "userId": "peer-1"
+    }
+  }
+}

@@ -150,13 +150,14 @@ final class WorkbenchCandidates {
             ObjectNode previous = null;
             for (var existing : store.list(c, "candidate")) if (existing.path("id").asText().equals(key)) previous = (ObjectNode) existing;
             String observedDescription = target.path("description").asText();
-            boolean readComplete = job.path("descriptionComplete").asBoolean() && observedDescription.length() >= 120;
+            boolean availabilityUnknown = source.path("channel").asText().equals("OFFERTODAY") && job.path("available").isNull();
+            boolean readComplete = !availabilityUnknown && job.path("descriptionComplete").asBoolean() && observedDescription.length() >= 120;
             boolean retained = !readComplete && previous != null && previous.path("descriptionComplete").asBoolean();
             if (retained) target.set("description", previous.path("description"));
             // Check both the retained full JD and the new card: neither may hide an excluded condition.
             var decision = service.scope.discoveryCandidate(c, run.path("scopeVersion").asInt(), target, observedDescription);
-            String status = !decision.path("allowed").asBoolean() ? "REFUSED" : !job.path("available").asBoolean(true) ? "EXPIRED" :
-                    readComplete || retained ? "READY" : "INCOMPLETE";
+            String status = !decision.path("allowed").asBoolean() ? "REFUSED" : availabilityUnknown ? "INCOMPLETE" :
+                    !job.path("available").asBoolean(true) ? "EXPIRED" : readComplete || retained ? "READY" : "INCOMPLETE";
             var record = target.put("id", key).put("status", status).put("retrievedAt", retained ? previous.path("retrievedAt").asText() : now())
                     .put("descriptionComplete", readComplete || retained).put("lastReadComplete", readComplete).put("lastSeenAt", now())
                     .put("scopeVersion", run.path("scopeVersion").asInt())
@@ -168,7 +169,9 @@ final class WorkbenchCandidates {
             if (source.path("channel").asText().equals("BOSS")) record.put("platformJobId", BossCandidateReader.jobId(link));
             if (source.path("channel").asText().equals("JOBSDB")) record.put("platformJobId", JobsDbTarget.parse(link).id());
             record.set("reasons", decision.path("reasons"));
-            if (status.equals("INCOMPLETE")) record.putArray("reasons").add("未取得足够完整的 JD；不能用标题或摘要参与匹配/备料");
+            if (status.equals("INCOMPLETE")) record.putArray("reasons").add(availabilityUnknown
+                    ? "本次未能核验 OfferToday 岗位身份或开放状态；历史 JD 不作为当前匹配/备料依据"
+                    : "未取得足够完整的 JD；不能用标题或摘要参与匹配/备料");
             if (status.equals("EXPIRED")) record.putArray("reasons").add("来源报告岗位已失效");
             store.save(c, "candidate", record);
         } catch (WorkbenchException e) { event(run, "INVALID", source, e.getMessage()); }

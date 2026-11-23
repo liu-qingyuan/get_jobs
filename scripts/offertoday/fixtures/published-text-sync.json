@@ -1,0 +1,29 @@
+{
+  "source": {
+    "schema": "/static/proto/chat.CPHUXtPm.proto",
+    "sha256": "187c064a1142be3f0e88cee1d3f3e4982a2dbeed690f04bacd5276d5b15281ec",
+    "parsers": ["protoParser-6yTyLgsg.js", "protoParser-fA1Jz4Nn.js"],
+    "note": "Synthetic wire packets and their lossy decoded values, replayed by both published parsers offline, not actual send receipts."
+  },
+  "matchingSync": {
+    "messageType": 4,
+    "version": 1,
+    "syncMessage": {"clientMessageId": 77, "seq": 101, "messageId": 101}
+  },
+  "mutedSync": {
+    "messageType": 4,
+    "version": 1,
+    "syncMessage": {"clientMessageId": 77, "seq": 101, "messageId": 101, "extend": "{\"isMute\":true}"}
+  },
+  "roundedSync": {
+    "messageType": 4,
+    "version": 1,
+    "syncMessage": {"clientMessageId": 77, "seq": 101, "messageId": 9007199254740992}
+  },
+  "roundedSyncPlatformId": "9007199254740993",
+  "frames": {
+    "matchingSync": [8, 4, 16, 1, 42, 6, 8, 77, 16, 101, 24, 101],
+    "mutedSync": [8, 4, 16, 1, 42, 23, 8, 77, 16, 101, 24, 101, 34, 15, 123, 34, 105, 115, 77, 117, 116, 101, 34, 58, 116, 114, 117, 101, 125],
+    "roundedSync": [8, 4, 16, 1, 42, 13, 8, 77, 16, 101, 24, 129, 128, 128, 128, 128, 128, 128, 16]
+  }
+}

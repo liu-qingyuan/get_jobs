@@ -24,6 +24,8 @@ from report import report as report_event
 ROOT = Path(__file__).resolve().parents[2]
 DETAIL = re.compile(r'/hk/job/([A-Za-z0-9_-]{12,128}={0,2})/?\Z')
 SESSION = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
+# Both published composers use ECMAScript trim() before constructing the text packet.
+_JS_TRIM = '\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
 
 
 class BrowserBlocked(Exception):
@@ -152,8 +154,25 @@ def discover(adapter):
     return {'jobs': jobs, 'note': 'Only currently loaded public jobs; no automatic pagination.'}
 
 
+def _guest_search(playwright, request):
+    module = Path(playwright)
+    if not module.is_absolute() or not module.is_file():
+        raise BrowserBlocked('Anonymous search requires an existing absolute Playwright module path')
+    try:
+        child = subprocess.run(['node', str(Path(__file__).with_name('public-browser.mjs')), str(module)],
+                               input=json.dumps(request), capture_output=True, text=True, timeout=request['readSeconds'])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BrowserBlocked('OfferToday anonymous search did not complete; no retry or login') from exc
+    if len(child.stdout) > 2 * 1024 * 1024:
+        raise BrowserBlocked('OfferToday anonymous search result is too large')
+    result = parse_browser_result(child.stdout, child.returncode)
+    if result['status'] == 'blocked':
+        raise BrowserBlocked(str(result.get('reason', 'Public search unavailable'))[:200])
+    return result
+
+
 def read_candidates(bundle_file):
-    """One already-reserved, read-only page. No reporter, application task or automatic browser attachment."""
+    """One already-reserved read; guest search is opt-in, separate from the send connection."""
     bundle = json.loads(Path(bundle_file).read_text(encoding='utf-8'))
     if not isinstance(bundle, dict) or bundle.get('kind') != 'CANDIDATE_READ':
         raise BrowserBlocked('Not a read-only candidate bundle')
@@ -170,8 +189,13 @@ def read_candidates(bundle_file):
     if not result_path.is_absolute() or result_path.parent.resolve() != Path(bundle_file).resolve().parent or result_path.is_symlink():
         raise BrowserBlocked('Read-only result must stay alongside its task bundle')
     try:
-        browser = ExistingBrowserAdapter(*_connection())
-        result = browser.action('candidate_page', sourceUrl=source['url'], maxJobs=limits['candidates'], cursor=source.get('cursor', ''))
+        request = dict(sourceUrl=source['url'], maxJobs=limits['candidates'], cursor=source.get('cursor', ''),
+                       readSeconds=limits['seconds'])
+        playwright = os.environ.get('OFFERTODAY_PUBLIC_PLAYWRIGHT_MODULE')
+        if playwright and re.fullmatch(r'/hk/search(?:/.*)?', target.path):
+            result = _guest_search(playwright, dict(operation='candidate_page', **request))
+        else:
+            result = ExistingBrowserAdapter(*_connection()).action('candidate_page', **request)
         if not isinstance(result.get('jobs'), list) or len(result['jobs']) > limits['candidates']:
             raise BrowserBlocked('Read-only candidate result exceeded its limit')
     except BrowserBlocked as exc:
@@ -241,6 +265,8 @@ def _validate_bundle(bundle):
     message = _required(snapshot.get('initialMessage'), 'exact approved message')
     if not message.strip() or _hash(message.encode('utf-8')) != snapshot.get('initialMessageSha256'):
         raise BrowserBlocked('Exact approved message hash is missing or changed')
+    if message != message.strip(_JS_TRIM):
+        raise BrowserBlocked('OfferToday removes edge whitespace; review and approve the exact message without it')
     resume = snapshot.get('resume')
     if not isinstance(resume, dict) or resume.get('approved') is not True:
         raise BrowserBlocked('Resume is not approved')

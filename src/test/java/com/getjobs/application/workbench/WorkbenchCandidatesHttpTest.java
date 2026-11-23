@@ -83,6 +83,36 @@ class WorkbenchCandidatesHttpTest {
         }
     }
 
+    @Test void offerTodayUnknownAvailabilityKeepsHistoricalJdButDoesNotMakeItMatchable() throws Exception {
+        var marker = root.resolve("unknown-availability");
+        var command = fake("""
+                from pathlib import Path
+                unknown=Path(%s).exists()
+                job={'url':'%s','company':'Synthetic Co','title':'AI engineer','description': '' if unknown else %s,
+                     'descriptionComplete': not unknown, 'available': None if unknown else True}
+                json.dump({'jobs':[job]},open(b['resultPath'],'w'))
+                """.formatted(json.writeValueAsString(marker.toString()), OFFER, json.writeValueAsString(JD)));
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, command, command.subList(0, 2), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); scope(http, 20, 30);
+            var read = request(); read.withArray("sources").remove(0);
+            postJson(http, "/candidates/discover", read.toString());
+            var previous = getJson(http, "/candidates").at("/jobs/0");
+            assertEquals("READY", previous.path("status").asText());
+            Files.createFile(marker);
+            postJson(http, "/candidates/discover", read.toString());
+            var latest = getJson(http, "/candidates").at("/jobs/0");
+            assertEquals("INCOMPLETE", latest.path("status").asText());
+            assertEquals(JD, latest.path("description").asText());
+            assertFalse(latest.path("lastReadComplete").asBoolean());
+            assertEquals(previous.path("retrievedAt"), latest.path("retrievedAt"));
+            assertTrue(latest.path("reasons").toString().contains("开放状态"));
+            postJson(http, "/candidates/match", "{\"scopeVersion\":1}");
+            assertEquals("INELIGIBLE", getJson(http, "/candidates").at("/jobs/0/analysis/status").asText());
+            assertEquals(0, getJson(http, "/state").at("/scope/usage/outbound").asInt());
+        }
+    }
+
     @Test void pageCheckpointsSurviveRestartAndBudgetRefusalCannotResetUsage() throws Exception {
         String runId; var command = fake("""
                 json.dump({'jobs':[{'url':'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv==' if b['source']['channel']=='OFFERTODAY' else b['source']['url']+'/abc','title':'AI engineer','company':'Synthetic Co',

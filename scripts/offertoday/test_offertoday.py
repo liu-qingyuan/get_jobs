@@ -86,8 +86,29 @@ class DiscoveryCLITest(unittest.TestCase):
             with patch('offertoday._connection', return_value=(root, 'fixture-only')), patch('offertoday.ExistingBrowserAdapter') as browser, patch('builtins.print'):
                 browser.return_value.action.return_value = {'jobs':[], 'cursor':'', 'nextUrl':''}
                 self.assertEqual(0, main(['read-candidates', str(task)]))
-                browser.return_value.action.assert_called_once_with('candidate_page', sourceUrl='https://www.offertoday.com/hk/search?q=fixture', maxJobs=2, cursor='')
+                browser.return_value.action.assert_called_once_with('candidate_page', sourceUrl='https://www.offertoday.com/hk/search?q=fixture', maxJobs=2, cursor='', readSeconds=10)
                 self.assertEqual([], json.loads(result.read_text())['jobs'])
+
+    def test_configured_guest_read_does_not_open_the_saved_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            playwright = root / 'playwright.js'
+            playwright.touch()
+            task, result = root / 'task.json', root / 'result.json'
+            task.write_text(json.dumps({'kind':'CANDIDATE_READ', 'source':{'channel':'OFFERTODAY',
+                'url':'https://www.offertoday.com/hk/search?q=fixture','cursor':''},
+                'limits':{'candidates':2,'seconds':10,'modelTokens':0,'outbound':0}, 'resultPath':str(result)}))
+            guest = subprocess.CompletedProcess([], 0, stdout='{"status":"ok","jobs":[]}', stderr='')
+            with patch.dict(os.environ, {'OFFERTODAY_PUBLIC_PLAYWRIGHT_MODULE':str(playwright)}), \
+                 patch('offertoday._connection', side_effect=AssertionError('Guest search must not consult the saved session')), \
+                 patch('offertoday.subprocess.run', return_value=guest) as launched:
+                self.assertEqual(0, main(['read-candidates', str(task)]))
+            argv = launched.call_args.args[0]
+            self.assertEqual('node', argv[0]); self.assertEqual(str(playwright), argv[-1])
+            request = json.loads(launched.call_args.kwargs['input'])
+            self.assertEqual({'operation':'candidate_page','sourceUrl':'https://www.offertoday.com/hk/search?q=fixture',
+                              'maxJobs':2,'cursor':'','readSeconds':10}, request)
+            self.assertEqual([], json.loads(result.read_text())['jobs'])
 
     def test_connect_explicitly_attaches_extension_and_writes_private_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,6 +279,23 @@ class ReceiptTest(unittest.TestCase):
                 self.bundle.write_text(json.dumps(bundle))
                 self.assertEqual({'status': 'NEEDS_INPUT'}, run(self.bundle, NeverBrowser()))
                 self.assertEqual(['NEEDS_INPUT'], [event['type'] for event in self.events])
+
+    def test_frozen_text_changed_by_native_trim_stops_before_browser_or_claim(self):
+        original = json.loads(self.bundle.read_text())
+
+        class NeverBrowser:
+            def action(self, *args, **kwargs):
+                raise AssertionError('Platform would not send the frozen text verbatim')
+
+        for message in (' ' + self.message, self.message + '\n', '\ufeff' + self.message, self.message + '\u3000'):
+            with self.subTest(message=message):
+                self.events.clear()
+                original['task']['snapshot'].update(initialMessage=message,
+                    initialMessageSha256=hashlib.sha256(message.encode()).hexdigest())
+                self.bundle.write_text(json.dumps(original))
+                self.assertEqual({'status': 'NEEDS_INPUT'}, run(self.bundle, NeverBrowser()))
+                self.assertEqual(['NEEDS_INPUT'], [e['type'] for e in self.events])
+                self.assertIn('whitespace', self.events[0]['message'])
 
     def test_missing_manual_connection_reports_needs_input_before_any_claim(self):
         with patch.dict(os.environ, {'OFFERTODAY_BROWSER_WORKDIR': str(self.root)}, clear=False):
