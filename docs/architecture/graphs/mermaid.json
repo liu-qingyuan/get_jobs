@@ -1,0 +1,12 @@
+{
+  "theme": "default",
+  "layout": "elk",
+  "fontFamily": "sans-serif",
+  "themeVariables": { "fontSize": "18px" },
+  "flowchart": {
+    "useMaxWidth": false,
+    "nodeSpacing": 32,
+    "rankSpacing": 64,
+    "wrappingWidth": 280
+  }
+}

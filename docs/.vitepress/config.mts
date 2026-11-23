@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   lang: 'zh-CN',
   title: 'Get Jobs - 本地求职工作台',
-  description: '国内与港区资料共享、独立简历与单岗审核。默认只扫描，不自动发送图片或重复联系；真实平台待授权验收。',
+  description: '官网、OfferToday、Boss、JobsDB 的本机求职工作台；候选、匹配与备料统一管理，实站读取与外发资格分别验收。',
 
   // GitHub Pages 使用仓库路径，本地开发使用根路径。
   base: process.env.DOCS_BASE || (process.env.GITHUB_ACTIONS ? '/get_jobs/' : '/'),
@@ -19,7 +19,7 @@ export default defineConfig({
 
   head: [
     ['link', { rel: 'icon', href: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🍀</text></svg>' }],
-    ['meta', { name: 'keywords', content: 'Get Jobs, 找工作, 自动投简历, AI打招呼, Boss直聘, 猎聘, 智联招聘, 前程无忧, 开源求职助手' }],
+    ['meta', { name: 'keywords', content: 'Get Jobs, 本机求职工作台, 官网, OfferToday, Boss直聘, JobsDB, 独立简历, 范围策略' }],
     ['meta', { name: 'author', content: 'loks666' }],
     // 不蒜子统计脚本（防刷异步加载）
     ['script', { async: '', src: '//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js' }]
@@ -58,11 +58,24 @@ export default defineConfig({
     // 顶部导航栏
     nav: [
       { text: '首页', link: '/' },
+      { text: '平台能力', link: '/platforms' },
+      {
+        text: '当前架构',
+        items: [
+          { text: '系统上下文', link: '/architecture/c4-context' },
+          { text: '容器与运行结构', link: '/architecture/c4-containers' }
+        ]
+      },
       { text: '本地工作台', link: '/workbench' },
-      { text: '项目介绍', link: '/guide/introduction' },
-      { text: '🚀 快速开始', link: '/guide/quick-start' },
-      { text: '⚙️ 核心配置', link: '/guide/config' },
-      { text: '❓ 常见问题', link: '/guide/faq' },
+      {
+        text: '使用指南',
+        items: [
+          { text: '项目介绍', link: '/guide/introduction' },
+          { text: '快速开始', link: '/guide/quick-start' },
+          { text: '核心配置', link: '/guide/config' },
+          { text: '常见问题', link: '/guide/faq' }
+        ]
+      },
       {
         text: '相关资源',
         items: [
@@ -80,8 +93,16 @@ export default defineConfig({
     // 侧边栏结构化配置
     sidebar: [
       {
-        text: '本地工作台与港区渠道',
+        text: '当前架构',
         items: [
+          { text: '系统上下文', link: '/architecture/c4-context' },
+          { text: '容器与运行结构', link: '/architecture/c4-containers' }
+        ]
+      },
+      {
+        text: '本地工作台与渠道',
+        items: [
+          { text: '多平台能力总览', link: '/platforms' },
           { text: '工作台使用', link: '/workbench' },
           { text: 'OfferToday 接入与限制', link: '/offertoday-v1' },
           { text: 'JobsDB 使用与限制', link: '/jobsdb' }

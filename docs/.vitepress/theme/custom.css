@@ -47,3 +47,13 @@
 .support-codes { display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; text-align: center; }
 .support-codes figure { margin: 0; max-width: 100%; }
 .support-codes img { max-width: 100%; border-radius: 12px; }
+
+/* Keep C4 text at its generated size; small screens pan instead of shrinking it. */
+.architecture-diagram {
+  overflow-x: auto;
+  background: white;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  padding: 16px;
+}
+.vp-doc .architecture-diagram img { max-width: none; }

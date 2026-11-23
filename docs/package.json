@@ -1,11 +1,11 @@
 {
   "name": "getjobs-docs",
   "version": "1.0.0",
-  "description": "Get Jobs AI 找工作助手官方文档",
+  "description": "Get Jobs 本机求职工作台文档",
   "type": "module",
   "scripts": {
     "docs:dev": "vitepress dev",
-    "docs:build": "vitepress build",
+    "docs:build": "vitepress build && node .vitepress/check-content.mjs",
     "docs:preview": "vitepress preview"
   },
   "devDependencies": {

@@ -1,0 +1,40 @@
+---
+title: Get Jobs 当前容器与运行结构 · C4 Level 2
+---
+flowchart LR
+  subgraph workbench["Get Jobs 本机工作台 · Software System（不是 OS 沙箱）"]
+    ui["管理界面<br/>[Container: Next.js / React]<br/>管理浏览器中的页面"]
+    api["本机主程序<br/>[Container: Java 21 / Spring Boot]<br/>同进程职责与串行 Runner"]
+    db[("工作台 SQLite<br/>[Container: SQLite / JDBC]<br/>版本、预算、候选与任务记录")]
+    files["私有文件<br/>[Container: 本机文件存储]<br/>独立附件、任务包与留存证据"]
+    ot["OfferToday Adapter<br/>[Container: Python / Node.js]<br/>Chrome；未验收版本拒绝发送"]
+    jd["JobsDB Adapter<br/>[Container: Python / Scrapling]<br/>独立 Chrome 会话与锁；只读"]
+    ui -->|"管理与轮询 · HTTP / JSON"| api
+    api -->|"事务与 claim · JDBC"| db
+    api -->|"冻结与留存 · 文件 I/O"| files
+    api -->|"有界任务包 · 子进程 / JSON"| ot
+    api -->|"只读任务包 · 子进程 / JSON"| jd
+  end
+
+  command["通用可信命令<br/>[External Container: 本机 CLI]<br/>官网、资料整理、匹配与备料"]
+  project["项目执行命令<br/>[External Container: 另配 CLI]<br/>选定项目、独立目录与本地资源"]
+  verifier["独立验收命令<br/>[External Container: 另配 CLI]<br/>固定目标与产物；回流另获许可"]
+  legacy[("JobsDB 旧账本<br/>[External Container: SQLite]<br/>旧人工 CLI 所有；工作台只读防重")]
+  official["官网 / 外部 ATS<br/>[External System]<br/>可信执行器逐站验证"]
+  offertoday["OfferToday<br/>[External System]<br/>公开找岗通过；自动发送关闭"]
+  boss["Boss<br/>[External System]<br/>只读未完整验收；外发未完整实现"]
+  jobsdb["JobsDB<br/>[External System]<br/>只读未完整验收；外发未完整实现"]
+
+  api -->|"限定任务与结果 · 子进程 / JSON"| command
+  api -->|"项目资源包 · 子进程 / JSON"| project
+  api -->|"独立验证包 · 子进程 / JSON"| verifier
+  api -->|"只读历史与防重 · SQLite"| legacy
+  api -->|"Java Adapter 只读 · Playwright / HTTPS"| boss
+  ot -->|"公开找岗 · Chrome / HTTPS"| offertoday
+  jd -->|"有界列表与详情 · Scrapling / HTTPS"| jobsdb
+  command -->|"能力与授权满足才执行 · HTTPS / 浏览器"| official
+
+  classDef owned fill:#145b91,stroke:#104672,color:#fff
+  classDef external fill:#586575,stroke:#424e5c,color:#fff
+  class ui,api,db,files,ot,jd owned
+  class command,project,verifier,legacy,official,offertoday,boss,jobsdb external

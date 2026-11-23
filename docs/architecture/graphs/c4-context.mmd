@@ -1,0 +1,20 @@
+---
+title: Get Jobs 当前系统上下文 · C4 Level 1
+---
+flowchart TB
+  user["使用者<br/>[Person]<br/>确认资料、独立简历与有界范围"]
+  pages["公开文档站<br/>[External System: GitHub Pages]<br/>免费静态说明，不连接本机数据"]
+  workbench["本机求职工作台<br/>[Software System]<br/>管理候选、材料、范围、项目与回执"]
+  commands["可信本机命令<br/>[External System: 本机 CLI]<br/>官网与材料处理；项目及验收分别配置"]
+  sources["招聘来源（各自独立）<br/>[External Systems]<br/>官网、OfferToday、Boss、JobsDB；资格各异"]
+
+  user -->|"阅读说明 · HTTPS"| pages
+  user -->|"确认与管理 · 本机 HTTP"| workbench
+  workbench -->|"限定任务与资源 · 参数数组 / JSON"| commands
+  workbench -->|"三渠道有界只读 · Adapter / HTTPS"| sources
+  commands -->|"仅合格官网任务 · HTTPS / 浏览器"| sources
+
+  classDef owned fill:#145b91,stroke:#104672,color:#fff
+  classDef external fill:#586575,stroke:#424e5c,color:#fff
+  class workbench owned
+  class user,pages,commands,sources external
