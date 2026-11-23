@@ -100,18 +100,36 @@ final class WorkbenchPreparation {
             var analysis = service.matching.view(c, candidate);
             require(!analysis.path("stale").asBoolean() && analysis.path("status").asText().equals("ANALYSIS_READY"), "先取得当前有依据的匹配；缺口/待核实不进入自动核准");
             for (var finding : analysis.path("findings")) require(Set.of("SUPPORTED", "PARTIAL").contains(finding.path("kind").asText()), "硬性不足或不适用判断不能自动核准");
-            item.put("analysisId", analysis.path("id").asText()); item.set("findings", analysis.path("findings"));
+            item.put("analysisId", analysis.path("id").asText());
             var context = service.materials.matchingContext(c, scope, target);
             require(context.path("questions").isEmpty() && !context.path("resumes").isEmpty(), "适用事实存在冲突/未核实，或缺少适用核准简历");
             target.put("resumeId", context.path("resumes").get(0).path("id").asText());
-            // The AI only receives the selected, applicable material text, never attachment paths or the profile library.
-            item.set("context", context);
+            selectPreparationEvidence(item, context, analysis.path("findings"), scope.path("factIds"));
             var decision = service.scope.preparedDecision(c, scope.path("version").asInt(), target, "PREPARE", true);
             require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
             service.duplicate(c, object().put("id", taskId).put("kind", "APPLICATION").put("url", target.path("url").asText()));
             if (Set.of("OFFERTODAY", "JOBSDB").contains(target.path("channel").asText())) contactFacts(scope, context);
         } catch (WorkbenchException e) { item.put("exception", e.getMessage()); }
         return item;
+    }
+
+    private void selectPreparationEvidence(ObjectNode item, ObjectNode context, JsonNode findings, JsonNode factIds) {
+        var selectedIds = new HashSet<String>();
+        for (var id : factIds) selectedIds.add(id.asText());
+        var selectedFacts = service.json.createArrayNode();
+        var facts = context.path("facts");
+        for (var fact : facts) if (selectedIds.contains(fact.path("id").asText())) selectedFacts.add(fact);
+        if (selectedFacts.size() == facts.size()) item.set("findings", findings);
+        else {
+            // PROJECT_FEEDBACK permits matching only. Any free-form reason can repeat matching-only text,
+            // even without a matching-only citation, so keep only the validated JD quotes and verdicts.
+            var summaries = item.putArray("findings");
+            for (var finding : findings) summaries.addObject().put("kind", finding.path("kind").asText())
+                    .put("requirementQuote", finding.path("requirementQuote").asText())
+                    .put("reason", "匹配与备料范围不同；仅使用本次已选材料").putArray("evidence");
+        }
+        context.set("facts", selectedFacts);
+        item.set("context", context);
     }
 
     private void finish(ObjectNode item, ObjectNode record, ObjectNode proposal) {

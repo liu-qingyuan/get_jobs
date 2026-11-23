@@ -189,6 +189,70 @@ class WorkbenchVerificationHttpTest {
             assertEquals(1, f.getJson(http, "/scope").path("current").path("materials").path("facts").size(), "Feedback must not silently select new execution materials");
         }
     }
+    @Test void matchingFeedbackStaysOutOfPreparationUntilItsFactIsExplicitlySelected() throws Exception {
+        var f = fixtures(); var service = f.projectService(); var analysis = f.analysisCommand();
+        Path script = Path.of(analysis.get(1)), bundle = root.resolve("last-preparation.json");
+        String model = Files.readString(script).replace(" and five years of commercial work. No invented employment history is permitted.", ".")
+                .replace("else:\n    out={'results':[]}", """
+                        elif b['kind']=='MATERIAL_PREPARE':
+                            import pathlib
+                            pathlib.Path(%s).write_text(json.dumps(b))
+                            out={'results':[]}
+                            for j in b['candidates']:
+                                fact=next((x for x in j['facts'] if x.get('evidenceKind')=='LOCAL_PROJECT'),j['facts'][0])
+                                out['results'].append({'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[fact['id']]})
+                        else:
+                            out={'results':[]}""".formatted(f.json.writeValueAsString(bundle.toString())))
+                .replace("f=j['facts'][0]", "f=next((x for x in j['facts'] if x.get('evidenceKind')=='LOCAL_PROJECT'),j['facts'][0])")
+                .replace("gap=j['url'].endswith('gap')", "gap=j['url'].endswith('gap') and f.get('evidenceKind')!='LOCAL_PROJECT'")
+                .replace("'reason':'Confirmed local experience only'", "'reason':f['value']");
+        Files.writeString(script, model);
+        try (var runner = new WorkbenchRunner(service, analysis, List.of(), List.of(), null, successfulExecutor(f), verifier(), "http://127.0.0.1:1", 5)) {
+            var http = f.http(service, runner); var project = f.proposal(http); String id = project.path("id").asText();
+            var resumeResponse = http.perform(multipart("/api/workbench/resumes").param("label", "Fixture baseline")
+                    .param("region", "HK").param("language", "en").param("content", "Baseline assertion, not a personal CV"))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            String resumeId = f.json.readTree(resumeResponse).path("id").asText();
+            f.postJson(http, "/resumes/" + resumeId + "/approve", f.json.createObjectNode());
+            f.grant(http, id);
+            f.postJson(http, "/projects/" + id + "/start", f.json.createObjectNode().put("scopeVersion", 2).put("seconds", 3));
+            var attempt = f.await(http, id, "UNVERIFIED").at("/attempts/0/id").asText();
+            grantVerification(f, http, id, true);
+            f.postJson(http, "/projects/" + id + "/verify", f.json.createObjectNode().put("scopeVersion", 3).put("attemptId", attempt).put("seconds", 3));
+            var current = f.getJson(http, "/state"); var projectFact = current.at("/facts/1");
+            assertEquals("LOCAL_PROJECT", projectFact.path("evidenceKind").asText());
+            var scope = ((ObjectNode) current.at("/scope/current")).put("expectedVersion", 3);
+            scope.putArray("resumeIds").add(resumeId); scope.putArray("transformations").add("REORDER");
+            f.postJson(http, "/scope", scope);
+            var match = f.json.createObjectNode().put("scopeVersion", 4).put("secondsPerBatch", 3).put("modelTokensPerCandidate", 10);
+            match.putArray("candidateIds").add(project.path("candidateId").asText());
+            var matched = f.postJson(http, "/candidates/match", match).at("/jobs/0/analysis");
+            assertEquals("ANALYSIS_READY", matched.path("status").asText(), matched.toPrettyString());
+            assertEquals(projectFact.path("id"), matched.at("/findings/0/evidence/0/id"));
+            var before = f.postJson(http, "/candidates/prepare", match).at("/packages/0");
+            var sent = Files.readString(bundle);
+            assertFalse(sent.contains(projectFact.path("id").asText()), "Unselected matching-only fact must not leave the scope in facts or embedded evidence");
+            assertFalse(sent.contains(projectFact.path("value").asText()), "The matching explanation must not leak the same text");
+            assertEquals("POLICY_APPROVED", before.path("status").asText(), before.toPrettyString());
+            assertFalse(before.at("/snapshot/resume/content").asText().contains(projectFact.path("value").asText()));
+
+            scope.put("expectedVersion", 4).withArray("factIds").add(projectFact.path("id").asText());
+            f.postJson(http, "/scope", scope);
+            f.postJson(http, "/candidates/match", match.put("scopeVersion", 5));
+            f.postJson(http, "/candidates/prepare", match);
+            var state = f.getJson(http, "/state");
+            var after = state.at("/preparations/packages/1");
+            assertEquals("POLICY_APPROVED", after.path("status").asText(), after.toPrettyString());
+            assertEquals(projectFact.path("value"), after.at("/snapshot/resume/content"));
+            assertTrue(after.at("/snapshot/resume/filename").asText().endsWith(".docx"));
+            assertNotEquals(before.at("/snapshot/resume/id"), after.at("/snapshot/resume/id"));
+            var bytes = http.perform(get("/api/workbench/resumes/" + after.at("/snapshot/resume/id").asText() + "/file"))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+            assertEquals(after.at("/snapshot/resume/sha256").asText(), WorkbenchService.hash(bytes));
+            assertTrue(state.path("tasks").isEmpty());
+            assertEquals(0, state.at("/scope/usage/outbound").asInt(-1));
+        }
+    }
     @ParameterizedTest @ValueSource(strings={"RELATIVE_SCRIPT", "RELATIVE_EXECUTABLE", "MODULE", "INLINE"})
     void anExecutorArtifactCannotBecomeTheRelativeIndependentVerifier(String mode) throws Exception {
         var f = fixtures(); var service = f.projectService();
