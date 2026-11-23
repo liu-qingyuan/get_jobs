@@ -71,6 +71,7 @@ browser-data/
 
 # Local agent and JobsDB state
 .ralph/
+.pi/
 AGENTS.md
 .claude/
 .jobsdb/

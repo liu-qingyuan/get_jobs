@@ -98,9 +98,13 @@ class Browser:
         if self.read_only:
             require_read_profile(self.data / 'scrapling-profile')
         from scrapling.fetchers import StealthySession
-        options = {'additional_args': {'service_workers': 'block'}} if self.read_only else {}
+        options = {'no_viewport': True, 'viewport': None, 'screen': None,
+                   'device_scale_factor': None, 'is_mobile': None}
+        if self.read_only:
+            options['service_workers'] = 'block'
         self.session = StealthySession(headless=False, real_chrome=True, google_search=False,
-            user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1, **options)
+            user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1,
+            additional_args=options)
         self.session.__enter__()
         return self
     def __exit__(self, *args):
