@@ -69,7 +69,9 @@ class Browser:
     def __enter__(self):
         from scrapling.fetchers import StealthySession
         self.session = StealthySession(headless=False, real_chrome=True, google_search=False,
-            user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1)
+            user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1,
+            additional_args={'no_viewport': True, 'viewport': None, 'screen': None,
+                             'device_scale_factor': None, 'is_mobile': None})
         self.session.__enter__()
         return self
     def __exit__(self, *args):
