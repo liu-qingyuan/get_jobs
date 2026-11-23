@@ -19,11 +19,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      # Only rerunning deploy must reuse the name from the producing build attempt.
+      artifact_name: ${{ steps.artifact_name.outputs.name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,11 +48,26 @@ jobs:
         run: npm run docs:build
         working-directory: docs
 
+      - name: Name this build artifact
+        id: artifact_name
+        run: echo "name=github-pages-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
+          name: ${{ steps.artifact_name.outputs.name }}
           path: docs/.vitepress/dist
+          retention-days: 1
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build.outputs.artifact_name }}
