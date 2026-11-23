@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "managed": [
+    "scripts/workbench/report.py",
+    "scripts/workbench/test_report.py"
+  ],
+  "tool": ".feature-docs/tool.py",
+  "assets": {
+    ".feature-docs/.gitattributes": "a79691a93b46e49ce460c26ef22afcc03d6eca1e63bf2edbc20e96159510f6c9",
+    ".feature-docs/hooks/pre-commit": "73e40645c23881945d309241194a66970c8170411085642c5c9fc9153b1597e5",
+    ".feature-docs/hooks/pre-push": "e97c8ab886b8b00b90013dcf80757bf0309914f89c05455ba47219a774f8e928",
+    ".feature-docs/run": "fa848bc5fb3b8c7ea9939f1ffec6659d9d61a92298fbd39c7defb867cc3fc37c",
+    ".feature-docs/tool.py": "7a5a1108bd27da287f30dab52dce6a2ff685d5d8ea992d78c4a83ce5fd7ac6b0"
+  }
+}
