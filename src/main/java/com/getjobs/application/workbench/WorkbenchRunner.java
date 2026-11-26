@@ -343,7 +343,9 @@ public final class WorkbenchRunner implements AutoCloseable {
                 var snapshot = task.path("snapshot");
                 Files.createDirectories(directory.resolve("resume"));
                 String resumePath = copyFrozenResume(directory.resolve("resume"), (ObjectNode) snapshot.path("resume"));
-                var dispatch = service.json.createObjectNode().put("kind", "JOBSDB_SINGLE_APPLY").put("attemptId", id)
+                var dispatch = service.json.createObjectNode().put("kind", "JOBSDB_SINGLE_APPLY").put("taskId", id).put("attemptId", id)
+                        .put("stage", "APPLY").put("executionResourceId", task.path("executionResourceId").asText())
+                        .put("jdSha256", WorkbenchService.hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8)))
                         .put("jobId", task.path("jobId").asText()).put("url", task.path("url").asText())
                         .put("resumePath", resumePath).put("resumeSha256", snapshot.path("resume").path("sha256").asText())
                         .put("answersSha256", task.path("answersSha256").asText()).put("profileHash", jobsDbProfileHash())
@@ -358,6 +360,8 @@ public final class WorkbenchRunner implements AutoCloseable {
                     for (String field : List.of("resumeSha256", "answersSha256", "profileHash", "contactHash")) current.set(field, dispatch.path(field));
                     service.store.save(c, "task", current); return null;
                 });
+                // Callback credentials live only in the private run file, never in public task/state.
+                dispatch.put("callbackUrl", bundle.path("callbackUrl").asText()).put("token", token);
                 Files.writeString(file, service.json.writeValueAsString(dispatch));
                 arguments = new ArrayList<>(jobsDbCommand);
                 arguments.add("apply-single"); arguments.add(file.toString()); arguments.add("--data-dir"); arguments.add(service.jobsDbDirectory().toString());
@@ -420,7 +424,7 @@ public final class WorkbenchRunner implements AutoCloseable {
                 if (Files.isRegularFile(path)) value.append('|').append(WorkbenchService.hash(Files.readAllBytes(path)));
             return WorkbenchService.hash(value.toString().getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
-            return WorkbenchService.hash(service.jobsDbDirectory().toString().getBytes(StandardCharsets.UTF_8));
+            throw new WorkbenchException(409, "JobsDB profile 关联元数据不可核验，停止单岗执行");
         }
     }
 

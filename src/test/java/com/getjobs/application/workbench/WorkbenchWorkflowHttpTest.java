@@ -54,7 +54,12 @@ class WorkbenchWorkflowHttpTest {
                     assert hashlib.sha256(pathlib.Path(b['resumePath']).read_bytes()).hexdigest()==s['resume']['sha256']
                     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     def report(kind,action='',proof=None):
-                        req=urllib.request.Request(b['callbackUrl'],json.dumps({'type':kind,'action':action,'message':'Synthetic '+kind,'evidence':json.dumps(proof) if proof else ''}).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
+                        context={'jdSha256':hashlib.sha256(t['description'].encode()).hexdigest(),'accountHash':'c'*64,'sessionHash':'d'*64}
+                        if t['channel']=='OFFERTODAY': context.update(jobId=t['platformJobId'],conversationId='synthetic-'+t['id'])
+                        if (root/'context-change').exists():
+                            change=json.loads((root/'context-change').read_text())
+                            context={} if change=='MISSING' else dict(context,**change)
+                        req=urllib.request.Request(b['callbackUrl'],json.dumps({'type':kind,'action':action,'context':context,'message':'Synthetic '+kind,'evidence':json.dumps(proof) if proof else ''}).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
                         with opener.open(req,timeout=5) as r: assert r.status==200
                     if mode=='fork' and t['company']=='Synthetic b':
                         try: os.kill(int((root/'descendant').read_text()),0)
@@ -185,6 +190,27 @@ class WorkbenchWorkflowHttpTest {
             } else {
                 assertEquals("NEEDS_INPUT", task.path("state").asText()); assertFalse(task.has("outboundClaim")); assertFalse(Files.exists(root.resolve("effects")));
             }
+        } finally { callback.stop(0); }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"accountHash", "sessionHash", "conversationId", "MISSING"})
+    void contactDoesNotAuthorizeCvInAChangedOrUnverifiableAccountSession(String field) throws Exception {
+        Files.writeString(root.resolve("mode"), "AFTER");
+        var service = service(); var command = fake(); var callback = callback(service);
+        var script = Path.of(command.get(1));
+        Files.writeString(script, Files.readString(script).replace("for n in ['a','b']", "for n in ['a']"));
+        try (var runner = new WorkbenchRunner(service, command, command.subList(0, 2), callbackUrl(callback), 10)) {
+            var http = http(service, runner); setup(http, true); offerScope(http, 1);
+            post(http, "/cycles", offerInput(2));
+            await().atMost(Duration.ofSeconds(5)).until(() -> Files.exists(root.resolve("held")));
+            Files.writeString(root.resolve("context-change"), field.equals("MISSING") ? "\"MISSING\"" : json.createObjectNode().put(field, field.equals("conversationId") ? "other-tab" : "f".repeat(64)).toString());
+            Files.writeString(root.resolve("release"), "continue"); idle(runner);
+            var state = getJson(http, "/state"); var task = state.at("/tasks/0");
+            assertEquals("UNKNOWN", task.path("state").asText()); assertTrue(task.has("contactReceipt"));
+            assertFalse(task.has("cvClaim")); assertFalse(task.has("cvReceipt"));
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
+            assertEquals(List.of("TEXT_OR_APPLY"), Files.readAllLines(root.resolve("effects")));
         } finally { callback.stop(0); }
     }
 

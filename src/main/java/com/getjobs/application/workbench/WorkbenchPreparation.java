@@ -92,6 +92,9 @@ final class WorkbenchPreparation {
         return preparationInput(c, candidate, scope, "preparation");
     }
     private ObjectNode preparationInput(Connection c, ObjectNode candidate, ObjectNode scope, String taskId) throws Exception {
+        return preparationInput(c, candidate, scope, taskId, false);
+    }
+    private ObjectNode preparationInput(Connection c, ObjectNode candidate, ObjectNode scope, String taskId, boolean validatingClaim) throws Exception {
         var item = object().put("candidateId", candidate.path("id").asText()).put("rulesVersion", RULES).put("scopeVersion", scope.path("version").asInt());
         var target = candidate.deepCopy(); target.remove(List.of("analysis", "reasons"));
         target.put("transformation", scope.path("transformations").get(0).asText()); item.set("target", target);
@@ -108,7 +111,7 @@ final class WorkbenchPreparation {
             selectPreparationEvidence(item, context, analysis.path("findings"), scope.path("factIds"));
             var decision = service.scope.preparedDecision(c, scope.path("version").asInt(), target, "PREPARE", true);
             require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
-            service.duplicate(c, object().put("id", taskId).put("kind", "APPLICATION").put("url", target.path("url").asText()));
+            service.duplicate(c, object().put("id", taskId).put("kind", "APPLICATION").put("url", target.path("url").asText()), validatingClaim);
             if (Set.of("OFFERTODAY", "JOBSDB").contains(target.path("channel").asText())) contactFacts(scope, context);
         } catch (WorkbenchException e) { item.put("exception", e.getMessage()); }
         return item;
@@ -263,7 +266,14 @@ final class WorkbenchPreparation {
     private ObjectNode check(Connection c, ObjectNode record, String action) throws Exception {
         return check(c, record, action, "preparation");
     }
+    ObjectNode checkClaim(Connection c, ObjectNode record, String taskId) throws Exception {
+        // Only the credential/claim owner calls this: its native ledger UNKNOWN is the fence, not a retry veto.
+        return check(c, record, "PREPARE", taskId, true);
+    }
     ObjectNode check(Connection c, ObjectNode record, String action, String taskId) throws Exception {
+        return check(c, record, action, taskId, false);
+    }
+    private ObjectNode check(Connection c, ObjectNode record, String action, String taskId, boolean validatingClaim) throws Exception {
         var decision = object().put("allowed", false).put("source", "SCOPE_POLICY").put("packageId", record.path("id").asText());
         var reasons = decision.putArray("reasons");
         try {
@@ -271,7 +281,7 @@ final class WorkbenchPreparation {
             var policy = service.scope.executionDecision(c, record.path("scopeVersion").asInt(), (ObjectNode) record.path("target"), action, taskId, action.equals("PREPARE"));
             require(policy.path("allowed").asBoolean(), policy.path("reasons").toString());
             var scope = service.scope.latest(c);
-            var fresh = preparationInput(c, store.get(c, "candidate", record.path("candidateId").asText()), scope, taskId);
+            var fresh = preparationInput(c, store.get(c, "candidate", record.path("candidateId").asText()), scope, taskId, validatingClaim);
             require(!fresh.has("exception") && fingerprint(fresh).equals(record.path("inputKey").asText()), "岗位、匹配或事实依据已变化，须按当前范围重新准备");
             verifyFrozenFile((ObjectNode) record.path("snapshot").path("resume"));
             decision.put("allowed", true); reasons.add("当前材料与策略相符；仍须消费本阶段授权、确认 claim 及渠道能力，不能把本响应用于重试或下一阶段");

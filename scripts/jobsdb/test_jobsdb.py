@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 import jobsdb
 
@@ -33,6 +34,21 @@ class StoreTests(unittest.TestCase):
                 with self.assertRaises(ValueError): a.finish('999','SUBMITTED')
                 a.finish('123','SUBMITTED')
                 self.assertIn('SUBMITTED','\n'.join(b.history()))
+    def test_nonempty_authorization_alone_never_grants_worker_permission(self):
+        import hashlib, json
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp); resume = data/'cv.docx'; resume.write_bytes(b'fixture')
+            task = {'kind':'JOBSDB_SINGLE_APPLY', 'attemptId':'unconfirmed', 'authorizationId':'not-empty',
+                    'url':'https://hk.jobsdb.com/job/123', 'resumePath':str(resume),
+                    'resumeSha256':hashlib.sha256(resume.read_bytes()).hexdigest(), 'answers':{},
+                    'answersSha256':hashlib.sha256(b'{}').hexdigest(), 'resultPath':str(data/'result.json')}
+            class NoPermissionBrowser:
+                def run(self, *_): raise AssertionError('Unconfirmed worker must never open browser')
+            with jobsdb.Store(data/'applications.db') as store:
+                self.assertEqual(2, jobsdb.run_single(task, NoPermissionBrowser(), store, data))
+                self.assertFalse(store.contains('123'))
+            self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads((data/'result.json').read_text())['status'])
+
     def test_cli_unknown_skip_never_starts_browser(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,62 +200,144 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual('NEEDS_INPUT',flow.prepare_automatic(Path('/tmp/cv.docx'),{'questionnaire.lang':['Python']}))
         self.assertIn('Unavailable checkbox',flow.reason)
 
+    def single_task(self, data):
+        import hashlib
+        resume = data/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
+        return {'kind':'JOBSDB_SINGLE_APPLY', 'taskId':'attempt-1', 'attemptId':'attempt-1', 'authorizationId':'auth-1',
+                'executionResourceId':'resource-1', 'stage':'APPLY', 'token':'current-credential', 'jobId':'12345678',
+                'url':self.url, 'resumePath':str(resume), 'resumeSha256':hashlib.sha256(resume.read_bytes()).hexdigest(),
+                'answers':{}, 'answersSha256':hashlib.sha256(b'{}').hexdigest(), 'profileHash':jobsdb.profile_fingerprint(data),
+                'contactHash':'b'*64, 'jdSha256':'e'*64, 'resultPath':str(data/'result.json')}
+
+    def single_browser(self, task, *, observer=True):
+        page = self.page
+        class FixtureBrowser:
+            def solve(self, _): return None
+            def run(self, url, action): page.goto(url); return action(page)
+        browser = FixtureBrowser()
+        if observer:
+            browser.observe_execution_context = lambda page, task: {'jdSha256':task['jdSha256'], 'accountHash':'c'*64, 'sessionHash':'d'*64}
+        return browser
+
+    @contextmanager
+    def permission_server(self, task, data, *, reject=None, wrong_ack=False):
+        import json, threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self):
+                event = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                with sqlite3.connect(data/'applications.db') as db:
+                    claimed = db.execute('SELECT 1 FROM applications WHERE job_id=?', (task['jobId'],)).fetchone() is not None
+                calls.append((event['phase'], claimed))
+                assert self.headers['Authorization'] == 'Bearer ' + task['token']
+                assert event['binding']['authorizationId'] == task['authorizationId']
+                if event['phase'] == reject or event['context']['sessionHash'] != 'd'*64:
+                    self.send_response(409); self.end_headers(); return
+                ack = {'id':task['taskId'], 'state':'UNKNOWN', 'validatedPermission':{
+                    'taskId':task['taskId'], 'attemptId':task['attemptId'], 'authorizationId':task['authorizationId'],
+                    'executionResourceId':task['executionResourceId'], 'action':'APPLY', 'phase':event['phase'], 'status':'CONFIRMED'}}
+                if wrong_ack: ack['validatedPermission']['attemptId'] = 'stale-attempt'
+                self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(ack).encode())
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        task['callbackUrl'] = f'http://127.0.0.1:{server.server_port}/api/workbench/tasks/{task["attemptId"]}/agent-event'
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try: yield calls
+        finally: server.shutdown(); server.server_close(); thread.join()
+
     def test_single_apply_freezes_bindings_claims_once_and_never_retries(self):
         import hashlib, json, tempfile
         self.review_document = '<p>English_abcd.docx</p>'
-        self.start = """<label><input type="radio" name="document-select" value="new">English_abcd.docx</label>
-        <input id="resume-fileFile" type="file">
+        self.start = """<input id="resume-fileFile" type="file" onchange="fetch('/fixture-upload',{method:'POST'}).then(()=>document.body.insertAdjacentHTML('afterbegin','<label><input type=radio name=document-select value=new>English_abcd.docx</label>'))">
         <label><input type="radio" name="coverLetter-method" value="none">Don't include a cover letter</label>
         <button onclick="if(document.querySelector('[value=new]').checked) location.href='/job/12345678/apply/review'">Continue</button>"""
-        class FakeBrowser:
-            def __init__(inner, page): inner.page = page
-            def solve(inner, page): return None
-            def run(inner, url, action): inner.page.goto(url); return action(inner.page)
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            resume = tmp/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
-            result = tmp/'result.json'
-            answers = {}
-            task = {'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': 'attempt-1', 'authorizationId': 'auth-1',
-                    'url': self.url, 'resumePath': str(resume), 'resumeSha256': hashlib.sha256(resume.read_bytes()).hexdigest(),
-                    'answersSha256': hashlib.sha256(json.dumps(answers, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
-                    'answers': answers, 'profileHash': 'profile-hash', 'contactHash': 'contact-hash', 'resultPath': str(result)}
-            with jobsdb.Store(tmp/'applications.db') as store:
-                self.assertEqual(0, jobsdb.run_single(task, FakeBrowser(self.page), store, tmp))
+            tmp = Path(tmp); task = self.single_task(tmp); result = Path(task['resultPath'])
+            uploaded_with_claim = []
+            def upload_route(route):
+                if route.request.url.endswith('/fixture-upload'):
+                    with sqlite3.connect(tmp/'applications.db') as db:
+                        uploaded_with_claim.append(db.execute("SELECT status FROM applications WHERE job_id='12345678'").fetchone())
+                    route.fulfill(body='fixture upload only')
+                else: self.route(route)
+            self.context.route('**/*', upload_route)
+            with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp) as calls:
+                self.assertEqual(0, jobsdb.run_single(task, self.single_browser(task), store, tmp))
+                self.assertEqual([('UNKNOWN',)], uploaded_with_claim, 'Actual fixture upload must observe the already-durable original ledger claim')
+                self.assertEqual(('LAUNCH', False), calls[0])
+                self.assertTrue(all(claimed for phase, claimed in calls if phase in ('UPLOAD', 'SUBMIT')), 'Permanent native claim must precede any disclosure')
+                self.assertEqual('SUBMIT', calls[-1][0])
                 payload = json.loads(result.read_text())
                 self.assertEqual('SUBMITTED', payload['status'])
                 self.assertEqual('12345678', payload['jobId'])
                 self.assertEqual(task['resumeSha256'], payload['resumeSha256'])
                 self.assertEqual(task['answersSha256'], payload['answersSha256'])
-                self.assertEqual('profile-hash', payload['profileHash'])
-                self.assertEqual('contact-hash', payload['contactHash'])
+                self.assertEqual(task['profileHash'], payload['profileHash'])
+                self.assertEqual(task['contactHash'], payload['contactHash'])
                 self.assertTrue(payload['receipt']['textSha256'])
                 self.assertEqual(1, self.submissions)
                 self.assertTrue(store.contains('12345678'))
                 second = dict(task, attemptId='attempt-2', authorizationId='auth-2', resultPath=str(tmp/'second.json'))
-                self.assertEqual(0, jobsdb.run_single(second, FakeBrowser(self.page), store, tmp))
+                self.assertEqual(0, jobsdb.run_single(second, self.single_browser(task), store, tmp))
                 self.assertEqual('SKIPPED', json.loads((tmp/'second.json').read_text())['status'])
                 self.assertEqual(1, self.submissions)
 
-    def test_single_apply_unknown_question_stops_without_claim(self):
+    def test_single_fences_reject_stale_permission_before_upload_or_final_click(self):
+        import json
+        self.review_document = '<p>English_abcd.docx</p>'
+        self.detail = '<h1>Engineer</h1><a href="/job/12345678/apply/review">Quick apply</a>'
+        for phase in ('LAUNCH', 'UPLOAD', 'SUBMIT'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp); task = self.single_task(data)
+                with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data, reject=phase) as calls:
+                    self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, data))
+                    self.assertEqual(phase != 'LAUNCH', store.contains('12345678'))
+                    self.assertEqual(phase, calls[-1][0])
+                    self.assertEqual(0, self.submissions)
+                payload = json.loads(Path(task['resultPath']).read_text())
+                self.assertEqual('STOPPED_BEFORE_EFFECT' if phase == 'LAUNCH' else 'UNKNOWN', payload['status'])
+
+    def test_question_change_autosave_is_fenced_before_modifying_answers(self):
+        import hashlib, json
+        self.start = """<select name="questionnaire.answer" onchange="document.body.dataset.answerDisclosed='yes';fetch('/answer-disclosure',{method:'POST'})">
+        <option value="">Choose</option><option value="yes">Yes</option></select>
+        <button onclick="location.href='/job/12345678/apply/review'">Continue</button>"""
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp); task = self.single_task(data); task['answers'] = {'questionnaire.answer':'Yes'}
+            task['answersSha256'] = hashlib.sha256(json.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            browser = self.single_browser(task)
+            browser.observe_execution_context = lambda page, task: {'jdSha256':task['jdSha256'], 'accountHash':'c'*64,
+                'sessionHash':('f' if page.locator('[name^="questionnaire."]').count() else 'd')*64}
+            with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data):
+                self.assertEqual(2, jobsdb.run_single(task, browser, store, data))
+                self.assertTrue(store.contains('12345678'))
+                self.assertEqual('UNKNOWN', json.loads(Path(task['resultPath']).read_text())['status'])
+                self.assertIsNone(self.page.locator('body').get_attribute('data-answer-disclosed'), 'An onchange autosave must not disclose answers before the fresh session fence')
+                self.assertEqual(0, self.submissions)
+
+    def test_single_permission_requires_attributed_ack_and_verified_context_not_profile_metadata(self):
+        import json
+        for missing_observer in (False, True):
+            with self.subTest(missing_observer=missing_observer), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp); task = self.single_task(data)
+                with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data, wrong_ack=True) as calls:
+                    self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task, observer=not missing_observer), store, data))
+                    self.assertFalse(store.contains('12345678'))
+                    self.assertEqual(0 if missing_observer else 1, len(calls))
+                    self.assertEqual(0, self.submissions)
+                self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads(Path(task['resultPath']).read_text())['status'])
+
+    def test_single_apply_unknown_question_keeps_pre_disclosure_claim_unknown(self):
         import hashlib, json, tempfile
         self.start = """<select name="questionnaire.salary"><option value="">Choose</option><option value="20">$20K</option></select>
         <button onclick="location.href='/job/12345678/apply/review'">Continue</button>"""
-        class FakeBrowser:
-            def __init__(inner, page): inner.page = page
-            def solve(inner, page): return None
-            def run(inner, url, action): inner.page.goto(url); return action(inner.page)
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp); resume = tmp/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
-            answers = {}; result = tmp/'result.json'
-            task = {'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': 'attempt-1', 'authorizationId': 'auth-1',
-                    'url': self.url, 'resumePath': str(resume), 'resumeSha256': hashlib.sha256(resume.read_bytes()).hexdigest(),
-                    'answersSha256': hashlib.sha256(json.dumps(answers, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
-                    'answers': answers, 'resultPath': str(result)}
-            with jobsdb.Store(tmp/'applications.db') as store:
-                self.assertEqual(2, jobsdb.run_single(task, FakeBrowser(self.page), store, tmp))
-                self.assertEqual('NEEDS_INPUT', json.loads(result.read_text())['status'])
-                self.assertFalse(store.contains('12345678'))
+            tmp = Path(tmp); task = self.single_task(tmp); result = Path(task['resultPath'])
+            with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp):
+                self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, tmp))
+                self.assertEqual('UNKNOWN', json.loads(result.read_text())['status'])
+                self.assertTrue(store.contains('12345678'))
                 self.assertEqual(0, self.submissions)
 
     def test_automatic_unknown_question_never_submits(self):

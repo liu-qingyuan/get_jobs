@@ -134,6 +134,8 @@ bash gradlew --no-daemon workbench --console=plain
 - `POST /api/workbench/cycles/{id}/resume`：`{scopeVersion:当前版本}`。必要资料/登录/未知页面解决或累计预算上限补充后恢复同一轮；保留来源游标、候选、缓存与安全任务 ID。相同输入复用匹配/准备（含失败）；事实/范围变化才重新核验，不续签旧冻结快照。已有 RUNNING/UNKNOWN/SUBMITTED 持续去重，UNKNOWN 仅收集/人工核对证据，不重投或继续未开始 CV；其他合格岗位不因此阻塞。暂停/撤销按钮在执行期间可用；已开始动作只允许收集结果，不开始下一阶段。
 - 策略任务写 `approvalSource=SCOPE_POLICY` 和单岗 `POLICY_APPROVED` 事件，绑定 preparation 的精确快照，禁止经旧 `/approve` 转成人审。启动前预扣完整秒数和官网模型 token 上限，失败/无 claim 不退款；OfferToday 执行零模型。任务包携带 `limits`，可信官网 CLI 必须执行 token 上限，否则报告 NEEDS_INPUT；不是 OS/模型沙箱。Runner 对进程实施秒数硬截止。
 - 每个不可逆阶段由当前执行 token 提交 `SUBMITTING` 并明确 `action=APPLY/CONTACT/SEND_CV`；在同一存储事务中重核目标、范围、事实/匹配、冻结文件，消费该阶段外发预算并取得 claim，HTTP 200 才能动作。执行时间已在启动预扣，不在阶段重复扣；外发每阶段各扣一次。官网一次 APPLY；OfferToday CONTACT 之后记录对应 CONTACTED，再独立 SEND_CV claim，最后新 CV 消息必须同岗/attempt/会话且绑定冻结实际附件哈希。旧 claim、文件选中、退出0或只联系都不是成功。
+- task/stage 权限在 launch 前以 `launchPermission` 持久确认，绑定 taskId/attemptId、首阶段、scopeVersion 和完整 `executionResourceId/limits`；阶段 claim 另绑定该 reservation，不把非空 ID、配置 flag 或历史 HTTP 200 当权限。可信 Adapter 在每个阶段的 `SUBMITTING` 交付只读观察的 `context={jdSha256,accountHash,sessionHash}`；聊天渠道另含本岗 `jobId/conversationId`，附件阶段必须与已联系会话一致。缺少经核实的观察能力则停止；profile 元数据 hash 不是账号/会话证明。
+- JobsDB 用现有 `agent-event` 的 `VALIDATE`（`action=APPLY`、`phase=LAUNCH/UPLOAD/SUBMIT`、冻结 `binding` 和新鲜 `context`）复核**已有**已确认 claim，不再扣量或创建 dispatch。首个 LAUNCH 只确认当前只读观察，UPLOAD 前必须已获原账本永久 claim；每次上传/表单继续前 fresh validation，最终 SUBMIT fence 只确认一次。返回的 `validatedPermission` 必须精确匹配当前 task/attempt/stage/resource/phase，失败立即停止。Workbench claim 已落盘但原 ledger 未写、或两边都已写但未获回执的两个崩溃窗口均保留 UNKNOWN，不授予 replay。迟到回执只解析已有 UNKNOWN；原 uncertainty 与后续 resolution 分开留存，不续签权限。
 - 重启不自动外发。原执行子进程有精确 PID/启动时间的私有租约；内置 Python 标准库监护脚本在 POSIX 独立进程组内运行命令，保留组长直到后代全部结束，主命令退出不代表释放。仅有私有 release proof 才清除租约，资源不明时不强杀监护进程并假设成功。重启先确认释放**自己创建的**整组后代，再开放共享槽；PID 复用/身份不明、监护进程异常消失或创建窗口中断时停止，不能杀其他进程或猜测资源已释放；无可靠 POSIX 进程组/Python 环境则明确不可执行。所有旧 callback token 失效；策略任务未登记 claim 的中断保持已知未外发，可恢复；任何已 claim/已联系者保持 UNKNOWN。历史人工任务缺回执仍按旧合同保守 UNKNOWN。
 
 ## Boss 候选与渠道能力（#15：外发仍待核实）
@@ -163,7 +165,7 @@ Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发�
 
 `runtime.jobsDbConfigured` 仅表示只读命令配置，读取时才核验会话；`jobsDbProductionVerified=false`、`jobsDbOutboundSupported=false` 与 `jobsDbCapabilityReason` 仍表示批次/联系/附件外发未核实，`jobsDbSingleJobSupported` 仅表示受控单岗 APPLY 的独立脚本已配置。`POST /jobsdb/apply` 是受控单岗的兼容别名：当前范围必须允许 `JOBSDB`/APPLY、HK、`hk.jobsdb.com` 与已核对联系方式，且准备包为当前范围的 `POLICY_APPROVED`、冻结 DOCX 与附件 SHA256、冻结答案已由用户显式确认。它创建或恢复现有策略 task（`id=attemptId`），经同一个 beginTask 预留执行资源、核对原 `applications.db` 和旧桥接记录并复制/复核冻结附件，再经 task 的 SUBMITTING/APPLY 原子扣一次 outbound 并 claim，调用原 `apply-single` worker，绝不调用旧 batch 或其他渠道。响应保留兼容的 `status/jobId/receipt`，并返回该 task 的 `id/attemptId/state/events`；后续 cycle 按规范岗位复用这一 task 引用，task start 不能重启 UNKNOWN/SUBMITTED。未冻结答案的 JobsDB 整轮仍停下，不推断空答案等于已确认。
 
-`apply-single` 沿用与 #20 相同的 pinned Scrapling solver 自动完成 Cloudflare/CAPTCHA，无需用户确认；登录/二次验证/会话失效仍停止，不导出 Cookie/密码/验证码。它只填本任务冻结的简历与答案；未知表单问题、缺附件、错岗位/联系方式或登录失效都停止且不猜答。到 review 后先向原账本 claim，再只提交一次；缺失、模糊或绑定不匹配的回执记 UNKNOWN，不自动重投，也不把退出码或积极文案当成功。新工作台申请只在现有 task 中保存冻结答案、dispatch 绑定及回执，并由 task events 解释成功/UNKNOWN，不新写 `jobsdb_attempt`；`state.jobsdbAttempts` 只读展示旧桥接历史。旧表的 SUBMITTED/UNKNOWN、原账本同岗记录和新 task 都参与防重，跨入口、整轮和重启不重投。批量 APPLY/CONTACT/SEND_CV 仍返回 `CAPABILITY_UNVERIFIED`；原 Profile 仍可能包含任务外线上资料，本路径证明的是冻结包与回执绑定，而不是线上 Profile 只含本任务资料。
+`apply-single` 沿用与 #20 相同的 pinned Scrapling solver 自动完成 Cloudflare/CAPTCHA，无需用户确认；登录/二次验证/会话失效仍停止，不导出 Cookie/密码/验证码。它只填本任务冻结的简历与答案；未知表单问题、缺附件、错岗位/联系方式或登录失效都停止且不猜答。当前受控 worker 在原账本 claim **之后**才可准备/上传，在上传/披露前及 review 后最终提交前各做 fresh validation，最后只提交一次；缺失、模糊或绑定不匹配的回执记 UNKNOWN，不自动重投，也不把退出码或积极文案当成功。`#33` 仅完成权限/fence Contract 与 fake/HTTP/本地浏览器 fixture 测试：当前内置 JobsDB Browser 未实现经核实的 `observe_execution_context(page, task)`（需只读返回完整 JD SHA256 与账号/会话关联 hash），会在原 ledger claim/上传前以 `CAPABILITY_UNVERIFIED` 停止；OfferToday 策略脚本尚未提供上述观察 context，claim 也会拒绝，不能把旧脚本 fixture 或配置当新权限合同的生产支持。对应真实 Adapter/lead 验收仍由 #28–#30 完成，旧 frozen CLI 文件也不提供可续用凭据，原交互式手工 CLI 不变。新工作台申请只在现有 task 中保存冻结答案、dispatch 绑定及回执，并由 task events 解释成功/UNKNOWN，不新写 `jobsdb_attempt`；`state.jobsdbAttempts` 只读展示旧桥接历史。旧表的 SUBMITTED/UNKNOWN、原账本同岗记录和新 task 都参与防重，跨入口、整轮和重启不重投。批量 APPLY/CONTACT/SEND_CV 仍返回 `CAPABILITY_UNVERIFIED`；原 Profile 仍可能包含任务外线上资料，本路径证明的是冻结包与回执绑定，而不是线上 Profile 只含本任务资料。
 
 #16 的受控单岗实现、假站/临时账本测试与默认页面入口已完成；**2026-11-26 已对真实 JobsDB 岗位 `96118137` 提交一次**：attempt `live-96118137-20261126T194842`，冻结英文 DOCX SHA256 `7196d40e…`，答案 SHA256 `8f7bcc8a…`，结果 `SUBMITTED`，receipt 为 `https://hk.jobsdb.com/job/96118137/apply/success`（text SHA256 `93db7a2d…`），原账本 `96118137|SUBMITTED|2026-11-26 11:49:02`。第一次空答案准备停在 `questionnaire.HK_Q_3217_V_4`，未 claim/submit；带已确认事实答案的运行是唯一 claim/提交，无重投。真实运行使用 direct frozen CLI；**workbench bridge not exercised**。保留原时间戳与 ledger row，不把它补成新受控 task；live workbench package 的 `MATERIAL_EXCEPTION` 是材料结果，不是 MATCH/MISMATCH verdict，不补造 scope/package/预算/claim。CF/CAPTCHA 由 pinned solver 完成，登录沿用现有隔离 `.jobsdb` profile，未导出 Cookie/密码/验证码。生产读取覆盖、批次/联系/附件外发和跨重开仍未验收；局部八图已按本增量更新。
 
@@ -214,8 +216,8 @@ python3 /path/to/scripts/workbench/report.py /private/path/task.json PROGRESS '�
 python3 /path/to/scripts/workbench/report.py /private/path/task.json NEEDS_INPUT '请用户完成验证码'
 # 真正点击提交前必须成功收到 UNKNOWN；报告失败立即停止，不得点击。
 python3 /path/to/scripts/workbench/report.py /private/path/task.json SUBMITTING '提交前登记'
-# 新策略任务必须明确阶段；OfferToday 附件前需独立 --action SEND_CV
-python3 /path/to/scripts/workbench/report.py /private/path/task.json SUBMITTING '策略任务提交前登记' --action APPLY
+# 策略 task 的 claim 需受信 Adapter 以当前 token 直接提交 action + 经核实的 context。
+# 通用 reporter 不提供平台观察，不可独自取得策略 claim；缺少观察时停止。
 # 点击一次，观察明确回执后才报告；未见回执保持 UNKNOWN。
 python3 /path/to/scripts/workbench/report.py /private/path/task.json SUBMITTED '收到成功回执' --evidence '实际申请编号或回执证据'
 # 简历优化任务仅返回草稿，另存未批准版本。

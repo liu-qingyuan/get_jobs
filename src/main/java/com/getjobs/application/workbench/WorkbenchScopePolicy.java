@@ -321,6 +321,7 @@ final class WorkbenchScopePolicy {
 
     /** Reserve the complete executor envelope even if preflight fails without a send. */
     ObjectNode reserveExecutionResources(Connection c, ObjectNode task, ObjectNode record, long seconds, long tokens) throws Exception {
+        require(seconds > 0 && tokens >= 0, "执行资源必须有明确的正秒数上限");
         String action = task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
         var decision = executionDecision(c, record.path("scopeVersion").asInt(), (ObjectNode) record.path("target"), action, task.path("id").asText(), false);
         require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
@@ -329,9 +330,20 @@ final class WorkbenchScopePolicy {
                 && tokens <= scope.path("budgets").path("modelTokens").asLong() - used.path("modelTokens").asLong(), "累计预算不足：单岗执行时间/模型上限；请补充后恢复");
         used.put("seconds", used.path("seconds").asLong() + seconds).put("modelTokens", used.path("modelTokens").asLong() + tokens);
         store.save(c, "scope_usage", used);
-        var reservation = object().put("id", id()).put("taskId", task.path("id").asText()).put("scopeVersion", record.path("scopeVersion").asInt()).put("source", "SCOPE_POLICY").put("createdAt", now());
+        var reservation = object().put("id", id()).put("taskId", task.path("id").asText()).put("attemptId", task.path("attemptId").asText())
+                .put("action", action).put("status", "CONFIRMED").put("scopeVersion", record.path("scopeVersion").asInt()).put("source", "SCOPE_POLICY").put("createdAt", now());
         reservation.putObject("limits").put("seconds", seconds).put("modelTokens", tokens);
         store.save(c, "scope_execution_resource", reservation); return reservation;
+    }
+
+    ObjectNode confirmedExecution(Connection c, ObjectNode task) throws Exception {
+        var resource = store.get(c, "scope_execution_resource", task.path("executionResourceId").asText());
+        require(resource.path("status").asText().equals("CONFIRMED") && resource.path("taskId").equals(task.path("id"))
+                && resource.path("attemptId").equals(task.path("attemptId")) && resource.path("scopeVersion").equals(task.path("scopeVersion"))
+                && resource.equals(task.path("launchPermission")) && resource.path("limits").path("seconds").asLong() > 0
+                && Instant.parse(resource.path("createdAt").asText()).plusSeconds(resource.path("limits").path("seconds").asLong()).isAfter(Instant.now()),
+                "task/stage 执行权限未确认、错绑或资源时限已到期");
+        return resource;
     }
 
     /** Called inside the task claim transaction, never with caller-supplied task identity. */
@@ -346,7 +358,8 @@ final class WorkbenchScopePolicy {
         for (String meter : METERS) used.put(meter, used.path(meter).asLong() + decision.path("cost").path(meter).asLong());
         store.save(c, "scope_usage", used);
         var grant = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", record.path("scopeVersion").asInt())
-                .put("taskId", task.path("id").asText()).put("status", "CONSUMED").put("createdAt", now()).put("consumedAt", now());
+                .put("taskId", task.path("id").asText()).put("attemptId", task.path("attemptId").asText())
+                .put("executionResourceId", task.path("executionResourceId").asText()).put("status", "CONSUMED").put("createdAt", now()).put("consumedAt", now());
         grant.set("request", request); store.save(c, "scope_authorization", grant); return grant;
     }
     private void bindTaskInputs(Connection c, ObjectNode request, String taskId) throws Exception {
@@ -359,6 +372,10 @@ final class WorkbenchScopePolicy {
         var grant = store.get(c, "scope_authorization", id);
         if (!grant.has("result")) {
             grant.set("result", object().put("outcome", outcome).put("evidence", evidence).put("at", now()).put("source", "consumer"));
+            store.save(c, "scope_authorization", grant);
+        } else if (grant.path("result").path("outcome").asText().equals("UNKNOWN") && !outcome.equals("UNKNOWN") && !grant.path("result").has("resolution")) {
+            // Resolves evidence only; keep the original UNKNOWN and never reopen the consumed grant.
+            ((ObjectNode) grant.path("result")).set("resolution", object().put("outcome", outcome).put("evidence", evidence).put("at", now()).put("source", "late-evidence"));
             store.save(c, "scope_authorization", grant);
         }
     }

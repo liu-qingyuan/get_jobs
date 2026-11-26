@@ -104,6 +104,12 @@ OfferToday 在一次范围确认中显式选定已确认的邮箱/电话字段�
 
 停止新写 `jobsdb_attempt`，旧桥接记录只读且加入公共重复检查；不回填或重解释 direct frozen CLI 的历史。`96118137` 保留原 ledger row/时间戳和 “workbench bridge not exercised”；材料 `MATERIAL_EXCEPTION` 不能推断匹配 verdict。此迁移不宣称完成 #33 的权限/证据 fence、#34 的三平台 fake 合同或 #28–#30 的真实外发验收；JobsDB worker 的原账本 claim/防重权威不变。
 
+### #33：收紧现有 permission/fence Contract
+
+本节取代上述受控 worker「review 后才取得原 ledger claim」的顺序：launch 前持久确认 task/attempt/首阶段权限和完整执行资源；SUBMITTING 仍在同一库事务消费独立 stage 预算并绑定 reservation。JobsDB worker 先以当前 credential 确认已有 task/stage claim，再取得原 `applications.db` 永久 UNKNOWN claim，之后才允许上传/表单披露；最终 submit 前再做 fresh validation。现有 agent-event 增加只校验、不创建 dispatch 的 VALIDATE，必须收到精确 task/attempt/stage/resource/phase 确认。两库不是原子事务，中间任一崩溃窗口均保守 UNKNOWN，不以缺一边记录推断可 replay。重启废止凭据；迟到证据可追加原 UNKNOWN 的 resolution，但不复活权限。
+
+scope/JD/材料/答案及只读观察的账号/会话关联均须有效；聊天 CONTACT/SEND_CV 分别核对同一岗位/会话。profile 配置指纹只是关联元数据，不能证明账号身份。当前内置 JobsDB Browser 尚无经核实的 JD/account/session observer，OfferToday 策略脚本尚不交付该观察合同，因此在新 fence 下安全停止；#33 的 fake/HTTP/全路由浏览器测试不是生产能力声明。真实 Adapter 观察与外发验收仍归 #28–#30，不通过配置、旧 frozen CLI 凭据或合成 context 绕过。旧交互式人工 CLI 与已保存 direct CLI 历史不改写。
+
 #16 的受控单岗实现、假站/临时账本测试和默认页面入口已完成；2026-11-26 已对真实 JobsDB 岗位 `96118137` 提交一次，attempt `live-96118137-20261126T194842`，冻结英文 DOCX/答案/Profile/联系方式哈希绑定，结果 `SUBMITTED`，receipt `https://hk.jobsdb.com/job/96118137/apply/success`，原账本 `96118137|SUBMITTED|2026-11-26 11:49:02`。空答案准备先停在未配置的雇主问题、未 claim；带已确认事实答案的运行是唯一提交，无重投。真实运行使用 CLI 冻结任务；live workbench package 为 `MATERIAL_EXCEPTION`，未走 `/jobsdb/apply` 桥接。批次/联系/附件外发、生产读取覆盖和跨重开仍未验收。
 
 ## 独立有界项目（issue #17，父 spec #7）

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -28,6 +30,21 @@ class WorkbenchJobsDbHttpTest {
     final ObjectMapper json = new ObjectMapper();
     static final String FACT = "Built a local Python search project with synthetic data.";
     static final String JD = "Responsibilities: develop and evaluate Python search applications using synthetic data. Requirements: demonstrable Python projects, clear documentation and repeatable evaluation tests.";
+    final java.util.ArrayList<HttpServer> callbacks = new java.util.ArrayList<>();
+    @AfterEach void closeCallbacks() { callbacks.forEach(server -> server.stop(0)); }
+    String callbackUrl(WorkbenchService service) throws Exception {
+        var server = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/workbench/tasks/", exchange -> {
+            try {
+                String id = exchange.getRequestURI().getPath().split("/")[4];
+                var result = service.agentEvent(id, (ObjectNode) json.readTree(exchange.getRequestBody()), exchange.getRequestHeaders().getFirst("Authorization").substring(7));
+                byte[] response = json.writeValueAsBytes(result); exchange.sendResponseHeaders(200, response.length); exchange.getResponseBody().write(response);
+            } catch (Exception e) { exchange.sendResponseHeaders(e instanceof WorkbenchException w ? w.status : 500, -1); }
+            finally { exchange.close(); }
+        });
+        server.start(); callbacks.add(server);
+        return "http://127.0.0.1:" + server.getAddress().getPort() + "/api/workbench";
+    }
     WorkbenchService service() { return new WorkbenchService(root.resolve("state"), root.resolve("legacy"), json); }
     MockMvc http(WorkbenchService service, WorkbenchRunner runner) { return MockMvcBuilders.standaloneSetup(new WorkbenchController(service, runner)).addFilters(new WorkbenchLocalOnlyFilter()).build(); }
     JsonNode post(MockMvc http, String path, ObjectNode body) throws Exception {
@@ -70,8 +87,22 @@ class WorkbenchJobsDbHttpTest {
         String script = """
                 import json,sys
                 if sys.argv[1]=='apply-single':
-                    import hashlib
+                    import hashlib,urllib.request,sqlite3,pathlib
                     t=json.load(open(sys.argv[2]))
+                    context={'jdSha256':t['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}
+                    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    for phase in ('LAUNCH','UPLOAD','SUBMIT'):
+                        if phase=='UPLOAD':
+                            data=pathlib.Path(sys.argv[4]); data.mkdir(exist_ok=True)
+                            with sqlite3.connect(data/'applications.db') as db:
+                                db.execute('CREATE TABLE IF NOT EXISTS applications(job_id TEXT PRIMARY KEY,status TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)')
+                                db.execute('INSERT INTO applications(job_id,status) VALUES(?,?)',(t['jobId'],'UNKNOWN'))
+                        event={'type':'VALIDATE','action':'APPLY','phase':phase,'message':'fixture fence','binding':t,'context':context}
+                        req=urllib.request.Request(t['callbackUrl'],json.dumps(event).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+t['token']})
+                        with opener.open(req,timeout=5) as response:
+                            ack=json.load(response)
+                            assert ack['validatedPermission']['authorizationId']==t['authorizationId']
+                    # fixture_effect
                     sha=hashlib.sha256(json.dumps(t['answers'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
                     assert sha==t['answersSha256'], (sha,t['answersSha256'])
                     r={k:t[k] for k in ('attemptId','authorizationId','url','answersSha256','profileHash','contactHash')}
@@ -525,9 +556,170 @@ class WorkbenchJobsDbHttpTest {
             assertFalse(runner.runtime().path("jobsDbOutboundSupported").asBoolean());
         }
     }
-    @Test void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries() throws Exception {
+    ObjectNode claimedFenceTask(MockMvc http, WorkbenchService service) throws Exception {
+        setup(http, true); post(http, "/cycles", input());
+        await().atMost(Duration.ofSeconds(10)).until(() -> !state(http).at("/runtime/busy").asBoolean());
+        var pkg = state(http).at("/preparations/packages/0");
+        var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+        String id = service.jobsDbTask(request).path("id").asText();
+        service.beginTask(id, "current-worker", "http://127.0.0.1:1/api/workbench", 30);
+        var task = service.agentEvent(id, json.createObjectNode().put("type", "SUBMITTING").put("action", "APPLY").put("message", "Fake stage claim"), "current-worker");
+        var dispatch = json.createObjectNode().put("attemptId", id).put("authorizationId", task.path("outboundClaim").asText())
+                .put("jobId", "12345678").put("url", task.path("url").asText())
+                .put("resumeSha256", task.at("/snapshot/resume/sha256").asText()).put("answersSha256", task.path("answersSha256").asText())
+                .put("profileHash", "a".repeat(64)).put("contactHash", "b".repeat(64));
+        service.store.write(c -> { var stored = service.store.get(c, "task", id); stored.set("jobsDbDispatch", dispatch); service.store.save(c, "task", stored); return null; });
+        return service.task(id);
+    }
+    ObjectNode fenceEvent(JsonNode task, String phase) {
+        var event = json.createObjectNode().put("type", "VALIDATE").put("action", "APPLY").put("phase", phase).put("message", "Fake fresh fence");
+        event.set("binding", task.path("jobsDbDispatch").deepCopy());
+        event.putObject("context").put("jdSha256", WorkbenchService.hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8)))
+                .put("accountHash", "c".repeat(64)).put("sessionHash", "d".repeat(64));
+        return event;
+    }
+    JsonNode agentPost(MockMvc http, String id, ObjectNode event, String token, int expected) throws Exception {
+        var response = http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + id + "/agent-event")
+                .header("Authorization", "Bearer " + token).contentType("application/json").content(event.toString()))
+                .andExpect(status().is(expected)).andReturn().getResponse();
+        return json.readTree(response.getContentAsString(StandardCharsets.UTF_8));
+    }
+    @Test void freshFenceAcknowledgesOnlyTheExistingBoundStageWithoutAnotherClaimOrCharge() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); var task = claimedFenceTask(http, service); String id = task.path("id").asText();
+            var before = state(http).at("/scope/usage");
+            var ack = agentPost(http, id, fenceEvent(task, "LAUNCH"), "current-worker", 200);
+            assertEquals(task.path("outboundClaim"), ack.at("/validatedPermission/authorizationId"));
+            assertEquals("APPLY", ack.at("/validatedPermission/action").asText());
+            assertEquals(id, ack.at("/validatedPermission/attemptId").asText());
+            assertEquals(before, state(http).at("/scope/usage"));
+            assertEquals("UNKNOWN", service.task(id).path("state").asText());
+            agentPost(http, id, fenceEvent(task, "LAUNCH").put("action", "SEND_CV"), "current-worker", 409);
+        }
+    }
+
+    void nativeClaim() throws Exception {
+        Files.createDirectories(root.resolve("legacy"));
+        try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db")); var statement = c.createStatement()) {
+            statement.execute("CREATE TABLE IF NOT EXISTS applications(job_id TEXT PRIMARY KEY,status TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+            statement.execute("INSERT INTO applications(job_id,status) VALUES('12345678','UNKNOWN')");
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"SCOPE", "JD", "FILE", "FACT", "ANSWERS", "ACCOUNT", "SESSION", "MISSING_CONTEXT", "BINDING", "GRANT", "RESOURCE"})
+    void uploadAndSubmitFencesRejectChangedOrUnconfirmedInputs(String mutation) throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); var task = claimedFenceTask(http, service); String id = task.path("id").asText();
+            agentPost(http, id, fenceEvent(task, "LAUNCH"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 409); // no original claim yet
+            nativeClaim();
+            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 200);
+            var event = fenceEvent(task, "SUBMIT");
+            switch (mutation) {
+                case "SCOPE" -> post(http, "/scope/1/pause", json.createObjectNode());
+                case "FILE" -> Files.writeString(service.file((ObjectNode) task.at("/snapshot/resume")), "changed bytes");
+                case "FACT" -> post(http, "/facts", ((ObjectNode) state(http).path("facts").get(0)).deepCopy().put("value", "Changed fact"));
+                case "ACCOUNT", "SESSION" -> ((ObjectNode) event.path("context")).put(mutation.toLowerCase() + "Hash", "f".repeat(64));
+                case "MISSING_CONTEXT" -> event.remove("context");
+                case "BINDING" -> ((ObjectNode) event.path("binding")).put("authorizationId", "different-claim");
+                default -> service.store.write(c -> {
+                    var stored = service.store.get(c, "task", id);
+                    if (mutation.equals("JD")) {
+                        var candidate = service.store.get(c, "candidate", stored.path("candidateId").asText()); candidate.put("description", JD + " Additional mandatory condition."); service.store.save(c, "candidate", candidate);
+                    } else if (mutation.equals("ANSWERS")) {
+                        ((ObjectNode) stored.path("answers")).put("questionnaire.salary", "not confirmed"); service.store.save(c, "task", stored);
+                    } else if (mutation.equals("GRANT")) {
+                        var grant = service.store.get(c, "scope_authorization", stored.path("outboundClaim").asText()); grant.put("attemptId", "other-attempt"); service.store.save(c, "scope_authorization", grant);
+                    } else {
+                        var resource = service.store.get(c, "scope_execution_resource", stored.path("executionResourceId").asText()); resource.put("status", "UNCONFIRMED"); service.store.save(c, "scope_execution_resource", resource);
+                    }
+                    return null;
+                });
+            }
+            agentPost(http, id, event, "current-worker", 409);
+            assertEquals("UNKNOWN", service.task(id).path("state").asText());
+            assertEquals(1, state(http).at("/scope/usage/outbound").asInt());
+            assertFalse(service.task(id).at("/fences/APPLY").has("SUBMIT"));
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bothDatabaseCrashWindowsInvalidateTheWorkerAndNeverReplay(boolean platformClaimed) throws Exception {
+        var service = service(); ObjectNode task;
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); task = claimedFenceTask(http, service);
+            agentPost(http, task.path("id").asText(), fenceEvent(task, "LAUNCH"), "current-worker", 200);
+            if (platformClaimed) { nativeClaim(); agentPost(http, task.path("id").asText(), fenceEvent(task, "UPLOAD"), "current-worker", 200); }
+        }
+        var recovered = service();
+        try (var runner = new WorkbenchRunner(recovered, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(recovered, runner); String id = task.path("id").asText();
+            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 403);
+            agentPost(http, id, json.createObjectNode().put("type", "SUBMITTING").put("action", "APPLY").put("message", "no replay"), "current-worker", 403);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + id + "/start")).andExpect(status().isConflict());
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", task.path("candidateId").asText()).put("preparationId", task.path("packageId").asText()).put("answersConfirmed", true); request.putObject("answers");
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
+            assertEquals("UNKNOWN", recovered.task(id).path("state").asText());
+            assertEquals(1, state(http).path("tasks").size());
+            assertEquals(1, state(http).at("/scope/usage/outbound").asInt());
+        }
+    }
+
+    @Test void lateEvidenceResolvesOnlyTheExistingUnknownWithoutRenewingPermissionOrDispatching() throws Exception {
+        var service = service(); ObjectNode task; JsonNode usage;
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); task = claimedFenceTask(http, service); String id = task.path("id").asText();
+            agentPost(http, id, fenceEvent(task, "LAUNCH"), "current-worker", 200); nativeClaim();
+            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "SUBMIT"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "SUBMIT"), "current-worker", 409); // not a second click permission
+            service.processEnded(id); usage = state(http).at("/scope/usage");
+        }
+        var recovered = service();
+        try (var runner = new WorkbenchRunner(recovered, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(recovered, runner); String id = task.path("id").asText();
+            var receipt = ((ObjectNode) task.path("jobsDbDispatch")).deepCopy().put("status", "SUBMITTED");
+            receipt.putObject("receipt").put("url", "https://hk.jobsdb.com/job/12345678/apply/success").put("textSha256", "a".repeat(64));
+            post(http, "/tasks/" + id + "/events", json.createObjectNode().put("type", "SUBMITTED").put("message", "Late fixture evidence, never a send").put("evidence", receipt.toString()));
+            assertEquals("SUBMITTED", recovered.task(id).path("state").asText());
+            assertEquals(usage, state(http).at("/scope/usage")); assertFalse(runner.runtime().path("busy").asBoolean());
+            var grant = recovered.store.write(c -> recovered.store.get(c, "scope_authorization", task.path("outboundClaim").asText()));
+            assertEquals("UNKNOWN", grant.at("/result/outcome").asText(), "Preserve the original uncertainty history");
+            assertEquals("SUCCEEDED", grant.at("/result/resolution/outcome").asText());
+            agentPost(http, id, fenceEvent(task, "SUBMIT"), "current-worker", 403);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + id + "/start")).andExpect(status().isConflict());
+        }
+    }
+
+    @Test void launchPermissionIsConfirmedAndBoundToTheTaskStageAndRealResourceEnvelope() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var pkg = state(http).at("/preparations/packages/0");
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+            String id = service.jobsDbTask(request).path("id").asText();
+            long before = state(http).at("/scope/usage/seconds").asLong();
+            var bundle = service.beginTask(id, "current-worker", "http://127.0.0.1:1/api/workbench");
+            var permission = bundle.path("task").path("launchPermission");
+            assertEquals("CONFIRMED", permission.path("status").asText());
+            assertEquals(id, permission.path("taskId").asText());
+            assertEquals(id, permission.path("attemptId").asText());
+            assertEquals("APPLY", permission.path("action").asText());
+            assertEquals(bundle.at("/task/executionResourceId"), permission.path("id"));
+            assertEquals(30, bundle.at("/limits/seconds").asLong(), "Never default a worker reservation to one second");
+            assertEquals(before + 30, state(http).at("/scope/usage/seconds").asLong());
+            assertEquals(0, state(http).at("/scope/usage/outbound").asLong(), "Launch resource and outbound accounting are separate");
+        }
+    }
+
+    @Test void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
             var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http);
@@ -563,7 +755,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void aliasAndTaskStartRaceKeepsOneTaskAndEffectAcrossCyclesAndRestart() throws Exception {
         var service = service(); var command = reader();
         Path script = Path.of(command.get(1));
-        Files.writeString(script, Files.readString(script).replace("import hashlib", """
+        Files.writeString(script, Files.readString(script).replace("# fixture_effect", """
                 import hashlib,pathlib,time
                 root=pathlib.Path(__file__).parent
                 with (root/'effects').open('a') as effect: effect.write('APPLY\\n')
@@ -572,7 +764,7 @@ class WorkbenchJobsDbHttpTest {
                 """.stripIndent().replace("\n", "\n    ")));
         ObjectNode request;
         String taskId;
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, "http://127.0.0.1:1", 10);
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, callbackUrl(service), 10);
              var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
@@ -674,7 +866,7 @@ class WorkbenchJobsDbHttpTest {
 
     @Test void nonAsciiAnswersUseTheSameCanonicalHashAsThePythonCli() throws Exception {
         var service = service();
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
             var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
@@ -690,7 +882,7 @@ class WorkbenchJobsDbHttpTest {
 
     @Test void mismatchedReceiptIsUnknownAndCannotBeRetriedAsSuccess() throws Exception {
         var service = service();
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(true), null, "http://127.0.0.1:1", 10)) {
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(true), null, callbackUrl(service), 10)) {
             var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);

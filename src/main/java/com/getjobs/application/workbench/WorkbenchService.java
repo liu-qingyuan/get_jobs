@@ -305,6 +305,9 @@ public final class WorkbenchService {
         if (config.has("cycleId")) task.set("cycleId", config.path("cycleId"));
         task.put("secondsPerJob", config.path("secondsPerJob").asInt(30)).put("modelTokensPerJob", config.path("modelTokensPerJob").asInt(1000));
         if (task.path("channel").asText().equals("JOBSDB")) {
+            if (confirmedAnswers == null && !task.path("snapshot").equals(record.path("snapshot"))) {
+                task.remove(java.util.List.of("answers", "answersSha256", "answersConfirmed"));
+            }
             if (confirmedAnswers != null) {
                 task.set("answers", confirmedAnswers.deepCopy());
                 task.put("answersSha256", answersHash(confirmedAnswers)).put("answersConfirmed", true);
@@ -362,9 +365,10 @@ public final class WorkbenchService {
         return hash(json.writeValueAsString(sorted).getBytes(StandardCharsets.UTF_8));
     }
 
-    void duplicate(Connection c, ObjectNode task) throws Exception {
+    void duplicate(Connection c, ObjectNode task) throws Exception { duplicate(c, task, false); }
+    void duplicate(Connection c, ObjectNode task, boolean validatingClaim) throws Exception {
         if (!task.path("kind").asText().equals("APPLICATION")) return;
-        if (legacy.attempted(task.path("url").asText())) throw new WorkbenchException(409, "JobsDB 原账本已有此岗位的提交记录，禁止重复申请");
+        if (!validatingClaim && legacy.attempted(task.path("url").asText())) throw new WorkbenchException(409, "JobsDB 原账本已有此岗位的提交记录，禁止重复申请");
         for (var old : store.list(c, "jobsdb_attempt")) {
             if (!Set.of("SUBMITTED", "UNKNOWN").contains(old.path("status").asText())) continue;
             String oldUrl = old.path("url").asText();
@@ -389,7 +393,7 @@ public final class WorkbenchService {
         });
     }
 
-    ObjectNode beginTask(String id, String token, String callback) { return beginTask(id, token, callback, 1); }
+    ObjectNode beginTask(String id, String token, String callback) { return beginTask(id, token, callback, 30); }
     ObjectNode beginTask(String id, String token, String callback, long timeout) {
         return store.write(c -> {
             long seconds = timeout;
@@ -414,6 +418,7 @@ public final class WorkbenchService {
                 long tokens = task.path("channel").asText().equals("OFFICIAL") ? task.path("modelTokensPerJob").asLong(1000) : 0;
                 var resources = scope.reserveExecutionResources(c, task, record, seconds, tokens);
                 task.put("executionResourceId", resources.path("id").asText()); task.set("executionLimits", resources.path("limits"));
+                task.set("launchPermission", resources.deepCopy());
             }
             if (!task.path("kind").asText().equals("CHECK")) verifyResume((ObjectNode) task.path("snapshot").path("resume"));
             task.put("executionSeconds", seconds);
@@ -442,7 +447,7 @@ public final class WorkbenchService {
                 if (expected.isEmpty() || token == null || !MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), hash(token.getBytes(StandardCharsets.UTF_8)).getBytes(StandardCharsets.UTF_8)))
                     throw new WorkbenchException(403, "任务执行凭据无效");
             }
-            String type = choice(input, "type", Set.of("PROGRESS", "NEEDS_INPUT", "FAILED", "SUBMITTING", "SUBMITTED", "CONTACTED", "CV_DELIVERED", "EMPLOYER_STATUS", "DRAFT"));
+            String type = choice(input, "type", Set.of("PROGRESS", "NEEDS_INPUT", "FAILED", "SUBMITTING", "VALIDATE", "SUBMITTED", "CONTACTED", "CV_DELIVERED", "EMPLOYER_STATUS", "DRAFT"));
             String message = text(input, "message", 12000, true);
             String evidence = text(input, "evidence", 6000, false);
             String state = task.path("state").asText();
@@ -452,6 +457,10 @@ public final class WorkbenchService {
                 if (task.path("channel").asText().equals("OFFERTODAY") && !task.has("packageId")) task.put("attemptId", id());
             }
             switch (type) {
+                case "VALIDATE" -> {
+                    require(source.equals("agent"), "fresh validation 仅接受当前执行器凭据，不允许人工事件授予 dispatch");
+                    validateExecution(c, task, input);
+                }
                 case "SUBMITTING" -> {
                     boolean cvStage = task.has("packageId") && task.path("channel").asText().equals("OFFERTODAY") && input.path("action").asText().equals("SEND_CV");
                     require(task.path("kind").asText().equals("APPLICATION") && (cvStage
@@ -460,9 +469,11 @@ public final class WorkbenchService {
                     duplicate(c, task);
                     if (task.has("packageId")) {
                         require(source.equals("agent"), "策略任务仅接受当前执行器的动作 claim");
+                        scope.confirmedExecution(c, task);
                         var record = store.get(c, "preparation", task.path("packageId").asText());
                         String action = cvStage ? "SEND_CV" : task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
                         require(input.path("action").asText().equals(action), "请明确请求当前不可逆动作的 claim");
+                        if (!task.path("channel").asText().equals("JOBSDB")) bindExecutionContext(task, input.path("context"));
                         var decision = preparation.check(c, record, action, id);
                         require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
                         var grant = scope.claimExecution(c, task, record, action);
@@ -493,6 +504,7 @@ public final class WorkbenchService {
                     require(!task.path("channel").asText().equals("OFFERTODAY"), "OfferToday 须分别登记联系及简历送达回执，不能用打招呼记录代替投递");
                     require(task.path("kind").asText().equals("APPLICATION") && state.equals("UNKNOWN") && !evidence.isBlank(), "只有已登记提交且有明确回执的申请才能记录已投递");
                     if (task.path("channel").asText().equals("JOBSDB") && task.has("packageId")) {
+                        require(task.at("/fences/APPLY").has("SUBMIT"), "未确认本次最终提交 fence，不能以 worker 自述记成功");
                         var receipt = json.readTree(evidence);
                         var dispatch = task.path("jobsDbDispatch");
                         for (String field : java.util.List.of("attemptId", "authorizationId", "jobId", "url", "resumeSha256", "answersSha256", "profileHash", "contactHash"))
@@ -537,6 +549,50 @@ public final class WorkbenchService {
         });
     }
 
+    /** Rechecks a live, already-claimed stage. It never mints permission or replays a dispatch. */
+    private void validateExecution(Connection c, ObjectNode task, ObjectNode input) throws Exception {
+        require(task.has("packageId") && task.path("state").asText().equals("UNKNOWN"), "只能核验当前已 claim 的阶段，不能重试或复活任务");
+        String action = choice(input, "action", Set.of("APPLY", "CONTACT", "SEND_CV"));
+        String claimId = task.path(action.equals("SEND_CV") ? "cvClaim" : "outboundClaim").asText();
+        require(!claimId.isEmpty(), "此 task/stage 没有已确认 claim");
+        var resource = scope.confirmedExecution(c, task);
+        var grant = store.get(c, "scope_authorization", claimId);
+        require(grant.path("status").asText().equals("CONSUMED") && !grant.has("result")
+                && grant.path("taskId").equals(task.path("id")) && grant.path("attemptId").equals(task.path("attemptId"))
+                && grant.path("executionResourceId").equals(resource.path("id")) && grant.path("request").path("action").asText().equals(action), "权限未确认、已结束或 task/attempt/stage 绑定不符");
+        var record = store.get(c, "preparation", task.path("packageId").asText());
+        var decision = preparation.checkClaim(c, record, task.path("id").asText());
+        require(decision.path("allowed").asBoolean() && record.path("snapshot").equals(task.path("snapshot")), "当前冻结输入已失效：" + decision.path("reasons"));
+        String phase = choice(input, "phase", Set.of("LAUNCH", "UPLOAD", "SUBMIT"));
+        var fences = task.withObject("/fences/" + action);
+        require(!fences.has("SUBMIT") && (phase.equals("LAUNCH") ? !fences.has("LAUNCH") : fences.has("LAUNCH")), "阶段已完成或缺少本次 launch 确认，不授权 replay");
+        if (phase.equals("SUBMIT")) require(fences.has("UPLOAD"), "最终提交前尚未确认 disclosure fence");
+        if (task.path("channel").asText().equals("JOBSDB")) {
+            require(action.equals("APPLY") && task.path("answersConfirmed").asBoolean()
+                    && answersHash((ObjectNode) task.path("answers")).equals(task.path("answersSha256").asText()), "答案未确认或已变化");
+            var dispatch = task.path("jobsDbDispatch");
+            for (String field : java.util.List.of("attemptId", "authorizationId", "jobId", "url", "resumeSha256", "answersSha256", "profileHash", "contactHash"))
+                require(dispatch.hasNonNull(field) && dispatch.path(field).equals(input.path("binding").path(field)), "worker 冻结输入绑定不符：" + field);
+            if (!phase.equals("LAUNCH")) require(legacy.attempted(task.path("url").asText()), "原 ledger 尚未取得上传前永久 claim");
+        }
+        require(task.has("observedExecutionContext") || phase.equals("LAUNCH"), "必须先绑定本次只读观察");
+        bindExecutionContext(task, input.path("context"));
+        fences.put(phase, now());
+        task.set("validatedPermission", json.createObjectNode().put("taskId", task.path("id").asText()).put("attemptId", task.path("attemptId").asText())
+                .put("authorizationId", claimId).put("executionResourceId", resource.path("id").asText()).put("action", action).put("phase", phase).put("status", "CONFIRMED"));
+    }
+
+    private void bindExecutionContext(ObjectNode task, com.fasterxml.jackson.databind.JsonNode context) {
+        require(context.isObject() && context.path("jdSha256").asText().equals(hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8))), "观察的 JD 已变化或无法核验");
+        for (String field : java.util.List.of("accountHash", "sessionHash")) require(context.path(field).asText().matches("[a-f0-9]{64}"), "缺少已核实账号/会话关联，必须停止");
+        if (task.path("channel").asText().equals("OFFERTODAY")) {
+            require(context.path("jobId").equals(task.path("platformJobId")) && !context.path("conversationId").asText().isBlank(), "观察的岗位/会话缺失或错绑");
+            if (task.has("contactReceipt")) require(context.path("conversationId").equals(task.path("contactReceipt").path("conversationId")), "附件阶段会话已变化");
+        }
+        if (task.has("observedExecutionContext")) require(task.path("observedExecutionContext").equals(context), "JD/account/session 已变化，旧权限不能继续");
+        else task.set("observedExecutionContext", context.deepCopy());
+    }
+
     private ObjectNode offerTodayReceipt(ObjectNode task, String evidence) throws Exception {
         require(task.path("channel").asText().equals("OFFERTODAY") && task.path("kind").asText().equals("APPLICATION"), "此回执仅适用于 OfferToday 单岗申请");
         ObjectNode receipt;
@@ -550,6 +606,7 @@ public final class WorkbenchService {
         require(!attempt.isEmpty() && text(receipt, "attemptId", 100, true).equals(attempt), "回执不属于本次执行");
         require(attempt.equals(task.path("claimedAttemptId").asText()), "本次执行尚未成功登记提交前占位；进程退出导致的 UNKNOWN 不能代替占位");
         text(receipt, "conversationId", 300, true);
+        if (task.has("packageId")) require(receipt.path("conversationId").equals(task.path("observedExecutionContext").path("conversationId")), "回执不是本次观察/dispatch 的同一会话");
         text(receipt, "messageId", 300, true);
         text(receipt, "proof", 3000, true);
         return receipt;
@@ -609,7 +666,7 @@ public final class WorkbenchService {
         task.put("updatedAt", now());
     }
     private String instructions(ObjectNode task) throws Exception {
-        String policy = task.has("packageId") ? "策略任务：必须执行任务 limits 的总秒数/模型 token 上限，否则返回 NEEDS_INPUT；不无限重试。每次不可逆动作必须取得新的 SUBMITTING HTTP 200，reporter 用 --action APPLY/CONTACT/SEND_CV，JSON 必须含 action。官网只允许一次 APPLY；OfferToday 首次文字 CONTACT，收到 CONTACTED 的 HTTP 200 后，附件前再次以 SEND_CV claim，拒绝立即停止。旧 claim 不授权下一阶段或重试。不得选择不同材料、目标或消息；仅收集已开始动作的结果。\\n" : "";
+        String policy = task.has("packageId") ? "策略任务：必须执行任务 limits 的总秒数/模型 token 上限，否则返回 NEEDS_INPUT；不无限重试。每次不可逆动作必须取得新的 SUBMITTING HTTP 200，受信 Adapter 直接以当前 token POST JSON，必须含 action=APPLY/CONTACT/SEND_CV 和只读核实的 context={jdSha256,accountHash,sessionHash}，聊天另含 jobId/conversationId；缺少观察能力立即停止，不能编造 hash 或用 profile 元数据冒充账号/会话证明。通用 reporter 不提供平台观察，不能独自获得策略 claim。官网只允许一次 APPLY；OfferToday 首次文字 CONTACT，收到 CONTACTED 的 HTTP 200 后，附件前再次以 SEND_CV claim，拒绝立即停止。旧 claim 不授权下一阶段或重试。不得选择不同材料、目标或消息；仅收集已开始动作的结果。\\n" : "";
         if (task.path("channel").asText().equals("JOBSDB") && task.has("packageId")) {
             return "JobsDB 受控单岗 task：仅由现有 Runner 调用 apply-single；taskId 即 attemptId。冻结附件与已确认答案不允许扩大；未知问题停止。原 applications.db 保留平台 claim/防重权威；缺少绑定成功回执保持 UNKNOWN，不重投。不能把此上下文当成独立 CLI 的授权或官网 AI 指令。\\n"
                     + json.writerWithDefaultPrettyPrinter().writeValueAsString(publicTask(task));
