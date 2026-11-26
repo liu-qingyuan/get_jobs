@@ -53,8 +53,13 @@ def main():
         if leader.poll() is not None:
             raise RuntimeError('Group leader disappeared before controlled cleanup')
         # The still-live leader owns this exact private group; never signal a recycled PID/group.
+        # On an explicit stop, some channel supervisors put their browser worker in its own session
+        # and need up to two seconds to reap that group. Never SIGKILL the outer group before that
+        # inner grace expires, or the surviving worker keeps the profile lock while this monitor
+        # writes its release proof. A normally finished command has no such worker and needs only
+        # the short group teardown, so successful executions are not delayed.
         os.killpg(leader.pid, signal.SIGTERM)
-        time.sleep(0.2)
+        time.sleep(3 if stopping else 0.2)
         os.killpg(leader.pid, signal.SIGKILL)
         leader.wait()
         while active_group(leader.pid):

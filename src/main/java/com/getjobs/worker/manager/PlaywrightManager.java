@@ -9,6 +9,7 @@ import com.microsoft.playwright.*;
 import com.microsoft.playwright.options.Cookie;
 import com.microsoft.playwright.options.WaitUntilState;
 import com.microsoft.playwright.options.LoadState;
+import com.microsoft.playwright.options.SameSiteAttribute;
 import jakarta.annotation.PreDestroy;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +21,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -109,8 +112,13 @@ public class PlaywrightManager {
 
     // Boss 登录态 Cookie：出现任意一个即视为已登录
 
-    // 持久化上下文的用户数据目录，登录态直接落在这里
-    private static final Path USER_DATA_DIR = Paths.get(System.getProperty("user.dir"), "browser-data");
+    // 持久化上下文的用户数据目录，登录态直接落在这里。
+    // 可用 -Dbrowser.user-data-dir=/absolute/profile 覆盖，避免从不同 cwd 启动时误用其它副本的 profile。
+    private static final Path USER_DATA_DIR = Paths.get(System.getProperty("browser.user-data-dir",
+            Paths.get(System.getProperty("user.dir"), "browser-data").toString()));
+    // Playwright 的 persistent context 在跨进程重启时不会可靠保留会话 cookie（无 Expires 的登录 cookie）。
+    // 这是本机私有 profile 内的 storageState 快照，不导出、不进入通用资料；用于恢复会话级登录。
+    private static final Path AUTH_STATE = USER_DATA_DIR.resolve("boss-auth-state.json");
 
     // 平台URL常量
     private static final String BOSS_URL = "https://www.zhipin.com";
@@ -341,6 +349,7 @@ public class PlaywrightManager {
                 browserClosed = true;
                 log.warn("检测到浏览器已关闭，下次操作会自动重新初始化");
             });
+            restoreAuthState();
             log.info("✓ Chrome已启动（持久化上下文: {}）", USER_DATA_DIR);
             log.info("✓ BrowserContext已创建（所有平台共享）");
 
@@ -1701,6 +1710,7 @@ public class PlaywrightManager {
         // 登录成功时保存 Cookie 到数据库（仅 boss 平台）
         if ("boss".equals(platform)) {
             saveBossCookiesToDatabase("login success");
+            saveAuthState();
         }
     }
 
@@ -1805,6 +1815,8 @@ public class PlaywrightManager {
         log.info("开始关闭Playwright管理器...");
 
         try {
+            // 先保存私有的会话快照，再关闭页面/上下文
+            saveAuthState();
             // 关闭所有页面
             if (bossPage != null) {
                 bossPage.close();
@@ -1843,10 +1855,96 @@ public class PlaywrightManager {
     /** The persistent profile path; this accessor does not start or inspect the browser. */
     public Path profileDirectory() { return USER_DATA_DIR; }
 
+    /** Restore the private session snapshot before pages load; cookies are sufficient for Boss's login token. */
+    private void restoreAuthState() {
+        if (!Files.isRegularFile(AUTH_STATE)) return;
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode root = mapper.readTree(Files.readString(AUTH_STATE));
+            List<Cookie> cookies = new ArrayList<>();
+            for (JsonNode value : root.path("cookies")) {
+                Cookie cookie = new Cookie(value.path("name").asText(), value.path("value").asText())
+                        .setDomain(value.path("domain").asText()).setPath(value.path("path").asText())
+                        .setHttpOnly(value.path("httpOnly").asBoolean(false)).setSecure(value.path("secure").asBoolean(false));
+                if (value.path("expires").isNumber()) cookie.setExpires(value.path("expires").asDouble());
+                if (value.hasNonNull("sameSite")) {
+                    cookie.setSameSite(switch (value.path("sameSite").asText().toLowerCase(Locale.ROOT)) {
+                        case "strict" -> SameSiteAttribute.STRICT;
+                        case "lax" -> SameSiteAttribute.LAX;
+                        case "none" -> SameSiteAttribute.NONE;
+                        default -> null;
+                    });
+                }
+                cookies.add(cookie);
+            }
+            if (!cookies.isEmpty()) context.addCookies(cookies);
+            for (JsonNode origin : root.path("origins")) {
+                String originUrl = origin.path("origin").asText();
+                if (!isZhipinOrigin(originUrl)) continue;
+                JsonNode items = origin.path("localStorage");
+                if (!items.isArray() || items.isEmpty()) continue;
+                var values = new java.util.LinkedHashMap<String, String>();
+                for (JsonNode item : items) values.put(item.path("name").asText(), item.path("value").asText());
+                String itemsJson = mapper.writeValueAsString(values);
+                String originJson = mapper.writeValueAsString(originUrl);
+                context.addInitScript("(() => { if (location.origin !== " + originJson + ") return; const items = "
+                        + itemsJson + "; for (const [k,v] of Object.entries(items)) { try { localStorage.setItem(k,v); } catch (e) {} } })();");
+            }
+            log.info("已恢复 Boss 私有登录态快照");
+        } catch (Exception e) {
+            log.warn("恢复 Boss 私有登录态失败: {}", e.getMessage());
+        }
+    }
+
+    /** Save the app-owned session snapshot. The file stays inside the private profile and is never logged. */
+    private void saveAuthState() {
+        if (context == null || browserClosed) return;
+        try {
+            Path temporary = AUTH_STATE.resolveSibling(AUTH_STATE.getFileName() + ".tmp");
+            context.storageState(new BrowserContext.StorageStateOptions().setPath(temporary));
+            Files.move(temporary, AUTH_STATE, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.setPosixFilePermissions(AUTH_STATE, PosixFilePermissions.fromString("rw-------"));
+            } catch (UnsupportedOperationException ignored) { }
+            log.info("已保存 Boss 私有登录态快照");
+        } catch (Exception e) {
+            log.warn("保存 Boss 私有登录态失败: {}", e.getMessage());
+        }
+    }
+
+    private static boolean isZhipinOrigin(String value) {
+        try {
+            String host = java.net.URI.create(value).getHost();
+            return host != null && (host.equalsIgnoreCase("zhipin.com")
+                    || host.toLowerCase(Locale.ROOT).endsWith(".zhipin.com"));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     /** 检查Playwright是否已初始化 */
     public boolean isInitialized() {
         return playwright != null && context != null && bossPage != null
                 && !browserClosed && !bossPage.isClosed();
+    }
+
+    /**
+     * Show only an already managed Boss page. Workbench checkpoints never run the general initializer,
+     * because it opens other platforms and performs legacy profile/cookie setup.
+     */
+    public boolean showExistingBossPageForUserAction() {
+        return callOnPlaywright(() -> {
+            try {
+                if (!isInitialized()) return false;
+                bossPage.waitForTimeout(1);
+                if (!isInitialized()) return false;
+                bossPage.bringToFront();
+                return true;
+            } catch (RuntimeException unavailable) {
+                browserClosed = true;
+                return false;
+            }
+        });
     }
 
     /**
@@ -1942,6 +2040,7 @@ public class PlaywrightManager {
         // 只有状态真正发生变化时才更新和通知
         if (previousStatus == null || previousStatus != isLoggedIn) {
             loginStatus.put(platform, isLoggedIn);
+            if (isLoggedIn && "boss".equals(platform)) saveAuthState();
 
             // Status observation is read-only. Explicit login owns navigation;
             // monitoring must not navigate or click after an access restriction.

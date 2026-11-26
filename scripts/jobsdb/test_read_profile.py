@@ -2,7 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import jobsdb
 
@@ -15,17 +15,28 @@ class ReadProfileTests(unittest.TestCase):
         self.profile = self.data / 'scrapling-profile'
         (self.profile / 'Default').mkdir(parents=True)
 
-    def refused(self, reason):
+    def refused(self, reason, *, resume=False):
         with patch('scrapling.fetchers.StealthySession', side_effect=AssertionError('must not launch')):
             with self.assertRaisesRegex(RuntimeError, reason):
-                with jobsdb.Browser(self.data, read_only=True):
+                with jobsdb.Browser(self.data, read_only=True, allow_existing_worker=resume):
                     self.fail('Must refuse before browser startup')
 
     def test_dangling_worker_link_is_state_not_proof_of_absence(self):
         worker = self.profile / 'Default/Service Worker'
         worker.symlink_to(self.data / 'absent-worker')
         self.refused('existing Service Worker state')
+        self.refused('profile metadata unavailable', resume=True)
         self.assertTrue(worker.is_symlink())
+
+    def test_resume_accepts_only_a_real_worker_directory(self):
+        worker = self.profile / 'Default/Service Worker'
+        worker.mkdir()
+        session = MagicMock()
+        session.__enter__.return_value = session
+        with patch('scrapling.fetchers.StealthySession', return_value=session):
+            with jobsdb.Browser(self.data, read_only=True, allow_existing_worker=True):
+                pass
+        session.__enter__.assert_called_once()
 
     def test_profile_and_child_links_are_not_followed(self):
         outside = self.data / 'outside'

@@ -18,11 +18,19 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final List<String> jobsDbCommand;
     private final List<String> projectCommand;
     private final List<String> verifierCommand;
+    private record PendingCandidateRead(ObjectNode bundle) { }
     private final WorkbenchCandidates.Reader bossReader;
     private final WorkbenchConnections connections;
+    private final Map<String, PendingCandidateRead> pendingCandidateReads = new ConcurrentHashMap<>();
+    private final Map<String, ObjectNode> resumedCandidateReads = new ConcurrentHashMap<>();
     private final WorkbenchCandidates.Reader candidateReader = new WorkbenchCandidates.Reader() {
         @Override public void checkConnection(String channel) { connections.requireRead(channel); }
+        @Override public void checkConnection(String channel, String resumeReadId) { connections.requireRead(channel); }
         @Override public ObjectNode read(ObjectNode bundle) throws Exception { return readCandidatePage(bundle); }
+        @Override public boolean awaitUserAction(WorkbenchCandidates.UserAction action) throws Exception {
+            if (action.channel().equals("BOSS")) return bossReader != null && bossReader.awaitUserAction(action);
+            return action.channel().equals("JOBSDB") && awaitJobsDbUserAction(action);
+        }
     };
     private final String callback;
     private final long timeoutSeconds;
@@ -385,14 +393,38 @@ public final class WorkbenchRunner implements AutoCloseable {
     private ObjectNode readCandidatePage(ObjectNode bundle) throws Exception {
         if (closed || Thread.currentThread().isInterrupted()) throw new WorkbenchException(409, "执行器已停止");
         String channel = bundle.path("source").path("channel").asText();
+        String resumeReadId = bundle.path("resumeReadId").asText();
+        boolean jobsDb = channel.equals("JOBSDB");
+        if (jobsDb && !resumeReadId.isBlank()) {
+            bundle.put("readAttemptId", resumeReadId);
+            var resumed = resumedCandidateReads.remove(resumeReadId);
+            if (resumed != null) {
+                if (resumed.path("userActionRequired") instanceof ObjectNode action) {
+                    var required = jobsDbUserAction(action, bundle, true);
+                    pendingCandidateReads.put(required.interactionId(), new PendingCandidateRead(bundle.deepCopy()));
+                    throw required;
+                }
+                return resumed;
+            }
+            pendingCandidateReads.putIfAbsent(resumeReadId, new PendingCandidateRead(bundle.deepCopy()));
+            throw new WorkbenchCandidates.UserActionRequired(resumeReadId, jobsDbUserActionUrl(bundle.path("userActionUrl").asText(), bundle),
+                    "JobsDB 要求用户在可见浏览器完成平台验证或登录", bundle.path("limits").path("seconds").asInt());
+        }
+        if (jobsDb && connections.status(channel) == WorkbenchConnections.Status.USER_ACTION_REQUIRED) {
+            String interactionId = UUID.randomUUID().toString();
+            bundle.put("readAttemptId", interactionId).put("userActionUrl", bundle.path("source").path("url").asText());
+            pendingCandidateReads.put(interactionId, new PendingCandidateRead(bundle.deepCopy()));
+            throw new WorkbenchCandidates.UserActionRequired(interactionId, bundle.path("userActionUrl").asText(),
+                    "JobsDB 现有会话需在可见浏览器完成平台验证或登录；严格只读守卫不会被放宽",
+                    bundle.path("limits").path("seconds").asInt());
+        }
         connections.requireRead(channel);
         if (channel.equals("BOSS")) {
             if (bossReader == null) throw new WorkbenchException(409, "Boss 只读来源未连接本副本已授权会话；不会新建登录态或回退官网 AI");
             ((ObjectNode) bundle.path("limits")).put("seconds", Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong()));
             return bossReader.read(bundle);
         }
-        boolean offerToday = bundle.path("source").path("channel").asText().equals("OFFERTODAY");
-        boolean jobsDb = bundle.path("source").path("channel").asText().equals("JOBSDB");
+        boolean offerToday = channel.equals("OFFERTODAY");
         var readerCommand = jobsDb ? jobsDbCommand : offerToday ? offerTodayCommand : command;
         if (readerCommand.isEmpty()) throw new WorkbenchException(409,
                 jobsDb ? "JobsDB 未配置独立脚本/会话；不会回退官网 AI 或创建登录态" : offerToday ? "OfferToday 未配置或没有已授权会话；不会新建登录态" : "尚未配置通用官网只读执行器");
@@ -403,6 +435,7 @@ public final class WorkbenchRunner implements AutoCloseable {
         long seconds = Math.min(timeoutSeconds, bundle.path("limits").path("seconds").asLong());
         ((ObjectNode) bundle.path("limits")).put("seconds", seconds);
         bundle.put("resultPath", result.toString());
+        if (jobsDb) bundle.put("readAttemptId", UUID.randomUUID().toString());
         Files.writeString(file, service.json.writeValueAsString(bundle));
         try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
         catch (UnsupportedOperationException ignored) { }
@@ -411,20 +444,257 @@ public final class WorkbenchRunner implements AutoCloseable {
             arguments = new ArrayList<>(readerCommand); arguments.add("read-candidates"); arguments.add(file.toString());
             if (jobsDb) { arguments.add("--data-dir"); arguments.add(service.jobsDbDirectory().toString()); }
         } else arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
-        Process child = null;
         try {
-            child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("read.log").toFile()));
+            var child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("read.log").toFile()));
             child.getOutputStream().close();
             if (!child.waitFor(seconds, TimeUnit.SECONDS)) throw new WorkbenchException(409, "只读读取时间预算耗尽；保留断点");
-            if (child.exitValue() != 0 || !Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024)
-                throw new WorkbenchException(409, "只读来源未返回有效结果；检查会话、版本或本机执行器日志");
-            var parsed = service.json.readTree(Files.readString(result));
-            if (!(parsed instanceof ObjectNode output)) throw new WorkbenchException(409, "只读来源结果格式无效");
+            if (child.exitValue() != 0) throw new WorkbenchException(409, "只读来源未返回有效结果；检查会话、版本或本机执行器日志");
+            var output = candidateOutput(result);
             if (output.has("exception")) throw new WorkbenchException(409, WorkbenchService.text(output, "exception", 1000, true));
+            if (jobsDb && output.path("userActionRequired") instanceof ObjectNode action) {
+                var required = jobsDbUserAction(action, bundle, false);
+                pendingCandidateReads.put(required.interactionId(), new PendingCandidateRead(bundle.deepCopy()));
+                throw required;
+            }
             return output;
         } finally {
             releaseProcess();
         }
+    }
+
+    private boolean awaitJobsDbUserAction(WorkbenchCandidates.UserAction action) throws Exception {
+        var pending = reconstructPendingCandidateRead(action);
+        if (pending == null) pending = pendingCandidateReads.get(action.interactionId());
+        if (resumedCandidateReads.containsKey(action.interactionId())) {
+            pendingCandidateReads.remove(action.interactionId());
+            return true;
+        }
+        if (pending == null || jobsDbCommand.isEmpty()) return false;
+        Path directory = service.store.root.resolve("runs").resolve("candidates-resume-" + UUID.randomUUID());
+        Files.createDirectories(directory);
+        Path file = directory.resolve("task.json"), result = directory.resolve("result.json");
+        var bundle = pending.bundle().deepCopy();
+        int bundleSeconds = bundle.path("limits").path("seconds").asInt(-1);
+        WorkbenchService.require(bundleSeconds >= 0 && action.remainingSeconds() >= 0, "JobsDB 持久断点剩余时间不匹配");
+        int persistedSeconds = Math.min(bundleSeconds, action.remainingSeconds());
+        ((ObjectNode) bundle.path("limits")).put("seconds", persistedSeconds);
+        if (persistedSeconds == 0) {
+            var output = service.json.createObjectNode();
+            output.putObject("userActionRequired").put("interactionId", action.interactionId()).put("targetUrl", action.actionUrl())
+                    .put("remainingSeconds", 0).put("message", "JobsDB 中断的严格读取已耗尽本页时间预算；不重置预算");
+            resumedCandidateReads.put(action.interactionId(), output);
+            pendingCandidateReads.remove(action.interactionId());
+            return true;
+        }
+        bundle.put("resumeReadId", action.interactionId()).put("readAttemptId", action.interactionId())
+                .put("userActionUrl", jobsDbUserActionUrl(action.actionUrl(), bundle)).put("resultPath", result.toString());
+        Files.writeString(file, service.json.writeValueAsString(bundle));
+        try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
+        catch (UnsupportedOperationException ignored) { }
+        markPendingResumeRun(action.interactionId(), directory.getFileName().toString());
+        var arguments = new ArrayList<>(jobsDbCommand);
+        arguments.add("resume-read"); arguments.add(file.toString()); arguments.add("--data-dir"); arguments.add(service.jobsDbDirectory().toString());
+        try {
+            var child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("read.log").toFile()));
+            child.getOutputStream().close();
+            Long strictStartedAt = null; boolean strictExpired = false;
+            while (!child.waitFor(100, TimeUnit.MILLISECONDS)) {
+                if (strictStartedAt == null) strictStartedAt = strictReadStartedAt(result, action.interactionId());
+                if (strictStartedAt != null && System.currentTimeMillis() - strictStartedAt >= persistedSeconds * 1000L) {
+                    stopProcess(child); strictExpired = true; break;
+                }
+                if (closed || Thread.currentThread().isInterrupted()) throw new InterruptedException("JobsDB 人工步骤已停止");
+            }
+            if (!strictExpired && strictStartedAt != null
+                    && System.currentTimeMillis() - strictStartedAt >= persistedSeconds * 1000L) strictExpired = true;
+            if (strictExpired) {
+                var output = service.json.createObjectNode();
+                output.putObject("userActionRequired").put("interactionId", action.interactionId()).put("targetUrl", action.actionUrl())
+                        .put("remainingSeconds", 0).put("message", "JobsDB 严格续读达到本页硬截止；不接受迟到结果或重置预算");
+                jobsDbUserAction((ObjectNode) output.path("userActionRequired"), bundle, true);
+                markPendingResumeRun(action.interactionId(), null);
+                resumedCandidateReads.put(action.interactionId(), output);
+                pendingCandidateReads.remove(action.interactionId());
+                return true;
+            }
+            if (child.exitValue() != 0) {
+                var output = recoveredJobsDbOutput(action.interactionId(), persistedSeconds, result, bundle, false);
+                if (output == null) throw new WorkbenchException(409, "JobsDB 用户步骤未完成；保留同一读取断点，不自动破解或重试");
+                markPendingResumeRun(action.interactionId(), null);
+                resumedCandidateReads.put(action.interactionId(), output);
+                pendingCandidateReads.remove(action.interactionId());
+                return true;
+            }
+            var output = candidateOutput(result);
+            WorkbenchService.require(!output.has("exception") && (output.path("jobs").isArray() || output.path("userActionRequired") instanceof ObjectNode),
+                    "JobsDB 用户步骤完成后未返回可核验只读结果；保留断点");
+            if (output.path("jobs").isArray()) requireStrictReadCompletion(output, bundle, action.interactionId(), persistedSeconds, result);
+            if (output.path("userActionRequired") instanceof ObjectNode nextAction) jobsDbUserAction(nextAction, bundle, true);
+            markPendingResumeRun(action.interactionId(), null);
+            resumedCandidateReads.put(action.interactionId(), output);
+            pendingCandidateReads.remove(action.interactionId());
+            return true;
+        } finally {
+            releaseProcess();
+        }
+    }
+
+    private Long strictReadStartedAt(Path result, String interactionId) throws Exception {
+        if (!Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024) return null;
+        try {
+            var parsed = service.json.readTree(Files.readString(result));
+            if (!(parsed instanceof ObjectNode output) || !(output.path("readAttemptInProgress") instanceof ObjectNode running)) return null;
+            WorkbenchService.require(interactionId.equals(WorkbenchService.text(running, "interactionId", 120, true)),
+                    "JobsDB 严格读取进度身份不匹配");
+            var started = running.path("startedAtEpochMillis");
+            WorkbenchService.require(started.isIntegralNumber() && started.asLong() > 0 && started.asLong() <= System.currentTimeMillis(),
+                    "JobsDB 严格读取进度时间无效");
+            return started.asLong();
+        } catch (com.fasterxml.jackson.core.JsonProcessingException partialWrite) {
+            return null;
+        }
+    }
+
+    private void requireStrictReadCompletion(ObjectNode output, ObjectNode bundle, String interactionId, int budgetSeconds, Path result) throws Exception {
+        var completion = output.path("readAttemptCompleted");
+        WorkbenchService.require(completion instanceof ObjectNode,
+                "JobsDB 严格读取结果缺少可核验完成时间；保留断点");
+        var completed = (ObjectNode) completion;
+        WorkbenchService.require(interactionId.equals(WorkbenchService.text(completed, "interactionId", 120, true)),
+                "JobsDB 严格读取完成身份不匹配");
+        String expectedTarget = jobsDbUserActionUrl(WorkbenchService.text(bundle, "userActionUrl", 3000, true), bundle);
+        WorkbenchService.require(expectedTarget.equals(WorkbenchService.text(completed, "targetUrl", 3000, true)),
+                "JobsDB 严格读取完成目标不匹配");
+        WorkbenchService.require(completed.path("budgetSeconds").isIntegralNumber()
+                        && completed.path("budgetSeconds").asInt() == budgetSeconds && budgetSeconds > 0,
+                "JobsDB 严格读取完成预算不匹配");
+        var started = completed.path("startedAtEpochMillis"); var finished = completed.path("completedAtEpochMillis");
+        Path published = result.resolveSibling(result.getFileName() + ".published");
+        WorkbenchService.require(Files.isRegularFile(published) && !Files.isSymbolicLink(published) && Files.size(published) == 64
+                        && WorkbenchService.hash(Files.readAllBytes(result)).equals(Files.readString(published)),
+                "JobsDB 严格读取结果缺少与落盘字节绑定的发布证据；保留断点");
+        long now = System.currentTimeMillis(); long durableAt = Files.getLastModifiedTime(published).toMillis();
+        WorkbenchService.require(started.isIntegralNumber() && finished.isIntegralNumber() && started.asLong() > 0
+                        && finished.asLong() >= started.asLong() && finished.asLong() <= now
+                        && finished.asLong() - started.asLong() < budgetSeconds * 1000L
+                        && durableAt + 999L >= started.asLong() && durableAt - started.asLong() < budgetSeconds * 1000L,
+                "JobsDB 严格读取结果超过本页硬截止；拒绝迟到或未及时持久化的结果且不重置预算");
+    }
+
+    private ObjectNode recoveredJobsDbOutput(String interactionId, int currentSeconds, Path result, ObjectNode bundle,
+            boolean allowCompletedOutput) throws Exception {
+        if (!Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024) return null;
+        var parsed = service.json.readTree(Files.readString(result));
+        if (!(parsed instanceof ObjectNode output)) return null;
+        if (output.path("readAttemptInProgress") instanceof ObjectNode running) {
+            WorkbenchService.require(interactionId.equals(WorkbenchService.text(running, "interactionId", 120, true)),
+                    "JobsDB 中断的严格读取身份不匹配");
+            long now = System.currentTimeMillis();
+            var started = running.path("startedAtEpochMillis");
+            WorkbenchService.require(started.isIntegralNumber() && started.asLong() > 0 && started.asLong() <= now,
+                    "JobsDB 中断的严格读取时间无效");
+            long elapsed = Math.max(1L, (now - started.asLong() + 999L) / 1000L);
+            int remaining = Math.max(0, currentSeconds - (int) Math.min(currentSeconds, elapsed));
+            output = service.json.createObjectNode();
+            output.putObject("userActionRequired").put("interactionId", interactionId)
+                    .put("targetUrl", WorkbenchService.text(running, "targetUrl", 3000, false))
+                    .put("remainingSeconds", remaining)
+                    .put("message", remaining == 0 ? "JobsDB 严格续读中断且本页时间预算已耗尽；不重置预算"
+                            : "JobsDB 严格续读中断；保留扣减后的预算并重新呈现同一用户断点");
+            jobsDbUserAction((ObjectNode) output.path("userActionRequired"), bundle, true);
+            return output;
+        }
+        if (!allowCompletedOutput || output.has("exception")) return null;
+        if (output.path("userActionRequired") instanceof ObjectNode nextAction) {
+            jobsDbUserAction(nextAction, bundle, true);
+            return output;
+        }
+        if (!output.path("jobs").isArray()) return null;
+        requireStrictReadCompletion(output, bundle, interactionId, currentSeconds, result);
+        return output;
+    }
+
+    private void markPendingResumeRun(String interactionId, String resumeRunId) {
+        service.store.write(c -> {
+            int matches = 0;
+            for (var run : service.store.list(c, "candidate_run")) for (var row : run.path("sources")) {
+                if (!(row.path("pendingRead") instanceof ObjectNode pending)
+                        || !pending.path("interactionId").asText().equals(interactionId)) continue;
+                if (resumeRunId == null) pending.remove("resumeRunId"); else pending.put("resumeRunId", resumeRunId);
+                service.store.save(c, "candidate_run", (ObjectNode) run); matches++;
+            }
+            WorkbenchService.require(matches == 1, "JobsDB 持久断点不存在或不唯一");
+            return null;
+        });
+    }
+
+    private PendingCandidateRead reconstructPendingCandidateRead(WorkbenchCandidates.UserAction action) throws Exception {
+        var current = service.scope.workspace().path("current");
+        return service.store.write(c -> {
+            PendingCandidateRead found = null;
+            for (var run : service.store.list(c, "candidate_run")) for (var row : run.path("sources")) {
+                if (!(row instanceof ObjectNode source) || !(source.path("pendingRead") instanceof ObjectNode saved)
+                        || !saved.path("interactionId").asText().equals(action.interactionId())) continue;
+                WorkbenchService.require(found == null && source.path("channel").asText().equals(action.channel())
+                        && source.path("url").asText().equals(action.sourceUrl())
+                        && saved.path("userActionUrl").asText(source.path("url").asText()).equals(action.actionUrl())
+                        && saved.path("limits").path("seconds").asInt(-1) == action.remainingSeconds()
+                        && saved.path("scopeVersion").asInt(-1) == current.path("version").asInt(-2)
+                        && current.path("status").asText().equals("ACTIVE"), "JobsDB 持久断点身份或当前范围不匹配");
+                var bundle = service.json.createObjectNode().put("kind", "CANDIDATE_READ")
+                        .put("scopeVersion", saved.path("scopeVersion").asInt())
+                        .put("readAttemptId", action.interactionId()).put("userActionUrl", action.actionUrl());
+                bundle.set("source", saved.path("target").deepCopy());
+                bundle.set("limits", saved.path("limits").deepCopy());
+                String resumeRunId = saved.path("resumeRunId").asText();
+                if (!resumeRunId.isBlank()) {
+                    WorkbenchService.require(resumeRunId.matches("candidates-resume-[A-Za-z0-9-]{1,80}"), "JobsDB 持久续读目录身份无效");
+                    Path result = service.store.root.resolve("runs").resolve(resumeRunId).resolve("result.json");
+                    var recovered = recoveredJobsDbOutput(action.interactionId(), saved.path("limits").path("seconds").asInt(), result, bundle, true);
+                    if (recovered != null) {
+                        ((ObjectNode) saved.path("limits")).put("seconds", bundle.path("limits").path("seconds").asInt());
+                        resumedCandidateReads.put(action.interactionId(), recovered);
+                    }
+                    saved.remove("resumeRunId");
+                    service.store.save(c, "candidate_run", (ObjectNode) run);
+                }
+                found = new PendingCandidateRead(bundle);
+            }
+            if (found != null) pendingCandidateReads.putIfAbsent(action.interactionId(), found);
+            return found;
+        });
+    }
+
+    private WorkbenchCandidates.UserActionRequired jobsDbUserAction(ObjectNode action, ObjectNode bundle, boolean remainingRequired) {
+        String interactionId = WorkbenchService.text(action, "interactionId", 120, true);
+        WorkbenchService.require(interactionId.equals(bundle.path("readAttemptId").asText()), "JobsDB 人工断点身份不匹配");
+        String message = WorkbenchService.text(action, "message", 500, true);
+        String actionUrl = jobsDbUserActionUrl(WorkbenchService.text(action, "targetUrl", 3000, false), bundle);
+        Integer remaining = null;
+        if (action.has("remainingSeconds")) {
+            var value = action.path("remainingSeconds");
+            WorkbenchService.require(value.isIntegralNumber() && value.asInt() >= 0
+                    && value.asInt() <= bundle.path("limits").path("seconds").asInt(), "JobsDB 人工断点剩余时间无效");
+            remaining = value.asInt();
+            ((ObjectNode) bundle.path("limits")).put("seconds", remaining);
+        } else WorkbenchService.require(!remainingRequired, "JobsDB 续读断点缺少剩余时间");
+        bundle.put("userActionUrl", actionUrl);
+        return new WorkbenchCandidates.UserActionRequired(interactionId, actionUrl, message, remaining);
+    }
+
+    private String jobsDbUserActionUrl(String value, ObjectNode bundle) {
+        String source = bundle.path("source").path("url").asText();
+        if (value == null || value.isBlank() || value.equals(source)) return source;
+        try { return JobsDbTarget.parse(value).url(); }
+        catch (WorkbenchException e) { throw new WorkbenchException(409, "JobsDB 人工断点目标越出当前列表或数字岗位详情"); }
+    }
+
+    private ObjectNode candidateOutput(Path result) throws Exception {
+        if (!Files.isRegularFile(result) || Files.isSymbolicLink(result) || Files.size(result) > 2 * 1024 * 1024)
+            throw new WorkbenchException(409, "只读来源未返回有效结果；检查会话、版本或本机执行器日志");
+        var parsed = service.json.readTree(Files.readString(result));
+        if (!(parsed instanceof ObjectNode output)) throw new WorkbenchException(409, "只读来源结果格式无效");
+        return output;
     }
 
     /** Explicit bounded batch; subsequent reads reconcile relevant changes, never retry identical failed inputs. */

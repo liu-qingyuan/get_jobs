@@ -14,6 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.*;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -291,6 +294,90 @@ class WorkbenchWorkflowHttpTest {
             for (var task : state.path("tasks")) assertEquals("SUBMITTED", task.path("state").asText());
             for (String kind : List.of("CANDIDATE_READ", "CANDIDATE_MATCH", "MATERIAL_PREPARE")) assertEquals(1, Files.readAllLines(root.resolve("calls")).stream().filter(kind::equals).count());
         } finally { callback.stop(0); }
+    }
+
+    @Test void verificationWaitPreparesOtherSourcesThenAutomaticallyResumesTheSameReadWithoutResettingBudgetOrReplayingJobs() throws Exception {
+        var service = service();
+        var command = challengeModel();
+        var resolved = new AtomicBoolean();
+        var reads = new AtomicInteger();
+        var waits = new AtomicInteger();
+        var preparedBeforeResume = new AtomicInteger(-1);
+        var resumedInteraction = new AtomicReference<String>();
+        WorkbenchCandidates.Reader boss = new WorkbenchCandidates.Reader() {
+            @Override public ObjectNode read(ObjectNode bundle) throws Exception {
+                reads.incrementAndGet();
+                if (!resolved.get()) throw new WorkbenchCandidates.UserActionRequired("boss-login-1", "Boss 要求用户在可见浏览器完成登录或验证");
+                resumedInteraction.set(bundle.path("resumeReadId").asText());
+                var output = json.createObjectNode();
+                output.putArray("jobs").addObject()
+                        .put("url", "https://www.zhipin.com/job_detail/synthetic-boss-job.html")
+                        .put("title", "Python engineer").put("company", "Synthetic Boss")
+                        .put("description", JD).put("descriptionComplete", true);
+                output.put("nextUrl", "").put("cursor", "");
+                return output;
+            }
+            @Override public boolean awaitUserAction(WorkbenchCandidates.UserAction action) {
+                waits.incrementAndGet();
+                preparedBeforeResume.set(service.state().at("/preparations/packages").size());
+                assertEquals("boss-login-1", action.interactionId());
+                resolved.set(true);
+                return true;
+            }
+        };
+        try (var runner = new WorkbenchRunner(service, command, List.of(), boss, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, false);
+            var mainlandFact = post(http, "/facts", json.createObjectNode().put("key", "mainland_project").put("label", "Synthetic mainland project")
+                    .put("value", FACT).put("scope", "MAINLAND").put("confirmed", true));
+            var resumeResponse = http.perform(multipart("/api/workbench/resumes").param("label", "Mainland English baseline")
+                    .param("region", "MAINLAND").param("language", "en").param("content", FACT)).andExpect(status().isOk()).andReturn();
+            var mainlandResume = json.readTree(resumeResponse.getResponse().getContentAsString(StandardCharsets.UTF_8));
+            post(http, "/resumes/" + mainlandResume.path("id").asText() + "/approve", json.createObjectNode());
+            var scope = ((ObjectNode) getJson(http, "/scope").path("current")).deepCopy().put("expectedVersion", 1);
+            scope.withArray("channels").add("BOSS"); scope.withArray("hosts").add("www.zhipin.com"); scope.withArray("regions").add("MAINLAND");
+            scope.withArray("factIds").add(mainlandFact.path("id").asText()); scope.withArray("resumeIds").add(mainlandResume.path("id").asText());
+            post(http, "/scope", scope);
+            var input = input().put("scopeVersion", 2).put("maxPages", 2);
+            input.withArray("sources").addObject().put("channel", "BOSS")
+                    .put("url", "https://www.zhipin.com/web/geek/jobs?query=Python")
+                    .put("region", "MAINLAND").put("language", "en").put("direction", "AI_APPLICATION");
+
+            post(http, "/cycles", input); idle(runner);
+
+            var state = getJson(http, "/state");
+            assertEquals("PREPARED", state.at("/workflow/cycles/0/status").asText(), state.toPrettyString());
+            assertEquals(1, preparedBeforeResume.get(), "The unaffected source must reach preparation before waiting for the user");
+            assertEquals(2, state.at("/candidates/jobs").size());
+            assertEquals(2, state.at("/preparations/packages").size());
+            assertEquals(2, reads.get()); assertEquals(1, waits.get());
+            assertEquals("boss-login-1", resumedInteraction.get());
+            assertEquals(10, state.at("/scope/usage/candidates").asInt(), "The resumed source must reuse its original charged reservation");
+            for (var candidate : state.at("/candidates/jobs")) assertEquals(1, candidate.path("discoveries").asInt(), candidate::toPrettyString);
+            var events = state.at("/candidates/runs/0/events").toString();
+            assertTrue(events.contains("USER_ACTION_REQUIRED"), events);
+            assertTrue(events.contains("USER_ACTION_RESOLVED"), events);
+            assertEquals(List.of("CANDIDATE_READ", "CANDIDATE_MATCH:1", "MATERIAL_PREPARE:1", "CANDIDATE_MATCH:1", "MATERIAL_PREPARE:1"),
+                    Files.readAllLines(root.resolve("challenge-calls")));
+        }
+    }
+
+    List<String> challengeModel() throws Exception {
+        var path = root.resolve("challenge-model.py");
+        Files.writeString(path, """
+                import json,sys,pathlib
+                b=json.load(open(sys.argv[-1])); kind=b['kind']; root=pathlib.Path(__file__).parent
+                with (root/'challenge-calls').open('a') as log:
+                    log.write(kind + ((':'+str(len(b['candidates']))) if kind in ('CANDIDATE_MATCH','MATERIAL_PREPARE') else '') + '\\n')
+                if kind=='CANDIDATE_READ':
+                    json.dump({'jobs':[{'url':'https://careers.example.test/jobs/official-one','company':'Synthetic Official','title':'Python engineer','description':%s,'descriptionComplete':True}]},open(b['resultPath'],'w'))
+                elif kind=='CANDIDATE_MATCH':
+                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
+                elif kind=='MATERIAL_PREPARE':
+                    json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[j['facts'][0]['id']]} for j in b['candidates']]},open(b['resultPath'],'w'))
+                else:
+                    raise AssertionError('No outbound task expected')
+                """.formatted(json.writeValueAsString(JD)));
+        return List.of("python3", path.toString(), "{taskFile}");
     }
 
     @Test void oneStartDiscoversMatchesPreparesAndExecutesTwoJobsWithoutPerJobHumanApproval() throws Exception {

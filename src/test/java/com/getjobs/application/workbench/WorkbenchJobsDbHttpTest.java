@@ -11,8 +11,13 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.FileTime;
 import java.time.*;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -80,7 +85,7 @@ class WorkbenchJobsDbHttpTest {
         var python = jobsRoot.resolve("venv/bin/python");
         var marker = root.resolve("jobsdb-started");
         Files.createDirectories(python.getParent());
-        Files.writeString(python, "#!/bin/sh\ntouch '" + marker + "'\nexit 1\n");
+        Files.writeString(python, "#!/bin/sh\nprintf '%s\\n' \"$*\" > '" + marker + "'\nexit 1\n");
         assertTrue(python.toFile().setExecutable(true));
         var profile = Files.createDirectories(jobsRoot.resolve("scrapling-profile"));
         var defaultProfile = profile.resolve("Default");
@@ -100,19 +105,27 @@ class WorkbenchJobsDbHttpTest {
             var saved = (ObjectNode) state(http).at("/scope/current");
             saved.put("expectedVersion", 1).withArray("channels").add("OFFERTODAY");
             saved.withArray("hosts").add("www.offertoday.com");
-            ((ObjectNode) saved.path("budgets")).put("candidates", 1);
+            ((ObjectNode) saved.path("budgets")).put("candidates", 2);
             post(http, "/scope", saved);
-            assertEquals(fixture.equals("linked-profile") ? "PROFILE_UNAVAILABLE" : "READ_GUARD_BLOCKED", state(http).at("/runtime/connections/jobsDb/status").asText());
-            var sources = input().put("scopeVersion", 2).put("maxPages", 1).put("jobsPerPage", 1);
+            boolean verifiedWorkerDirectory = fixture.equals("worker-directory");
+            assertEquals(verifiedWorkerDirectory ? "USER_ACTION_REQUIRED" : "PROFILE_UNAVAILABLE", state(http).at("/runtime/connections/jobsDb/status").asText());
+            var sources = input().put("scopeVersion", 2).put("maxPages", 2).put("jobsPerPage", 1);
             sources.withArray("sources").addObject().put("channel", "OFFERTODAY").put("url", "https://www.offertoday.com/hk/recommend")
                     .put("region", "HK").put("language", "en").put("direction", "AI_APPLICATION");
             post(http, "/cycles", sources);
             await().atMost(Duration.ofSeconds(15)).until(() -> !runner.runtime().path("busy").asBoolean());
             var current = state(http);
-            assertFalse(Files.exists(marker), "A known unsafe managed profile must not launch the reader");
+            if (!verifiedWorkerDirectory) {
+                assertFalse(Files.exists(marker), "Linked or unverifiable profile state must not launch any reader");
+                assertEquals(1, current.at("/scope/usage/candidates").asInt(-1));
+            } else {
+                assertTrue(Files.exists(marker), "A persisted worker must use the explicit visible resume path");
+                assertTrue(Files.readString(marker).contains("resume-read"));
+                assertFalse(Files.readString(marker).contains("read-candidates"), "The strict reader must remain blocked for persisted worker state");
+                assertEquals(2, current.at("/scope/usage/candidates").asInt(-1));
+            }
             assertEquals("CHECKPOINT", current.at("/candidates/runs/0/status").asText());
             assertEquals("OFFERTODAY", current.at("/candidates/jobs/0/channel").asText());
-            assertEquals(1, current.at("/scope/usage/candidates").asInt(-1));
             assertEquals("POLICY_APPROVED", current.at("/preparations/packages/0/status").asText());
             assertTrue(current.path("tasks").isEmpty());
             assertEquals(0, current.at("/scope/usage/outbound").asInt(-1));
@@ -122,16 +135,37 @@ class WorkbenchJobsDbHttpTest {
             assertFalse(Files.exists(root.resolve("absent-worker")));
         }
     }
-    @Test void platformVerificationIsVisibleAndOnlyStopsJobsDbInTheCurrentRound() throws Exception {
+    @Test void platformVerificationPreparesOtherSourceThenAutomaticallyResumesJobsDbWithoutASecondReadCharge() throws Exception {
         var verificationReader = root.resolve("jobsdb-verification.py");
         Files.writeString(verificationReader, """
-                import json,sys
+                import hashlib,json,sys,pathlib,time
+                command=sys.argv[1]
                 with open(sys.argv[2]) as task:
                     bundle=json.load(task)
                 assert bundle['source']['channel']=='JOBSDB'
+                with (pathlib.Path(__file__).parent/'verification-calls').open('a') as calls:
+                    calls.write(command+':'+str(bundle['limits']['seconds'])+'\\n')
                 with open(bundle['resultPath'],'w') as result:
-                    json.dump({'exception':'JobsDB 要求平台验证；本轮停止读取此来源，不自动验证、重试或重新登录'},result)
-                """);
+                    if command=='read-candidates':
+                        assert bundle['readAttemptId']
+                        json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'targetUrl':'https://hk.jobsdb.com/job/12345678','message':'JobsDB 要求用户在可见浏览器完成平台验证或登录'}},result)
+                    elif command=='resume-read':
+                        assert bundle['resumeReadId']==bundle['readAttemptId']
+                        assert bundle['userActionUrl']=='https://hk.jobsdb.com/job/12345678'
+                        marker=pathlib.Path(__file__).parent/'detail-verified-once'
+                        if not marker.exists():
+                            marker.write_text('again')
+                            json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'targetUrl':'https://hk.jobsdb.com/job/12345678','remainingSeconds':1,'message':'JobsDB detail verification remains'}},result)
+                        else:
+                            now=int(time.time()*1000)
+                            json.dump({'jobs':[{'url':'https://hk.jobsdb.com/job/12345678','title':'Python engineer','company':'Synthetic Corp','description':%s,'descriptionComplete':True}],
+                                'readAttemptCompleted':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                                'startedAtEpochMillis':now-1,'completedAtEpochMillis':now,'budgetSeconds':bundle['limits']['seconds']}},result)
+                            result.flush(); path=pathlib.Path(bundle['resultPath'])
+                            path.with_name(path.name+'.published').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+                    else:
+                        raise AssertionError(command)
+                """.formatted(json.writeValueAsString(JD)));
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), reader(), List.of("python3", verificationReader.toString()),
                 null, "http://127.0.0.1:1", 10)) {
@@ -146,21 +180,275 @@ class WorkbenchJobsDbHttpTest {
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var current = state(http);
             var run = current.at("/candidates/runs/0");
-            assertEquals("CHECKPOINT", run.path("status").asText());
-            assertEquals("JOBSDB", run.at("/events/0/channel").asText());
-            assertEquals("READ_EXCEPTION", run.at("/events/0/code").asText());
-            assertTrue(run.at("/events/0/message").asText().contains("平台验证"));
-            assertEquals("OFFERTODAY", run.at("/events/1/channel").asText());
-            assertEquals("CHECKPOINT", run.at("/events/2/code").asText());
-            assertFalse(run.at("/sources/0/done").asBoolean(true));
-            assertEquals("https://hk.jobsdb.com/python-jobs", run.at("/sources/0/nextUrl").asText());
-            assertEquals(2, current.at("/scope/usage/candidates").asInt(-1), "An attempted read is charged; there is no retry");
-            assertEquals("OFFERTODAY", current.at("/preparations/packages/0/target/channel").asText());
-            assertEquals("POLICY_APPROVED", current.at("/preparations/packages/0/status").asText());
+            assertEquals("COMPLETED", run.path("status").asText(), run::toPrettyString);
+            assertTrue(run.path("events").toString().contains("USER_ACTION_REQUIRED"), run::toPrettyString);
+            assertTrue(run.path("events").toString().contains("USER_ACTION_RESOLVED"), run::toPrettyString);
+            assertTrue(run.at("/sources/0/done").asBoolean());
+            assertEquals(2, current.at("/scope/usage/candidates").asInt(-1), "The resumed JobsDB read must reuse its original charged reservation");
+            assertEquals(2, current.at("/preparations/packages").size(), current.path("preparations")::toPrettyString);
+            assertEquals("PREPARED", current.at("/workflow/cycles/0/status").asText(), current.path("workflow")::toPrettyString);
+            assertEquals(List.of("read-candidates:3", "resume-read:2", "resume-read:1"), Files.readAllLines(root.resolve("verification-calls")));
             assertTrue(current.path("tasks").isEmpty());
             assertEquals(0, current.at("/scope/usage/outbound").asInt(-1));
         }
     }
+    @Test void strictResumeHardDeadlineRejectsALateSuccessfulResultWithoutResettingThePage() throws Exception {
+        var script = root.resolve("jobsdb-interrupted-resume.py");
+        Files.writeString(script, """
+                import json,sys,pathlib,time
+                command=sys.argv[1]; bundle=json.load(open(sys.argv[2])); root=pathlib.Path(__file__).parent
+                with (root/'interrupted-resume-calls').open('a') as calls: calls.write(command+'\\n')
+                if command=='read-candidates':
+                    json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'message':'JobsDB verification required'}},open(bundle['resultPath'],'w'))
+                elif command=='resume-read':
+                    started=int(time.time()*1000)
+                    json.dump({'readAttemptInProgress':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],'startedAtEpochMillis':started}},open(bundle['resultPath'],'w'))
+                    time.sleep(5); completed=int(time.time()*1000)
+                    json.dump({'jobs':[],'readAttemptCompleted':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                        'startedAtEpochMillis':started,'completedAtEpochMillis':completed,'budgetSeconds':bundle['limits']['seconds']}},open(bundle['resultPath'],'w'))
+                """);
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()),
+                null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, false);
+            post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http); var run = current.at("/candidates/runs/0");
+            assertEquals("CHECKPOINT", current.at("/workflow/cycles/0/status").asText(), current.path("workflow")::toPrettyString);
+            assertFalse(run.at("/sources/0").has("pendingRead"), run::toPrettyString);
+            assertTrue(run.path("events").toString().contains("READ_EXCEPTION"), run::toPrettyString);
+            assertEquals(5, current.at("/scope/usage/candidates").asInt());
+            assertEquals(List.of("read-candidates", "resume-read"), Files.readAllLines(root.resolve("interrupted-resume-calls")));
+        }
+    }
+
+    @Test void restartDeductsStrictAttemptProgressBeforeOpeningAnotherVisibleResume() throws Exception {
+        var script = root.resolve("jobsdb-restart-progress.py");
+        Files.writeString(script, """
+                import hashlib,json,sys,pathlib,time
+                command=sys.argv[1]; bundle=json.load(open(sys.argv[2])); root=pathlib.Path(__file__).parent
+                with (root/'restart-progress-calls').open('a') as calls: calls.write(command+'\\n')
+                if command=='read-candidates':
+                    json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'message':'JobsDB verification required'}},open(bundle['resultPath'],'w'))
+                elif command=='resume-read':
+                    marker=root/'strict-resume-started'
+                    if not marker.exists():
+                        json.dump({'readAttemptInProgress':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],'startedAtEpochMillis':int(time.time()*1000)}},open(bundle['resultPath'],'w'))
+                        marker.write_text('started')
+                        while True: time.sleep(1)
+                    else:
+                        (root/'restart-recovered-seconds').write_text(str(bundle['limits']['seconds']))
+                        now=int(time.time()*1000)
+                        json.dump({'jobs':[],'readAttemptCompleted':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                            'startedAtEpochMillis':now-1,'completedAtEpochMillis':now,'budgetSeconds':bundle['limits']['seconds']}},open(bundle['resultPath'],'w'))
+                        path=pathlib.Path(bundle['resultPath']); path.with_name(path.name+'.published').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+                """);
+        String cycleId; var service = service();
+        var firstRunner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()),
+                null, "http://127.0.0.1:1", 10);
+        try {
+            var http = http(service, firstRunner); setup(http, false);
+            cycleId = post(http, "/cycles", input().put("secondsPerPage", 10)).path("id").asText();
+            await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("strict-resume-started")));
+        } finally { firstRunner.close(); }
+        service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()),
+                null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner);
+            post(http, "/cycles/" + cycleId + "/resume", json.createObjectNode().put("scopeVersion", 1));
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http); var run = current.at("/candidates/runs/0");
+            assertTrue(run.at("/sources/0/done").asBoolean(), run::toPrettyString);
+            int recoveredSeconds = Integer.parseInt(Files.readString(root.resolve("restart-recovered-seconds")));
+            assertTrue(recoveredSeconds > 0 && recoveredSeconds < 9, "Restart must deduct elapsed strict-read time from the persisted 9-second remainder");
+            assertEquals(List.of("read-candidates", "resume-read", "resume-read"), Files.readAllLines(root.resolve("restart-progress-calls")));
+        }
+    }
+
+    @Test void restartRejectsALateCompletedStrictResultWithoutLaunchingAnotherResume() throws Exception {
+        var script = root.resolve("jobsdb-restart-late.py");
+        Files.writeString(script, """
+                import json,sys,pathlib,time
+                command=sys.argv[1]; bundle=json.load(open(sys.argv[2])); root=pathlib.Path(__file__).parent
+                with (root/'restart-late-calls').open('a') as calls: calls.write(command+'\\n')
+                if command=='read-candidates':
+                    json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'message':'JobsDB verification required'}},open(bundle['resultPath'],'w'))
+                elif command=='resume-read':
+                    json.dump({'readAttemptInProgress':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                        'startedAtEpochMillis':int(time.time()*1000)}},open(bundle['resultPath'],'w'))
+                    (root/'restart-late-started').write_text('started')
+                    while True: time.sleep(1)
+                """);
+        String cycleId; Path resumeDirectory; var service = service();
+        var firstRunner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()),
+                null, "http://127.0.0.1:1", 10);
+        try {
+            var http = http(service, firstRunner); setup(http, false);
+            cycleId = post(http, "/cycles", input().put("secondsPerPage", 2)).path("id").asText();
+            await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("restart-late-started")));
+            try (var runs = Files.list(service.store.root.resolve("runs"))) {
+                resumeDirectory = runs.filter(path -> path.getFileName().toString().startsWith("candidates-resume-"))
+                        .findFirst().orElseThrow();
+            }
+        } finally { firstRunner.close(); }
+        var task = (ObjectNode) json.readTree(Files.readString(resumeDirectory.resolve("task.json")));
+        long started = System.currentTimeMillis() - 3_000, completed = started + 500;
+        var late = json.createObjectNode(); late.putArray("jobs");
+        late.putObject("readAttemptCompleted").put("interactionId", task.path("readAttemptId").asText())
+                .put("targetUrl", task.path("userActionUrl").asText()).put("startedAtEpochMillis", started)
+                .put("completedAtEpochMillis", completed).put("budgetSeconds", task.path("limits").path("seconds").asInt());
+        Path lateResult = resumeDirectory.resolve("result.json"), staged = resumeDirectory.resolve("result.json.next");
+        Files.writeString(staged, late.toString());
+        Files.setLastModifiedTime(staged, FileTime.fromMillis(completed));
+        Files.move(staged, lateResult, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        Files.writeString(lateResult.resolveSibling("result.json.published"), WorkbenchService.hash(Files.readAllBytes(lateResult)));
+        service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()),
+                null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner);
+            post(http, "/cycles/" + cycleId + "/resume", json.createObjectNode().put("scopeVersion", 1));
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http); var run = current.at("/candidates/runs/0");
+            assertFalse(run.at("/sources/0/done").asBoolean(), run::toPrettyString);
+            assertTrue(run.at("/sources/0").has("pendingRead"), run::toPrettyString);
+            assertTrue(current.at("/workflow/cycles/0/events").toString().contains("硬截止"), current::toPrettyString);
+            assertEquals(List.of("read-candidates", "resume-read"), Files.readAllLines(root.resolve("restart-late-calls")));
+        }
+    }
+
+    @Test void anUnavailableBossCheckpointDoesNotHideAResolvableJobsDbCheckpoint() throws Exception {
+        var script = root.resolve("jobsdb-multiple-actions.py");
+        Files.writeString(script, """
+                import hashlib,json,sys,pathlib,time
+                command=sys.argv[1]; bundle=json.load(open(sys.argv[2])); root=pathlib.Path(__file__).parent
+                with (root/'multiple-action-calls').open('a') as calls: calls.write(command+'\\n')
+                if command=='read-candidates':
+                    json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'message':'JobsDB verification required'}},open(bundle['resultPath'],'w'))
+                elif command=='resume-read':
+                    now=int(time.time()*1000)
+                    json.dump({'jobs':[],'readAttemptCompleted':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                        'startedAtEpochMillis':now-1,'completedAtEpochMillis':now,'budgetSeconds':bundle['limits']['seconds']}},open(bundle['resultPath'],'w'))
+                    path=pathlib.Path(bundle['resultPath']); path.with_name(path.name+'.published').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+                """);
+        var bossWaits = new AtomicInteger();
+        var bossWaiting = new CountDownLatch(1); var releaseBoss = new CountDownLatch(1);
+        WorkbenchCandidates.Reader boss = new WorkbenchCandidates.Reader() {
+            @Override public ObjectNode read(ObjectNode bundle) throws Exception {
+                throw new WorkbenchCandidates.UserActionRequired("boss-login", "Boss login required");
+            }
+            @Override public boolean awaitUserAction(WorkbenchCandidates.UserAction action) throws Exception {
+                bossWaits.incrementAndGet(); bossWaiting.countDown();
+                assertTrue(releaseBoss.await(10, TimeUnit.SECONDS));
+                return false;
+            }
+        };
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()), boss,
+                "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, false);
+            var scope = ((ObjectNode) state(http).at("/scope/current")).put("expectedVersion", 1);
+            scope.withArray("channels").add("BOSS"); scope.withArray("hosts").add("www.zhipin.com"); scope.withArray("regions").add("MAINLAND");
+            post(http, "/scope", scope);
+            var request = input().put("scopeVersion", 2).put("maxPages", 2).put("jobsPerPage", 1);
+            var sources = request.putArray("sources");
+            sources.addObject().put("channel", "BOSS").put("url", "https://www.zhipin.com/web/geek/jobs?query=Python")
+                    .put("region", "MAINLAND").put("language", "en").put("direction", "AI_APPLICATION");
+            sources.addObject().put("channel", "JOBSDB").put("url", "https://hk.jobsdb.com/python-jobs")
+                    .put("region", "HK").put("language", "en").put("direction", "AI_APPLICATION");
+            post(http, "/cycles", request);
+            assertTrue(bossWaiting.await(10, TimeUnit.SECONDS));
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                var observed = state(http);
+                assertTrue(observed.at("/candidates/runs/0/sources/1/done").asBoolean(), observed::toPrettyString);
+            });
+            assertTrue(runner.runtime().path("busy").asBoolean(), "The unresolved Boss source should remain waiting while JobsDB has already resumed");
+            assertTrue(state(http).at("/candidates/runs/0/events").toString().contains("USER_ACTION_RESOLVED"));
+            releaseBoss.countDown();
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http);
+            assertEquals("CHECKPOINT", current.at("/workflow/cycles/0/status").asText());
+            assertEquals(1, bossWaits.get());
+            assertEquals(List.of("read-candidates", "resume-read"), Files.readAllLines(root.resolve("multiple-action-calls")));
+            assertTrue(current.at("/candidates/runs/0/events").toString().contains("USER_ACTION_RESOLVED"));
+        }
+    }
+
+    @Test void resumedReadRechecksLocalProfileStateBeforeConsumingTheCachedStrictResult() throws Exception {
+        var script = root.resolve("jobsdb-resume-preflight.py");
+        Files.writeString(script, """
+                import hashlib,json,sys,pathlib,time
+                command=sys.argv[1]; bundle=json.load(open(sys.argv[2])); root=pathlib.Path(__file__).parent
+                with (root/'resume-preflight-calls').open('a') as calls: calls.write(command+'\\n')
+                if command=='read-candidates':
+                    json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'message':'JobsDB verification required'}},open(bundle['resultPath'],'w'))
+                elif command=='resume-read':
+                    (root/'resume-preflight-waiting').write_text('waiting')
+                    while not (root/'resume-preflight-release').exists(): time.sleep(0.02)
+                    now=int(time.time()*1000)
+                    json.dump({'jobs':[],'readAttemptCompleted':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                        'startedAtEpochMillis':now-1,'completedAtEpochMillis':now,'budgetSeconds':bundle['limits']['seconds']}},open(bundle['resultPath'],'w'))
+                    path=pathlib.Path(bundle['resultPath']); path.with_name(path.name+'.published').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+                """);
+        var unavailable = new AtomicBoolean();
+        var connections = new WorkbenchConnections(() -> WorkbenchConnections.Status.NOT_CONFIGURED,
+                () -> unavailable.get() ? WorkbenchConnections.Status.PROFILE_UNAVAILABLE : WorkbenchConnections.Status.CHECK_AT_READ);
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()), null,
+                List.of(), List.of(), "http://127.0.0.1:1", 10, connections)) {
+            var http = http(service, runner); setup(http, false);
+            post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("resume-preflight-waiting")));
+            unavailable.set(true); Files.createFile(root.resolve("resume-preflight-release"));
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var run = state(http).at("/candidates/runs/0");
+            assertFalse(run.at("/sources/0/done").asBoolean(), run::toPrettyString);
+            assertTrue(run.at("/sources/0").has("pendingRead"), run::toPrettyString);
+            assertTrue(run.path("events").toString().contains("READ_EXCEPTION"), run::toPrettyString);
+            assertEquals(List.of("read-candidates", "resume-read"), Files.readAllLines(root.resolve("resume-preflight-calls")));
+        }
+    }
+
+    @Test void persistedJobsDbCheckpointReconstructsItsResumeTaskAfterWorkbenchRestart() throws Exception {
+        var script = root.resolve("jobsdb-restart.py");
+        Files.writeString(script, """
+                import hashlib,json,sys,pathlib,time
+                command=sys.argv[1]; bundle=json.load(open(sys.argv[2])); root=pathlib.Path(__file__).parent
+                with (root/'restart-calls').open('a') as calls: calls.write(command+'\\n')
+                if command=='read-candidates':
+                    json.dump({'userActionRequired':{'interactionId':bundle['readAttemptId'],'message':'JobsDB verification required'}},open(bundle['resultPath'],'w'))
+                elif command=='resume-read' and (root/'resume-ready').exists():
+                    assert bundle['resumeReadId']==bundle['readAttemptId']; now=int(time.time()*1000)
+                    json.dump({'jobs':[{'url':'https://hk.jobsdb.com/job/12345678','title':'Python engineer','company':'Synthetic Corp','description':%s,'descriptionComplete':True}],
+                        'readAttemptCompleted':{'interactionId':bundle['readAttemptId'],'targetUrl':bundle['userActionUrl'],
+                        'startedAtEpochMillis':now-1,'completedAtEpochMillis':now,'budgetSeconds':bundle['limits']['seconds']}},open(bundle['resultPath'],'w'))
+                    path=pathlib.Path(bundle['resultPath']); path.with_name(path.name+'.published').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+                else:
+                    raise SystemExit(2)
+                """.formatted(json.writeValueAsString(JD)));
+        String cycleId;
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, false);
+            cycleId = post(http, "/cycles", input()).path("id").asText();
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http);
+            assertEquals("CHECKPOINT", current.at("/workflow/cycles/0/status").asText(), current.path("workflow")::toPrettyString);
+            assertEquals(5, current.at("/scope/usage/candidates").asInt());
+        }
+        Files.createFile(root.resolve("resume-ready"));
+        service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), List.of("python3", script.toString()), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner);
+            post(http, "/cycles/" + cycleId + "/resume", json.createObjectNode().put("scopeVersion", 1));
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var current = state(http);
+            assertEquals("PREPARED", current.at("/workflow/cycles/0/status").asText(), current.path("workflow")::toPrettyString);
+            assertEquals(5, current.at("/scope/usage/candidates").asInt(), "Restarted resume must reuse the original reservation");
+            assertEquals(1, current.at("/candidates/jobs").size());
+        }
+        assertEquals(List.of("read-candidates", "resume-read", "resume-read"), Files.readAllLines(root.resolve("restart-calls")));
+    }
+
     @Test void missingJobsDbCommandIsVisibleAndNeverUsesTheOfficialCommand() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, List.of("must-not-start-official", "{taskFile}"), "http://127.0.0.1:1", 10)) {

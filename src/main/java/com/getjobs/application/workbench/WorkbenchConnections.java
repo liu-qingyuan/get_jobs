@@ -15,7 +15,7 @@ final class WorkbenchConnections {
         PROFILE_UNAVAILABLE(false, "独立浏览器资料不可用；不会改写或迁移"),
         BROWSER_NOT_CONNECTED(false, "已有本机浏览器资料，但工作台尚无已核实连接；不代表登录失效"),
         BUSY(false, "原渠道任务占用浏览器；不会抢占"),
-        READ_GUARD_BLOCKED(false, "已有 Service Worker 状态；只读守卫拒绝，保留原浏览器资料，不要求重新登录"),
+        USER_ACTION_REQUIRED(true, "隔离资料或平台状态要求在可见浏览器完成步骤后继续受控读取；不代表登录失效"),
         CHECK_AT_READ(true, "只读执行时核验连接与平台状态；不代表已登录或可外发");
 
         final boolean canAttempt;
@@ -42,12 +42,16 @@ final class WorkbenchConnections {
         output.put("status", status.name()).put("reason", status.reason);
     }
 
-    void requireRead(String channel) {
-        Status status = switch (channel) {
+    Status status(String channel) {
+        return switch (channel) {
             case "BOSS" -> boss.get();
             case "JOBSDB" -> jobsDb.get();
             default -> Status.CHECK_AT_READ;
         };
+    }
+
+    void requireRead(String channel) {
+        Status status = status(channel);
         if (!status.canAttempt) throw new WorkbenchException(409, (channel.equals("JOBSDB") ? "JobsDB" : "Boss") + "：" + status.reason);
     }
 
@@ -72,8 +76,9 @@ final class WorkbenchConnections {
                 if (entry.isSymbolicLink()) return Status.PROFILE_UNAVAILABLE;
                 if (!entry.isDirectory()) continue;
                 try {
-                    metadata(child.resolve("Service Worker"));
-                    return Status.READ_GUARD_BLOCKED;
+                    var worker = metadata(child.resolve("Service Worker"));
+                    if (worker.isSymbolicLink() || !worker.isDirectory()) return Status.PROFILE_UNAVAILABLE;
+                    return Status.USER_ACTION_REQUIRED;
                 } catch (NoSuchFileException absent) {
                     // Only proven absence is admissible; do not follow links or ignore I/O errors.
                 }

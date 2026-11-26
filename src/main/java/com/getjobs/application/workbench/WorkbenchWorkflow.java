@@ -3,11 +3,13 @@ package com.getjobs.application.workbench;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.sql.Connection;
 import java.util.*;
+import java.util.concurrent.*;
 import static com.getjobs.application.workbench.WorkbenchService.*;
 
 /** One bounded user intent owns discovery-to-execution orchestration and durable safe checkpoints. */
 final class WorkbenchWorkflow {
     @FunctionalInterface interface SingleJob { void execute(String taskId) throws Exception; }
+    private record UserWait(String key, WorkbenchCandidates.UserAction action, boolean resolved) { }
     private final WorkbenchService service;
     private final WorkbenchStore store;
     WorkbenchWorkflow(WorkbenchService service) { this.service = service; this.store = service.store; }
@@ -37,67 +39,116 @@ final class WorkbenchWorkflow {
 
     void advance(String id, WorkbenchCandidates.Reader reader, WorkbenchMatching.Analyzer analyzer, SingleJob executor) {
         var cycle = store.write(c -> store.get(c, "workflow_cycle", id));
+        var waitExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        var completedWaits = new ExecutorCompletionService<UserWait>(waitExecutor);
+        var activeWaits = new LinkedHashMap<String, WorkbenchCandidates.UserAction>();
         try {
             var input = ((ObjectNode) cycle.path("input")).deepCopy();
+            var processed = new HashSet<String>();
+            var awaited = new HashSet<String>();
+            var resumeInteractions = new LinkedHashSet<String>();
             ObjectNode discovery = null;
-            if (!cycle.path("discoveryRunId").asText().isEmpty()) discovery = store.write(c -> store.get(c, "candidate_run", cycle.path("discoveryRunId").asText()));
-            if (discovery == null || !discovery.path("status").asText().equals("COMPLETED")) {
-                stage(cycle, "DISCOVER");
-                if (discovery != null) input.put("runId", discovery.path("id").asText());
-                discovery = service.candidates.discover(input, reader, id);
-                cycle.put("discoveryRunId", discovery.path("id").asText()); save(cycle);
-            }
-            var ids = store.write(c -> {
-                var selected = new ArrayList<String>();
-                for (var row : store.list(c, "candidate")) if (row.path("runId").asText().equals(cycle.path("discoveryRunId").asText()) || contains(cycle, row.path("id").asText())) {
-                    var entry = entry(cycle, row.path("id").asText());
-                    if (entry.has("taskId")) {
-                        var task = store.get(c, "task", entry.path("taskId").asText());
-                        if (Set.of("UNKNOWN", "SUBMITTED", "RUNNING").contains(task.path("state").asText())) continue;
-                    }
-                    selected.add(row.path("id").asText());
-                }
-                return selected;
-            });
             boolean exceptions = false, prepared = false;
-            for (int offset = 0; offset < ids.size(); offset += 20) {
-                var batch = input.deepCopy(); var selected = batch.putArray("candidateIds");
-                ids.subList(offset, Math.min(ids.size(), offset + 20)).forEach(selected::add);
-                stage(cycle, "MATCH"); service.matching.start(batch, analyzer);
-                stage(cycle, "PREPARE"); service.preparation.prepare(batch, analyzer);
-                for (var candidateId : selected) {
-                    require(!Thread.currentThread().isInterrupted(), "执行器已停止；保留安全断点");
-                    var entry = entry(cycle, candidateId.asText());
-                    var record = store.write(c -> {
-                        ObjectNode found = null;
-                        for (var row : store.list(c, "preparation")) if (row.path("candidateId").equals(candidateId) && row.path("scopeVersion").equals(cycle.path("scopeVersion"))) found = (ObjectNode) row;
-                        return found;
-                    });
-                    if (record == null || !record.path("status").asText().equals("POLICY_APPROVED")) {
-                        entry.put("status", "EXCEPTION").put("reason", record == null ? "无当前可用材料包" : record.path("reason").asText()); exceptions = true; save(cycle); continue;
-                    }
-                    entry.put("packageId", record.path("id").asText());
-                    var scope = service.scope.workspace().path("current");
-                    String action = Set.of("OFFERTODAY", "BOSS").contains(record.path("target").path("channel").asText()) ? "CONTACT" : "APPLY";
-                    boolean allowedAction = false;
-                    for (var allowed : scope.path("actions")) if (allowed.asText().equals(action)) allowedAction = true;
-                    if (!allowedAction) {
-                        entry.put("status", "PREPARED").put("reason", "仅准备结果；范围未授权此渠道外发，不创建发送任务"); prepared = true; save(cycle); continue;
-                    }
-                    stage(cycle, "DISPATCH");
-                    try {
-                        var task = policyTask(record, entry.path("taskId").asText(), cycle);
-                        entry.put("taskId", task.path("id").asText()); save(cycle);
-                        executor.execute(task.path("id").asText());
-                        task = service.task(task.path("id").asText());
-                        entry.put("status", task.path("state").asText()).put("reason", task.path("state").asText().equals("SUBMITTED") ? "对应回执已登记，不代表雇主已读" : "保留单岗证据；未知结果不重投，已知未外发例外可处理后恢复");
-                        exceptions |= !task.path("state").asText().equals("SUBMITTED");
-                    } catch (Exception e) {
-                        entry.put("status", "EXCEPTION").put("reason", message(e)); exceptions = true;
-                        if (message(e).contains("累计预算不足")) cycle.put("pauseReason", message(e));
-                    }
-                    save(cycle);
+            while (true) {
+                if (!cycle.path("discoveryRunId").asText().isEmpty()) discovery = store.write(c -> store.get(c, "candidate_run", cycle.path("discoveryRunId").asText()));
+                boolean waitingOnExistingAction = discovery != null && !service.candidates.pendingUserActions(discovery).isEmpty()
+                        && resumeInteractions.isEmpty();
+                if (discovery == null || (!discovery.path("status").asText().equals("COMPLETED") && !waitingOnExistingAction)) {
+                    stage(cycle, "DISCOVER");
+                    if (discovery != null) input.put("runId", discovery.path("id").asText());
+                    discovery = service.candidates.discover(input, reader, id, resumeInteractions);
+                    resumeInteractions.clear();
+                    cycle.put("discoveryRunId", discovery.path("id").asText()); save(cycle);
                 }
+                var ids = store.write(c -> {
+                    var selected = new ArrayList<String>();
+                    for (var row : store.list(c, "candidate")) if ((row.path("runId").asText().equals(cycle.path("discoveryRunId").asText()) || contains(cycle, row.path("id").asText()))
+                            && !processed.contains(row.path("id").asText())) {
+                        var entry = entry(cycle, row.path("id").asText());
+                        if (entry.has("taskId")) {
+                            var task = store.get(c, "task", entry.path("taskId").asText());
+                            if (Set.of("UNKNOWN", "SUBMITTED", "RUNNING").contains(task.path("state").asText())) continue;
+                        }
+                        selected.add(row.path("id").asText());
+                    }
+                    return selected;
+                });
+                processed.addAll(ids);
+                for (int offset = 0; offset < ids.size(); offset += 20) {
+                    var batch = input.deepCopy(); var selected = batch.putArray("candidateIds");
+                    ids.subList(offset, Math.min(ids.size(), offset + 20)).forEach(selected::add);
+                    stage(cycle, "MATCH"); service.matching.start(batch, analyzer);
+                    stage(cycle, "PREPARE"); service.preparation.prepare(batch, analyzer);
+                    for (var candidateId : selected) {
+                        require(!Thread.currentThread().isInterrupted(), "执行器已停止；保留安全断点");
+                        var entry = entry(cycle, candidateId.asText());
+                        var record = store.write(c -> {
+                            ObjectNode found = null;
+                            for (var row : store.list(c, "preparation")) if (row.path("candidateId").equals(candidateId) && row.path("scopeVersion").equals(cycle.path("scopeVersion"))) found = (ObjectNode) row;
+                            return found;
+                        });
+                        if (record == null || !record.path("status").asText().equals("POLICY_APPROVED")) {
+                            entry.put("status", "EXCEPTION").put("reason", record == null ? "无当前可用材料包" : record.path("reason").asText()); exceptions = true; save(cycle); continue;
+                        }
+                        entry.put("packageId", record.path("id").asText());
+                        var scope = service.scope.workspace().path("current");
+                        String action = Set.of("OFFERTODAY", "BOSS").contains(record.path("target").path("channel").asText()) ? "CONTACT" : "APPLY";
+                        boolean allowedAction = false;
+                        for (var allowed : scope.path("actions")) if (allowed.asText().equals(action)) allowedAction = true;
+                        if (!allowedAction) {
+                            entry.put("status", "PREPARED").put("reason", "仅准备结果；范围未授权此渠道外发，不创建发送任务"); prepared = true; save(cycle); continue;
+                        }
+                        stage(cycle, "DISPATCH");
+                        try {
+                            var task = policyTask(record, entry.path("taskId").asText(), cycle);
+                            entry.put("taskId", task.path("id").asText()); save(cycle);
+                            executor.execute(task.path("id").asText());
+                            task = service.task(task.path("id").asText());
+                            entry.put("status", task.path("state").asText()).put("reason", task.path("state").asText().equals("SUBMITTED") ? "对应回执已登记，不代表雇主已读" : "保留单岗证据；未知结果不重投，已知未外发例外可处理后恢复");
+                            exceptions |= !task.path("state").asText().equals("SUBMITTED");
+                        } catch (Exception e) {
+                            entry.put("status", "EXCEPTION").put("reason", message(e)); exceptions = true;
+                            if (message(e).contains("累计预算不足")) cycle.put("pauseReason", message(e));
+                        }
+                        save(cycle);
+                    }
+                }
+                var actions = service.candidates.pendingUserActions(discovery);
+                if (discovery.path("status").asText().equals("COMPLETED") || (actions.isEmpty() && activeWaits.isEmpty())) break;
+                var waitingChannels = new HashSet<String>();
+                for (var action : activeWaits.values()) waitingChannels.add(action.channel());
+                for (var action : actions) {
+                    String key = action.channel() + ":" + action.interactionId() + ":" + action.actionUrl() + ":" + action.remainingSeconds();
+                    if (activeWaits.containsKey(key)) continue;
+                    if (waitingChannels.contains(action.channel())) {
+                        event(cycle, "WAITING_USER", action.channel() + "：同渠道另一断点已可见；此断点保留到下一次安全推进");
+                        continue;
+                    }
+                    if (!awaited.add(key)) {
+                        event(cycle, "WAITING_USER", action.channel() + "：平台仍要求同一人工步骤；保留断点，不循环重试");
+                        continue;
+                    }
+                    activeWaits.put(key, action); waitingChannels.add(action.channel());
+                    completedWaits.submit(() -> new UserWait(key, action, reader.awaitUserAction(action)));
+                    event(cycle, "USER_ACTION_REQUIRED", action.channel() + "：" + action.message());
+                }
+                if (activeWaits.isEmpty()) break;
+                stage(cycle, "WAIT_USER"); save(cycle);
+                UserWait completed;
+                try { completed = completedWaits.take().get(); }
+                catch (ExecutionException e) {
+                    if (e.getCause() instanceof Exception cause) throw cause;
+                    throw new RuntimeException(e.getCause());
+                }
+                activeWaits.remove(completed.key());
+                var action = completed.action();
+                if (!completed.resolved()) {
+                    event(cycle, "WAITING_USER", action.channel() + "：可见用户步骤尚未完成；继续检查其他来源断点"); save(cycle);
+                    continue;
+                }
+                event(cycle, "USER_ACTION_RESOLVED", action.channel() + "：平台步骤已解决（自动求解或用户完成），自动续跑同一轮"); save(cycle);
+                resumeInteractions.add(action.interactionId());
+                input.put("runId", discovery.path("id").asText());
             }
             // Previously attempted entries still participate in the result after a resume.
             for (var entry : cycle.path("entries")) if (entry.has("taskId") && !service.task(entry.path("taskId").asText()).path("state").asText().equals("SUBMITTED")) exceptions = true;
@@ -120,6 +171,11 @@ final class WorkbenchWorkflow {
             }
             event(cycle, "STOP", "本次有界推进结束；只计对应回执，例外与累计消耗保留");
         } catch (Exception e) { cycle.put("status", "CHECKPOINT"); event(cycle, "EXCEPTION", message(e)); }
+        finally {
+            waitExecutor.shutdownNow();
+            try { waitExecutor.awaitTermination(5, TimeUnit.SECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        }
         save(cycle);
     }
 

@@ -50,10 +50,69 @@ class BossCandidateReaderDomTest {
                 route.fulfill(new Route.FulfillOptions().setContentType("text/html").setBody("""
                         <ul class="rec-job-list"><li class="job-card-box"><a class="job-name" href="/job_detail/opaque-a.html?ka=list">Python engineer</a><span class="boss-name">Synthetic Corp</span></li>
                         <li class="job-card-box"><a class="job-name" href="/job_detail/opaque-a.html?ka=duplicate">Python engineer</a><span class="boss-name">Synthetic Corp</span></li></ul>
+                        <div class="btns">我要招聘 我要找工作 登录/注册</div>
                         """));
             } else route.abort();
         });
     }
+    @Test void loginRedirectBecomesAUserActionCheckpointWithoutAllowingLoginSubmission() throws Exception {
+        context.route("**/*", route -> {
+            requests.add(route.request().method() + " " + route.request().url());
+            if (route.request().url().contains("/web/geek/jobs"))
+                route.fulfill(new Route.FulfillOptions().setStatus(302).setHeaders(Map.of("Location", "https://www.zhipin.com/web/user/?ka=header-login")));
+            else if (route.request().url().contains("/web/user/"))
+                route.fulfill(new Route.FulfillOptions().setContentType("text/html").setBody("<html><body><a>登录</a></body></html>"));
+            else route.abort();
+        });
+        assertThrows(BossCandidateReader.UserActionRequired.class, () -> BossCandidateReader.read(existing, bundle(), json));
+        assertTrue(requests.stream().allMatch(r -> r.startsWith("GET ")), requests.toString());
+    }
+
+    @Test void postLoginLandingPageIsAutomaticallyReturnedToTheAuthorizedList() throws Exception {
+        String source = bundle().path("source").path("url").asText();
+        context.route("**/*", route -> {
+            if (route.request().url().equals("https://www.zhipin.com/"))
+                route.fulfill(new Route.FulfillOptions().setContentType("text/html").setBody("<html><body>Boss home after login</body></html>"));
+            else if (route.request().url().startsWith("https://www.zhipin.com/web/geek/jobs"))
+                route.fulfill(new Route.FulfillOptions().setContentType("text/html").setBody("<ul class='rec-job-list'><li class='job-card-box'><a class='job-name' href='/job_detail/abc123.html'>Python engineer</a><span class='boss-name'>Synthetic Corp</span></li></ul>"));
+            else route.abort();
+        });
+        existing.navigate("https://www.zhipin.com/");
+        assertFalse(BossCandidateReader.accessReady(existing, source));
+        assertTrue(BossCandidateReader.restoreAccess(existing, source, true));
+        assertTrue(existing.url().startsWith("https://www.zhipin.com/web/geek/jobs"));
+    }
+
+    @Test void visibleLoginOrChallengeBecomesAUserActionCheckpointInsteadOfAReadOrSchemaFailure() throws Exception {
+        context.route("**/*", route -> {
+            requests.add(route.request().method() + " " + route.request().url());
+            if (route.request().url().contains("/web/geek/jobs"))
+                route.fulfill(new Route.FulfillOptions().setStatus(403).setContentType("text/html").setBody("<title>请稍候 - BOSS直聘</title><h1>安全验证</h1>"));
+            else route.abort();
+        });
+        assertThrows(BossCandidateReader.UserActionRequired.class, () -> BossCandidateReader.read(existing, bundle(), json));
+        assertTrue(requests.stream().allMatch(r -> r.startsWith("GET ")), requests.toString());
+    }
+
+    @Test void challengeDuringDetailNavigationIsNotSwallowedAsAnIncompleteJob() throws Exception {
+        context.route("**/*", route -> {
+            requests.add(route.request().method() + " " + route.request().url());
+            if (route.request().url().contains("/web/geek/jobs"))
+                route.fulfill(new Route.FulfillOptions().setContentType("text/html").setBody("<ul class='rec-job-list'><li class='job-card-box'><a class='job-name' href='/job_detail/abc123.html'>Python engineer</a><span class='boss-name'>Synthetic Corp</span></li></ul>"));
+            else if (route.request().url().contains("/job_detail/abc123.html"))
+                route.fulfill(new Route.FulfillOptions().setStatus(403).setContentType("text/html").setBody("<html><head><title>请稍候 - BOSS直聘</title></head><body><h1>安全验证</h1></body></html>"));
+            else route.abort();
+        });
+        assertThrows(BossCandidateReader.UserActionRequired.class, () -> BossCandidateReader.read(existing, bundle(), json), requests::toString);
+    }
+
+    @Test void anonymousPublicListWithTopNavLoginLinkIsNotTreatedAsALoginWall() throws Exception {
+        fixture("opaque-a");
+        var result = BossCandidateReader.read(existing, bundle(), json);
+        assertEquals(1, result.path("jobs").size(), result.toPrettyString());
+        assertTrue(requests.stream().allMatch(r -> r.startsWith("GET ")));
+    }
+
     @Test void wrongIdentityNeverProvidesCompleteJdOrContactEvidence() throws Exception {
         fixture("different-job");
         var result = BossCandidateReader.read(existing, bundle(), json);

@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -39,6 +40,8 @@ public class PlaywrightController {
         // 改用持久化上下文后没有独立的 Browser 对象，context 即代表浏览器本身
         status.put("hasBrowser", playwrightManager.getContext() != null);
         status.put("bossLoggedIn", playwrightManager.isLoggedIn("boss"));
+        status.put("profilePath", playwrightManager.profileDirectory().toString());
+        status.put("profileExists", Files.isDirectory(playwrightManager.profileDirectory()));
 
         return ResponseEntity.ok(status);
     }

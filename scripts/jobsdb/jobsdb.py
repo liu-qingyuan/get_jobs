@@ -10,7 +10,9 @@ import re
 import signal
 import sqlite3
 import stat
+import subprocess
 import sys
+import time
 from urllib.parse import urljoin, urlencode, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,11 +52,87 @@ def first_visible(locator):
 
 class VerificationRequired(RuntimeError):
     """A recognizable platform challenge, not merely a timeout or missing job cards."""
+    def __init__(self, message, target_url=None, remaining_seconds=None):
+        super().__init__(message)
+        self.target_url = target_url
+        self.remaining_seconds = remaining_seconds
+
+
+_cancellation_requested = False
+
+
+def request_cancellation(*_):
+    """Keep cancellation observable if the browser driver swallows the signal exception."""
+    global _cancellation_requested
+    _cancellation_requested = True
+    raise KeyboardInterrupt()
+
+
+def cancellation_requested():
+    return _cancellation_requested
+
+
+_RESUME_WORKER = 'GET_JOBS_JOBSDB_RESUME_WORKER'
+
+
+def supervise_resume(task_file, data_dir, *, grace_seconds=2):
+    """Keep the CLI outside Playwright so SIGTERM can reap the entire browser worker."""
+    environment = os.environ.copy()
+    environment[_RESUME_WORKER] = '1'
+    command = [sys.executable, str(Path(__file__).resolve()), 'resume-read', str(task_file),
+               '--data-dir', str(data_dir)]
+    worker = subprocess.Popen(command, env=environment, start_new_session=True)
+    stopping_at = None
+
+    def stop(*_):
+        nonlocal stopping_at
+        if stopping_at is None:
+            stopping_at = time.monotonic()
+            try:
+                os.killpg(worker.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        while True:
+            try:
+                status = worker.wait(timeout=0.1)
+                if stopping_at is not None:
+                    print('CANCELLED', file=sys.stderr)
+                    return 130
+                return status
+            except subprocess.TimeoutExpired:
+                if stopping_at is None or time.monotonic() - stopping_at < grace_seconds:
+                    continue
+                try:
+                    os.killpg(worker.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                worker.wait()
+                print('CANCELLED', file=sys.stderr)
+                return 130
+    except KeyboardInterrupt:
+        stop()
+        try:
+            worker.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(worker.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            worker.wait()
+        print('CANCELLED', file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def challenge(page):
     title = page.title().lower()
-    if any(s in title for s in ('just a moment', '请稍候', '請稍候', 'security verification')):
+    if any(s in title for s in ('just a moment', '请稍候', '請稍候', 'security verification',
+                                'access restricted', 'access denied', 'attention required',
+                                'unusual traffic', 'you have been blocked')):
         return True
     return first_visible(page.locator("iframe[src*='challenges.cloudflare.com'], iframe[src*='recaptcha'], iframe[src*='hcaptcha']")) is not None or first_visible(page.get_by_text(re.compile(r'^(Verify you are human|Performing security verification|Security check)$', re.I))) is not None
 
@@ -62,11 +140,38 @@ def challenge(page):
 def deadline(seconds=90):
     def expired(*_): raise TimeoutError('CF/navigation timed out; command not retried')
     previous = signal.signal(signal.SIGALRM, expired)
+    remaining = signal.alarm(0)
+    started = time.monotonic()
     signal.alarm(seconds)
     try: yield
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
+        if remaining:
+            signal.alarm(max(1, int(remaining - (time.monotonic() - started))))
+
+def require_resume_profile(profile):
+    """A visible handoff may retain a real worker directory, but never follows linked or unknown profile state."""
+    try:
+        if not stat.S_ISDIR(profile.lstat().st_mode):
+            raise OSError('Not an independent profile directory')
+        with os.scandir(profile) as children:
+            for child in children:
+                mode = child.stat(follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise OSError('Linked profile entry cannot be verified without traversal')
+                if not stat.S_ISDIR(mode):
+                    continue
+                worker = Path(child.path) / 'Service Worker'
+                try:
+                    worker_mode = worker.lstat().st_mode
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISLNK(worker_mode) or not stat.S_ISDIR(worker_mode):
+                    raise OSError('Linked or invalid Service Worker state cannot be opened safely')
+    except OSError as error:
+        raise RuntimeError('JobsDB independent profile metadata unavailable; read-only access refused; original session untouched') from error
+
 
 def require_read_profile(profile):
     """Metadata only: unknown/unreadable/linked state is not worker absence."""
@@ -91,20 +196,24 @@ def require_read_profile(profile):
 
 class Browser:
     """Owns one pinned Scrapling session. Never attaches to another browser."""
-    def __init__(self, data, *, read_only=False):
+    def __init__(self, data, *, read_only=False, allow_existing_worker=False, screenshots=True):
         self.data, self.read_only = data, read_only
+        self.allow_existing_worker, self.screenshots = allow_existing_worker, screenshots
     def __enter__(self):
-        # A persisted worker can bypass routing. Refuse before Chrome starts, never delete user state.
+        # Ordinary strict reads still refuse persisted workers. A resume may use the same profile only
+        # with browser-level blocking plus per-page CDP bypass installed before navigation.
         if self.read_only:
-            require_read_profile(self.data / 'scrapling-profile')
+            (require_resume_profile if self.allow_existing_worker else require_read_profile)(self.data / 'scrapling-profile')
         from scrapling.fetchers import StealthySession
         options = {'no_viewport': True, 'viewport': None, 'screen': None,
                    'device_scale_factor': None, 'is_mobile': None}
+        flags = []
         if self.read_only:
             options['service_workers'] = 'block'
+            flags.append('--disable-features=ServiceWorker')
         self.session = StealthySession(headless=False, real_chrome=True, google_search=False,
             user_data_dir=str(self.data / 'scrapling-profile'), timeout=30000, retries=1,
-            additional_args=options)
+            additional_args=options, extra_flags=flags)
         self.session.__enter__()
         return self
     def __exit__(self, *args):
@@ -121,18 +230,35 @@ class Browser:
             try:
                 if challenge(page):
                     if self.read_only:
-                        raise VerificationRequired('CF challenge remains')
+                        raise VerificationRequired('CF challenge remains', page.url)
                     raise RuntimeError('CF challenge remains')
                 result.append(action(page))
             except Exception as exc:
                 errors.append(exc)  # Scrapling otherwise logs and swallows action exceptions.
             finally:
-                screenshot(page, self.data, 'last-page')
+                if self.screenshots:
+                    screenshot(page, self.data, 'last-page')
         with deadline():
             options = {'page_setup': setup} if setup is not None else {}
             self.session.fetch(url, solve_cloudflare=setup is None, page_action=perform, **options)
         if errors: raise errors[0]
         if not result: raise RuntimeError('Browser action did not run')
+        return result[0]
+    def run_interactive(self, url, action, *, setup=None):
+        """Visible user-owned step: observe completion, never invoke the automatic challenge solver."""
+        result, errors = [], []
+        def perform(page):
+            signal.alarm(0)
+            try: result.append(action(page))
+            except Exception as exc: errors.append(exc)
+            finally:
+                if self.screenshots:
+                    screenshot(page, self.data, 'last-page')
+        with deadline():
+            options = {'page_setup': setup} if setup is not None else {}
+            self.session.fetch(url, solve_cloudflare=False, page_action=perform, **options)
+        if errors: raise errors[0]
+        if not result: raise RuntimeError('Interactive browser action did not run')
         return result[0]
 
 class Flow:
@@ -372,7 +498,7 @@ def application(page, browser, store, url, command, data):
     print('RESULT='+outcome)
     return 0 if outcome == 'SUBMITTED' else 2
 
-def main(argv=None):
+def main(argv=None, *, supervise_resume_process=False):
     parser = argparse.ArgumentParser(description='JobsDB HK — isolated Scrapling + Chrome CLI; no Boss runtime')
     subs = parser.add_subparsers(dest='command', required=True)
     for name in ('login','history','help'): subs.add_parser(name)
@@ -385,10 +511,18 @@ def main(argv=None):
     read = subs.add_parser('read-candidates', help='Bounded workbench read; never apply or load global answers')
     read.add_argument('task_file')
     read.add_argument('--data-dir', required=True, type=Path)
+    resume_read = subs.add_parser('resume-read', help='Visible user verification, then continue the same bounded read; never apply')
+    resume_read.add_argument('task_file')
+    resume_read.add_argument('--data-dir', required=True, type=Path)
     args = parser.parse_args(argv or ['help'])
     if args.command == 'read-candidates':
         from workbench_read import execute
         return execute(args.task_file, args.data_dir)
+    if args.command == 'resume-read':
+        if supervise_resume_process and os.environ.get(_RESUME_WORKER) != '1':
+            return supervise_resume(args.task_file, args.data_dir)
+        from workbench_read import execute_resume
+        return execute_resume(args.task_file, args.data_dir)
     if args.command == 'help': parser.print_help(); return 0
     id = job_id(args.url) if args.command in ('prepare','apply') else None
     if args.command == 'search' and not args.keywords.strip(): parser.error('keywords must not be blank')
@@ -412,9 +546,8 @@ def main(argv=None):
             return browser.run(SITE+'/job/'+id, lambda page: application(page,browser,store,args.url,args.command,DATA))
 
 if __name__ == '__main__':
-    def terminate(*_): raise KeyboardInterrupt()
-    signal.signal(signal.SIGTERM, terminate)
-    try: sys.exit(main(sys.argv[1:]))
+    signal.signal(signal.SIGTERM, request_cancellation)
+    try: sys.exit(main(sys.argv[1:], supervise_resume_process=True))
     except KeyboardInterrupt:
         print('CANCELLED', file=sys.stderr); sys.exit(130)
     except Exception as exc:

@@ -15,14 +15,14 @@ class WorkbenchConnectionsTest {
         Files.createDirectories(profile.resolve("Default"));
         assertEquals(CHECK_AT_READ, WorkbenchConnections.jobsDb(profile));
         Files.createDirectory(profile.resolve("Default/Service Worker"));
-        assertEquals(READ_GUARD_BLOCKED, WorkbenchConnections.jobsDb(profile));
+        assertEquals(USER_ACTION_REQUIRED, WorkbenchConnections.jobsDb(profile));
     }
 
-    @Test void danglingWorkerLinkCannotBeMistakenForAbsentState() throws Exception {
+    @Test void danglingWorkerLinkIsUnavailableWithoutBeingFollowed() throws Exception {
         var profile = Files.createDirectories(root.resolve("profile/Default")).getParent();
         var worker = profile.resolve("Default/Service Worker");
         Files.createSymbolicLink(worker, root.resolve("missing-worker"));
-        assertEquals(READ_GUARD_BLOCKED, WorkbenchConnections.jobsDb(profile));
+        assertEquals(PROFILE_UNAVAILABLE, WorkbenchConnections.jobsDb(profile));
         assertTrue(Files.isSymbolicLink(worker));
         assertFalse(Files.exists(root.resolve("missing-worker")));
     }

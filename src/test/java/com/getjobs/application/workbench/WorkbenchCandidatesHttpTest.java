@@ -12,6 +12,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -110,6 +112,96 @@ class WorkbenchCandidatesHttpTest {
             postJson(http, "/candidates/match", "{\"scopeVersion\":1}");
             assertEquals("INELIGIBLE", getJson(http, "/candidates").at("/jobs/0/analysis/status").asText());
             assertEquals(0, getJson(http, "/state").at("/scope/usage/outbound").asInt());
+        }
+    }
+
+    @Test void automaticUserActionResumeFinishesOnlyTheAlreadyChargedPageBeforeAnyLaterExplicitContinuation() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, List.of(), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); scope(http, 20, 30);
+            var reads = new AtomicInteger();
+            WorkbenchCandidates.Reader reader = bundle -> {
+                int call = reads.incrementAndGet();
+                if (call == 1) throw new WorkbenchCandidates.UserActionRequired("login-1", "login required");
+                var output = json.createObjectNode(); output.putArray("jobs");
+                if (call == 2) output.put("nextUrl", bundle.path("source").path("url").asText()).put("cursor", "after-login");
+                else output.put("nextUrl", "").put("cursor", "");
+                return output;
+            };
+            var request = request().put("maxPages", 1); request.withArray("sources").remove(1);
+            var first = service.candidates.discover(request, reader);
+            assertEquals("CHECKPOINT", first.path("status").asText());
+            assertEquals(3, getJson(http, "/scope").path("usage").path("candidates").asInt());
+            var resume = request.deepCopy().put("runId", first.path("id").asText());
+            var unresolved = service.candidates.discover(resume, reader);
+            assertEquals("CHECKPOINT", unresolved.path("status").asText());
+            assertEquals(1, reads.get(), "A direct continuation must not claim that the visible user interaction completed");
+            var resumed = service.candidates.discover(resume, reader, null, Set.of("login-1"));
+            assertEquals("CHECKPOINT", resumed.path("status").asText());
+            assertEquals(2, reads.get(), "Automatic resume must not reserve another page after finishing the pending one");
+            assertEquals(3, getJson(http, "/scope").path("usage").path("candidates").asInt());
+            var continued = service.candidates.discover(resume, reader);
+            assertEquals("COMPLETED", continued.path("status").asText());
+            assertEquals(3, reads.get());
+            assertEquals(6, getJson(http, "/scope").path("usage").path("candidates").asInt());
+        }
+    }
+
+    @Test void failedResumeKeepsTheSamePendingReadInsteadOfFinalizingItsAuthorization() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, List.of(), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); scope(http, 20, 30);
+            var request = request(); request.withArray("sources").remove(1);
+            var first = service.candidates.discover(request, bundle -> { throw new WorkbenchCandidates.UserActionRequired("login-kept", "login required"); });
+            var resumed = service.candidates.discover(request.deepCopy().put("runId", first.path("id").asText()),
+                    bundle -> { throw new WorkbenchException(409, "visible browser was closed"); }, null, Set.of("login-kept"));
+            assertEquals("login-kept", resumed.at("/sources/0/pendingRead/interactionId").asText(), resumed::toPrettyString);
+            assertEquals("visible browser was closed", resumed.at("/sources/0/pendingRead/message").asText());
+            assertEquals(3, getJson(http, "/scope").path("usage").path("candidates").asInt());
+        }
+    }
+
+    @Test void exhaustedVerificationSecondsEndTheChargedReadWithoutCreatingARetryingCheckpoint() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, List.of(), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); scope(http, 20, 30);
+            WorkbenchCandidates.Reader reader = bundle -> { throw new WorkbenchCandidates.UserActionRequired(
+                    "login-exhausted", bundle.path("source").path("url").asText(), "verification remains", 0); };
+            var request = request(); request.withArray("sources").remove(1);
+            var run = service.candidates.discover(request, reader);
+            assertEquals("CHECKPOINT", run.path("status").asText());
+            assertFalse(run.at("/sources/0").has("pendingRead"), run::toPrettyString);
+            assertTrue(run.path("events").toString().contains("READ_EXCEPTION"), run::toPrettyString);
+            assertEquals(3, getJson(http, "/scope").path("usage").path("candidates").asInt());
+        }
+    }
+
+    @Test void userActionResumeDoesNotConsumeTheNextPageWithoutExplicitContinuation() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, List.of(), "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); scope(http, 20, 30);
+            var reads = new AtomicInteger();
+            WorkbenchCandidates.Reader reader = bundle -> {
+                int call = reads.incrementAndGet();
+                if (call == 1) throw new WorkbenchCandidates.UserActionRequired("login-2", "login required");
+                var output = json.createObjectNode(); output.putArray("jobs");
+                if (call == 2) output.put("nextUrl", bundle.path("source").path("url").asText()).put("cursor", "page-2");
+                else output.put("nextUrl", "").put("cursor", "");
+                return output;
+            };
+            var request = request().put("maxPages", 2); request.withArray("sources").remove(1);
+            var first = service.candidates.discover(request, reader);
+            assertEquals("CHECKPOINT", first.path("status").asText());
+            assertEquals(1, reads.get());
+            var continuation = request.deepCopy().put("runId", first.path("id").asText());
+            var resumed = service.candidates.discover(continuation, reader, null, Set.of("login-2"));
+            assertEquals("CHECKPOINT", resumed.path("status").asText());
+            assertEquals(2, reads.get(), "Automatic resume must finish only the already charged pending page");
+            assertEquals(3, getJson(http, "/scope").path("usage").path("candidates").asInt());
+            var continued = service.candidates.discover(continuation, reader);
+            assertEquals("COMPLETED", continued.path("status").asText());
+            assertEquals(3, reads.get());
+            assertEquals(6, getJson(http, "/scope").path("usage").path("candidates").asInt());
         }
     }
 

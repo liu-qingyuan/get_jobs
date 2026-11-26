@@ -1,5 +1,8 @@
 import io
+import os
+import signal
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +48,33 @@ class UrlTests(unittest.TestCase):
                     'https://hk.jobsdb.com:444/job/123', 'https://u@hk.jobsdb.com/job/123',
                     'https://hk.jobsdb.com/job/abc', 'https://hk.jobsdb.com/job/123/apply'):
             with self.assertRaises(ValueError): jobsdb.job_id(url)
+
+
+class ResumeSupervisorTests(unittest.TestCase):
+    def test_sigterm_reaps_the_isolated_resume_worker_group(self):
+        from unittest.mock import patch
+
+        class Worker:
+            pid = 424242
+            waits = 0
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    return -signal.SIGKILL
+                self.waits += 1
+                if self.waits == 1:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                raise subprocess.TimeoutExpired('resume-worker', timeout)
+
+        worker = Worker()
+        with patch.object(jobsdb.subprocess, 'Popen', return_value=worker) as launch, \
+                patch.object(jobsdb.os, 'killpg') as kill_group:
+            self.assertEqual(130, jobsdb.supervise_resume('/private/task.json', '/private/data', grace_seconds=0))
+
+        self.assertEqual([signal.SIGTERM, signal.SIGKILL], [call.args[1] for call in kill_group.call_args_list])
+        options = launch.call_args.kwargs
+        self.assertTrue(options['start_new_session'])
+        self.assertEqual('1', options['env'][jobsdb._RESUME_WORKER])
 
 
 class BrowserTests(unittest.TestCase):
