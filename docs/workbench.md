@@ -158,7 +158,7 @@ Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发�
 
 若同一范围包含 JobsDB 和 OfferToday，可分别勾选两个网站的已核对联系方式。每个岗位的材料包只冻结适用于其网站、地区和语言的已核对联系方式；缺少适用项时只阻止该岗位备料，不借用另一站资料。
 
-`runtime.jobsDbConfigured` 仅表示只读命令配置，读取时才核验会话；`jobsDbProductionVerified=false`、`jobsDbOutboundSupported=false` 与 `jobsDbCapabilityReason` 仍表示批次/联系/附件外发未核实，`jobsDbSingleJobSupported` 仅表示受控单岗 APPLY 的独立脚本已配置。受控单岗申请只接受 `POST /jobsdb/apply`：当前范围必须允许 `JOBSDB`/APPLY、HK、`hk.jobsdb.com` 与已核对联系方式，且准备包为当前范围的 `POLICY_APPROVED`、冻结 DOCX 与附件 SHA256、冻结答案已由用户显式确认。策略在同一原子授权中扣除一次 outbound；Runner 把冻结附件复制到私有运行目录并复核字节哈希，写入绑定 attempt/authorization/岗位/Profile 指纹/联系方式哈希/附件哈希/答案哈希的任务，调用独立 `apply-single`，绝不调用旧 batch 或其他渠道。
+`runtime.jobsDbConfigured` 仅表示只读命令配置，读取时才核验会话；`jobsDbProductionVerified=false`、`jobsDbOutboundSupported=false` 与 `jobsDbCapabilityReason` 仍表示批次/联系/附件外发未核实，`jobsDbSingleJobSupported` 仅表示受控单岗 APPLY 的独立脚本已配置。受控单岗申请只接受 `POST /jobsdb/apply`：当前范围必须允许 `JOBSDB`/APPLY、HK、`hk.jobsdb.com` 与已核对联系方式，且准备包为当前范围的 `POLICY_APPROVED`、冻结 DOCX 与附件 SHA256、冻结答案已由用户显式确认。Runner 先以只读方式核对原 `applications.db` 任意同岗尝试并在消费 outbound 前复制/复核冻结附件字节，才在同一原子授权中扣除一次 outbound；随后写入绑定 attempt/authorization/岗位/Profile 指纹/联系方式哈希/附件哈希/答案哈希的任务，调用独立 `apply-single`，绝不调用旧 batch 或其他渠道。
 
 `apply-single` 沿用与 #20 相同的 pinned Scrapling solver 自动完成 Cloudflare/CAPTCHA，无需用户确认；登录/二次验证/会话失效仍停止，不导出 Cookie/密码/验证码。它只填本任务冻结的简历与答案；未知表单问题、缺附件、错岗位/联系方式或登录失效都停止且不猜答。到 review 后先向原账本 claim，再只提交一次；缺失、模糊或绑定不匹配的回执记 UNKNOWN，不自动重投，也不把退出码或积极文案当成功。工作台只记录绑定 attempt、authorization、岗位、Profile/联系方式、附件/答案哈希与回执 SHA256 的 `jobsdb_attempts`；已有 SUBMITTED/UNKNOWN 的同岗再次请求会被拒绝。批量 APPLY/CONTACT/SEND_CV 仍返回 `CAPABILITY_UNVERIFIED`；原 Profile 仍可能包含任务外线上资料，本路径证明的是冻结包与回执绑定，而不是线上 Profile 只含本任务资料。
 

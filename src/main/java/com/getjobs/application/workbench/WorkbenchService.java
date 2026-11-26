@@ -49,6 +49,9 @@ public final class WorkbenchService {
         this.verification = new WorkbenchVerification(this);
     }
 
+    /** Read-only original JobsDB ledger check; never claims or mutates the legacy database. */
+    boolean jobsDbAttempted(String url) { return legacy.attempted(url); }
+
     public ObjectNode state() {
         return store.write(c -> {
             var result = json.createObjectNode();

@@ -548,6 +548,43 @@ class WorkbenchJobsDbHttpTest {
         }
     }
 
+    @Test void originalJobsDbLedgerBlocksBeforeOutboundAuthorization() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
+            Files.createDirectories(root.resolve("legacy"));
+            try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db"));
+                 var q = c.prepareStatement("CREATE TABLE applications(job_id TEXT PRIMARY KEY,status TEXT,updated_at TEXT)")) { q.execute(); }
+            try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db"));
+                 var q = c.prepareStatement("INSERT INTO applications(job_id,status,updated_at) VALUES('12345678','UNKNOWN','now')")) { q.execute(); }
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
+            var after = state(http);
+            assertEquals(0, after.path("jobsdbAttempts").size());
+            assertEquals(0, after.path("scope").path("usage").path("outbound").asInt());
+        }
+    }
+
+    @Test void changedFrozenBytesStopBeforeOutboundConsumption() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
+            Path resume = service.file((ObjectNode) pkg.path("snapshot").path("resume"));
+            byte[] bytes = Files.readAllBytes(resume); bytes[0] ^= 1; Files.write(resume, bytes);
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
+            var after = state(http);
+            assertEquals(0, after.path("jobsdbAttempts").size());
+            assertEquals(0, after.path("scope").path("usage").path("outbound").asInt());
+        }
+    }
+
     @Test void mismatchedReceiptIsUnknownAndCannotBeRetriedAsSuccess() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(true), null, "http://127.0.0.1:1", 10)) {

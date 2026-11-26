@@ -370,6 +370,15 @@ public final class WorkbenchRunner implements AutoCloseable {
             for (var attempt : previous)
                 if (attempt.path("candidateId").asText().equals(candidateId) && Set.of("SUBMITTED", "UNKNOWN").contains(attempt.path("status").asText()))
                     throw new WorkbenchException(409, "该岗位已有 SUBMITTED/UNKNOWN 尝试；不会自动重投");
+            if (service.jobsDbAttempted(target.path("url").asText()))
+                throw new WorkbenchException(409, "JobsDB 原账本已有该岗位尝试；不会重复投递");
+            // Verify every frozen byte and binding before reserving the single outbound unit.
+            String attemptId = UUID.randomUUID().toString();
+            Path directory = service.store.root.resolve("runs").resolve("jobsdb-apply-" + attemptId);
+            Files.createDirectories(directory.resolve("resume"));
+            String resumePath = copyFrozenResume(directory.resolve("resume"), resume);
+            String profileHash = jobsDbProfileHash();
+            String contactHash = WorkbenchService.hash(snapshot.path("contactFacts").toString().getBytes(StandardCharsets.UTF_8));
             var request = service.json.createObjectNode().put("scopeVersion", scopeVersion).put("action", "APPLY");
             request.set("target", target.deepCopy());
             request.put("preparationId", preparationId).put("answersSha256", answersSha).put("answersConfirmed", true);
@@ -380,12 +389,6 @@ public final class WorkbenchRunner implements AutoCloseable {
             String authorizationId = authorized.path("authorization").path("id").asText();
             var consumed = service.scope.consume(authorizationId);
             if (!consumed.path("allowed").asBoolean()) throw new WorkbenchException(409, consumed.path("reasons").toString());
-            String attemptId = UUID.randomUUID().toString();
-            Path directory = service.store.root.resolve("runs").resolve("jobsdb-apply-" + attemptId);
-            Files.createDirectories(directory.resolve("resume"));
-            String resumePath = copyFrozenResume(directory.resolve("resume"), resume);
-            String profileHash = jobsDbProfileHash();
-            String contactHash = WorkbenchService.hash(snapshot.path("contactFacts").toString().getBytes(StandardCharsets.UTF_8));
             Path taskFile = directory.resolve("task.json"), resultFile = directory.resolve("result.json"), log = directory.resolve("apply.log");
             var task = service.json.createObjectNode().put("kind", "JOBSDB_SINGLE_APPLY").put("attemptId", attemptId)
                     .put("authorizationId", authorizationId).put("url", target.path("url").asText())
@@ -426,7 +429,7 @@ public final class WorkbenchRunner implements AutoCloseable {
         } catch (WorkbenchException e) {
             throw e;
         } catch (Exception e) {
-            throw new WorkbenchException(409, "JobsDB 单岗申请未完成；保留原账本与授权消费，不自动重投");
+            throw new WorkbenchException(409, "JobsDB 单岗申请未完成；不自动重投，保留已产生的原账本/授权记录");
         } finally {
             releaseProcess(); busy.set(false);
         }
