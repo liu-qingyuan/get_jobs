@@ -34,7 +34,7 @@ class WorkbenchPreparationHttpTest {
                 if b['kind']=='CANDIDATE_READ':
                     json.dump({'jobs':[{'url':('https://www.offertoday.com/hk/job/synthetic-job-' if b['source']['channel']=='OFFERTODAY' else 'https://careers.example.test/jobs/')+s,'company':'Synthetic Co','title':'Python engineer','description':%s,'descriptionComplete':True} for s in ['a','b']]},open(b['resultPath'],'w'))
                 elif b['kind']=='CANDIDATE_MATCH':
-                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
+                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':j['description'],'reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
                 else:
                     assert b['kind']=='MATERIAL_PREPARE'
                     counter=pathlib.Path(%s)
@@ -73,6 +73,22 @@ class WorkbenchPreparationHttpTest {
         return json.readTree(http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench" + path).contentType("application/json").content(value.toString())).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8));
     }
     JsonNode getJson(MockMvc http, String path) throws Exception { return json.readTree(http.perform(get("/api/workbench" + path)).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8)); }
+
+    @Test void analysisReadyWithoutMatchCannotPrepareOrCreateAnEffectTask() throws Exception {
+        var command = fake("");
+        var script = Path.of(command.get(1));
+        Files.writeString(script, Files.readString(script).replace("'requirementQuote':j['description']", "'requirementQuote':'Python'"));
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http);
+            for (var pkg : post(http, "/candidates/prepare", prepareInput()).path("packages")) {
+                assertEquals("MATERIAL_EXCEPTION", pkg.path("status").asText());
+                assertTrue(pkg.path("reason").asText().contains("MATCH"));
+            }
+            assertEquals(0, getJson(http, "/state").path("tasks").size());
+            assertFalse(Files.exists(root.resolve("preparation-calls")));
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"Achieved 99% accuracy.", "Commercial deployment for a bank.", "5 years of professional Python experience.", "Therefore expert in production machine learning."})
@@ -280,8 +296,75 @@ class WorkbenchPreparationHttpTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"resume.docx", "resume.pdf", "resume.txt"})
-    void aValidFileHashAndApprovedSidecarDoNotProveTheActualAttachmentContent(String filename) throws Exception {
+    @ValueSource(strings = {"resume.docx", "resume.pdf"})
+    void fourExplicitlySelectedApprovedLocalCvsRemainDownloadableAndFreezeOriginalBytes(String filename) throws Exception {
+        var command = fake(""); var service = service();
+        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http);
+            var scope = reviseScope(http); var ids = scope.putArray("resumeIds");
+            var approved = new java.util.ArrayList<JsonNode>();
+            byte[] bytes = ordinaryCv(filename);
+            for (String region : List.of("HK", "MAINLAND")) for (String language : List.of("en", "zh")) {
+                var response = http.perform(multipart("/api/workbench/resumes")
+                        .file(new org.springframework.mock.web.MockMultipartFile("file", filename, "application/octet-stream", bytes))
+                        .param("label", region + " " + language).param("region", region).param("language", language).param("content", filename.endsWith(".pdf") ? "" : FACT))
+                        .andExpect(status().isOk()).andReturn();
+                var resume = json.readTree(response.getResponse().getContentAsString(StandardCharsets.UTF_8));
+                approved.add(post(http, "/resumes/" + resume.path("id").asText() + "/approve", json.createObjectNode()));
+                ids.add(resume.path("id").asText());
+                assertArrayEquals(bytes, http.perform(get("/api/workbench/resumes/" + resume.path("id").asText() + "/file"))
+                        .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
+            }
+            post(http, "/scope", scope); match(http, 2);
+            assertTrue(getJson(http, "/state").path("resumes").findValuesAsText("id").containsAll(approved.stream().map(r -> r.path("id").asText()).toList()));
+            for (var pkg : post(http, "/candidates/prepare", prepareInput().put("scopeVersion", 2)).path("packages")) {
+                assertEquals("POLICY_APPROVED", pkg.path("status").asText());
+                assertEquals(approved.get(0), pkg.path("snapshot").path("resume"));
+                assertEquals(WorkbenchService.hash(bytes), pkg.path("snapshot").path("resume").path("sha256").asText());
+                assertEquals("ORIGINAL", pkg.path("target").path("transformation").asText());
+            }
+            assertEquals(5, getJson(http, "/state").path("resumes").size());
+            assertEquals(0, getJson(http, "/state").path("tasks").size());
+        }
+    }
+
+    @Test void multipleApplicableSelectedCvsStopBeforeTheModelRatherThanSilentlyTakingTheFirst() throws Exception {
+        var command = fake(""); var service = service();
+        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http);
+            var response = http.perform(multipart("/api/workbench/resumes").param("label", "Another HK English CV")
+                    .param("region", "HK").param("language", "en").param("content", FACT)).andExpect(status().isOk()).andReturn();
+            var resume = json.readTree(response.getResponse().getContentAsString(StandardCharsets.UTF_8));
+            post(http, "/resumes/" + resume.path("id").asText() + "/approve", json.createObjectNode());
+            var scope = reviseScope(http); scope.withArray("resumeIds").add(resume.path("id").asText());
+            post(http, "/scope", scope); match(http, 2);
+            for (var pkg : post(http, "/candidates/prepare", prepareInput().put("scopeVersion", 2)).path("packages")) {
+                assertEquals("MATERIAL_EXCEPTION", pkg.path("status").asText());
+                assertTrue(pkg.path("reason").asText().contains("歧义"));
+            }
+            assertFalse(Files.exists(root.resolve("preparation-calls")));
+            assertEquals(0, getJson(http, "/state").path("tasks").size());
+        }
+    }
+
+    byte[] ordinaryCv(String filename) throws Exception {
+        if (filename.endsWith(".pdf")) return "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 0/Kids[]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n".getBytes(StandardCharsets.UTF_8);
+        var output = new java.io.ByteArrayOutputStream();
+        try (var zip = new java.util.zip.ZipOutputStream(output)) {
+            for (var part : java.util.Map.of(
+                    "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>",
+                    "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>",
+                    "word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Human-reviewed original CV</w:t></w:r></w:p></w:body></w:document>").entrySet()) {
+                zip.putNextEntry(new java.util.zip.ZipEntry(part.getKey()));
+                zip.write(part.getValue().getBytes(StandardCharsets.UTF_8)); zip.closeEntry();
+            }
+        }
+        return output.toByteArray();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"resume.txt", "resume.md"})
+    void aTextAttachmentStillRequiresExactApprovedTextBytes(String filename) throws Exception {
         var command = fake(""); var service = service();
         try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); setup(http);

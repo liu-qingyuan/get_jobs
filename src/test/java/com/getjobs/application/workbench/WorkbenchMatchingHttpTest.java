@@ -59,6 +59,65 @@ class WorkbenchMatchingHttpTest {
         postJson(http, "/scope", scope.toString());
         postJson(http, "/candidates/discover", "{\"scopeVersion\":1,\"maxPages\":1,\"jobsPerPage\":5,\"secondsPerPage\":2,\"modelTokensPerPage\":10,\"sources\":[{\"channel\":\"OFFICIAL\",\"url\":\"https://careers.example.test/jobs\",\"region\":\"HK\",\"language\":\"en\",\"direction\":\"AI_APPLICATION\"}]}");
     }
+    @Test void analysisReadyWithOnlyOneSupportedWordDoesNotProveMatchOrCoverMandatoryRequirements() throws Exception {
+        var command = fake(validOutput()); var service = service();
+        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); setup(http);
+            var analysis = postJson(http, "/candidates/match", "{\"scopeVersion\":1}").path("jobs").get(0).path("analysis");
+            assertEquals("ANALYSIS_READY", analysis.path("status").asText());
+            assertEquals("UNDETERMINED", analysis.path("verdict").asText());
+            assertTrue(analysis.path("verdictReasons").toString().contains("At least 5 years Python"));
+            assertEquals(0, getJson(http, "/state").path("tasks").size());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"OPTIONAL", "TRANSFERABLE"})
+    void partialNeedsExplicitNoGapAndNoCvChangeEvidenceBeforeMatch(String basis) throws Exception {
+        var output = validOutput().replace("json.dump({'results':results}", """
+                for r in results:
+                    r['findings'][0]['requirementQuote']=%s
+                    partial=dict(r['findings'][0],kind='PARTIAL',requirementQuote='clear technical communication',partialBasis=%s,mandatoryGap=False,materialGap=False,requiresCvChange=False)
+                    r['findings'].append(partial)
+                json.dump({'results':results}
+                """.formatted(json.writeValueAsString(JD), json.writeValueAsString(basis)).stripTrailing());
+        var command = fake(output); var service = service();
+        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); setup(http);
+            var analysis = postJson(http, "/candidates/match", "{\"scopeVersion\":1}").path("jobs").get(0).path("analysis");
+            assertEquals("MATCH", analysis.path("verdict").asText());
+            assertEquals(basis, analysis.path("findings").get(1).path("partialBasis").asText());
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource(delimiter = '|', value = {
+            "HARD_REQUIREMENT|f.update(kind='HARD_REQUIREMENT')|MISMATCH",
+            "NOT_APPLICABLE|f.update(kind='NOT_APPLICABLE')|MISMATCH",
+            "NEEDS_FACTS|f.update(kind='NEEDS_FACTS')|UNDETERMINED",
+            "UNQUALIFIED_PARTIAL|f.update(kind='PARTIAL')|UNDETERMINED",
+            "MANDATORY_GAP|f.update(kind='PARTIAL',partialBasis='TRANSFERABLE',mandatoryGap=True,materialGap=False,requiresCvChange=False)|MISMATCH",
+            "MATERIAL_GAP|f.update(kind='PARTIAL',partialBasis='OPTIONAL',mandatoryGap=False,materialGap=True,requiresCvChange=False)|MISMATCH",
+            "CV_CHANGE|f.update(kind='PARTIAL',partialBasis='TRANSFERABLE',mandatoryGap=False,materialGap=False,requiresCvChange=True)|UNDETERMINED"
+    })
+    void negativeAndUnknownJudgementsNeverBecomeMatch(String scenario, String mutation, String verdict) throws Exception {
+        var output = validOutput().replace("json.dump({'results':results}", """
+                for r in results:
+                    f=r['findings'][0]
+                    f['requirementQuote']=%s
+                    %s
+                json.dump({'results':results}
+                """.formatted(json.writeValueAsString(JD), mutation).stripTrailing());
+        var command = fake(output); var service = service();
+        try (var runner = new WorkbenchRunner(service, command, "http://127.0.0.1:1", 5)) {
+            var http = http(service, runner); setup(http);
+            var analysis = postJson(http, "/candidates/match", "{\"scopeVersion\":1}").path("jobs").get(0).path("analysis");
+            assertEquals(verdict, analysis.path("verdict").asText(), scenario);
+            assertFalse(analysis.path("verdictReasons").isEmpty());
+            assertEquals(0, getJson(http, "/state").path("tasks").size());
+        }
+    }
+
     @Test void batchHasTraceableEvidenceAndSameInputPollingAndRestartNeverRepeatTheModel() throws Exception {
         var command = fake(validOutput()); var service = service();
         String analysisId;

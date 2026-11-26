@@ -205,6 +205,7 @@ class WorkbenchVerificationHttpTest {
                             out={'results':[]}""".formatted(f.json.writeValueAsString(bundle.toString())))
                 .replace("f=j['facts'][0]", "f=next((x for x in j['facts'] if x.get('evidenceKind')=='LOCAL_PROJECT'),j['facts'][0])")
                 .replace("gap=j['url'].endswith('gap')", "gap=j['url'].endswith('gap') and f.get('evidenceKind')!='LOCAL_PROJECT'")
+                .replace("'requirementQuote':'pipeline experience'", "'requirementQuote':('pipeline experience' if gap else j['description'])")
                 .replace("'reason':'Confirmed local experience only'", "'reason':f['value']");
         Files.writeString(script, model);
         try (var runner = new WorkbenchRunner(service, analysis, List.of(), List.of(), null, successfulExecutor(f), verifier(), "http://127.0.0.1:1", 5)) {
@@ -228,6 +229,7 @@ class WorkbenchVerificationHttpTest {
             match.putArray("candidateIds").add(project.path("candidateId").asText());
             var matched = f.postJson(http, "/candidates/match", match).at("/jobs/0/analysis");
             assertEquals("ANALYSIS_READY", matched.path("status").asText(), matched.toPrettyString());
+            assertEquals("MATCH", matched.path("verdict").asText(), matched.toPrettyString());
             assertEquals(projectFact.path("id"), matched.at("/findings/0/evidence/0/id"));
             var before = f.postJson(http, "/candidates/prepare", match).at("/packages/0");
             var sent = Files.readString(bundle);

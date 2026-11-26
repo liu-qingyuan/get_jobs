@@ -109,6 +109,8 @@ export default function Candidates({ state, working, act, showScope }: Props) {
         {job.status !== 'READY' && <ul className="mt-2 list-inside list-disc text-sm text-amber-800 dark:text-amber-200">{job.reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul>}
         <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-700" aria-label="匹配依据与缺口">
           <p className="font-semibold">{matchStatuses[job.analysis.status]}{job.analysis.stale ? ' · 已过期，等待当前范围及运行槽重核' : job.analysis.id ? ' · 当前输入缓存' : ''}</p>
+          <p className="mt-2 text-sm font-semibold">{job.analysis.verdict ?? 'UNDETERMINED'} · {job.analysis.verdict === 'MATCH' ? '可进入策略备料；不是外发授权或送达' : '不自动备料或外发；请核实要求、事实与所选 CV'}</p>
+          {job.analysis.verdictReasons?.map((reason, i) => <p key={i} className={`${small} mt-1 whitespace-pre-wrap break-words`}>{reason}</p>)}
           {job.analysis.id && <p className={`${small} mt-1 break-all`}>分析 {job.analysis.id} · 范围 v{job.analysis.scopeVersion} · 规则 {job.analysis.rulesVersion} · JD SHA256 {job.analysis.jdSha256}</p>}
           {job.analysis.exception && <p role="note" className="mt-2 text-sm text-amber-800 dark:text-amber-200">{job.analysis.exception}</p>}
           {job.analysis.questions?.map((question, i) => <p key={i} className="mt-2 text-sm text-amber-800 dark:text-amber-200">必要核实：{typeof question === 'string' ? question : `${question.label ?? question.factId ?? '材料'}：${question.reason}`}</p>)}

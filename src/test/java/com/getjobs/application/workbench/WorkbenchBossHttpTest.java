@@ -50,7 +50,7 @@ class WorkbenchBossHttpTest {
                 with (root/'calls').open('a') as log: log.write(b.get('kind','EXECUTE')+'\\n')
                 assert b['kind'] in ['CANDIDATE_MATCH','MATERIAL_PREPARE'], 'Boss must never fall back to official read/send'
                 if b['kind']=='CANDIDATE_MATCH':
-                    result=[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed project','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]
+                    result=[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':j['description'],'reason':'Confirmed project','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]
                 else:
                     result=[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'ORIGINAL'} for j in b['candidates']]
                 json.dump({'results':result},open(b['resultPath'],'w'))

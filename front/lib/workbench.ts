@@ -179,10 +179,12 @@ export interface ScopeWorkspace {
 export type MatchKind = 'SUPPORTED' | 'PARTIAL' | 'NEEDS_FACTS' | 'EXPERIENCE_GAP' | 'HARD_REQUIREMENT' | 'NOT_APPLICABLE'
 export interface MatchingAnalysis {
   id?: string; status: 'NOT_ANALYZED' | 'ANALYSIS_READY' | 'NEEDS_FACTS' | 'EXPERIENCE_GAP' | 'ANALYSIS_EXCEPTION' | 'INELIGIBLE'
+  verdict?: 'MATCH' | 'MISMATCH' | 'UNDETERMINED'; verdictReasons?: string[]
   stale: boolean; scopeVersion?: number; rulesVersion?: string; jdSha256?: string; createdAt?: string; exception?: string
   questions?: Array<string | { factId?: string; label?: string; reason: string }>
   findings?: Array<{
     kind: MatchKind; requirementQuote: string; reason: string
+    partialBasis?: 'OPTIONAL' | 'TRANSFERABLE'; mandatoryGap?: boolean; materialGap?: boolean; requiresCvChange?: boolean
     evidence: Array<{ type: 'FACT' | 'RESUME'; id: string; quote: string; source: Partial<Fact & Resume> }>
     suggestion?: { goal: string; acceptance: string }
   }>

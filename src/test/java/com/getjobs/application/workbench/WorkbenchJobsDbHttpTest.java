@@ -57,7 +57,7 @@ class WorkbenchJobsDbHttpTest {
                 b=json.load(open(sys.argv[-1]))
                 assert b['kind'] in ['CANDIDATE_MATCH','MATERIAL_PREPARE'], 'No official fallback for JobsDB'
                 if b['kind']=='CANDIDATE_MATCH':
-                    result=[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed project','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]
+                    result=[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':j['description'],'reason':'Confirmed project','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]
                 else:
                     result=[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[j['facts'][0]['id']]} for j in b['candidates']]
                 json.dump({'results':result},open(b['resultPath'],'w'))

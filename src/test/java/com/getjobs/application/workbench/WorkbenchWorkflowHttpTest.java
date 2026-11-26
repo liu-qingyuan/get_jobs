@@ -45,7 +45,7 @@ class WorkbenchWorkflowHttpTest {
                     offer=b['source']['channel']=='OFFERTODAY'
                     json.dump({'jobs':[{'url':('https://www.offertoday.com/hk/job/synthetic-job-' if offer else 'https://careers.example.test/jobs/')+n,'company':'Synthetic '+n,'title':'Python engineer','description':%s,'descriptionComplete':True} for n in ['a','b']]},open(b['resultPath'],'w'))
                 elif b.get('kind')=='CANDIDATE_MATCH':
-                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
+                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':j['description'],'reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
                 elif b.get('kind')=='MATERIAL_PREPARE':
                     json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[j['facts'][0]['id']]} for j in b['candidates']]},open(b['resultPath'],'w'))
                 else:
@@ -371,7 +371,7 @@ class WorkbenchWorkflowHttpTest {
                 if kind=='CANDIDATE_READ':
                     json.dump({'jobs':[{'url':'https://careers.example.test/jobs/official-one','company':'Synthetic Official','title':'Python engineer','description':%s,'descriptionComplete':True}]},open(b['resultPath'],'w'))
                 elif kind=='CANDIDATE_MATCH':
-                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':'Python','reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
+                    json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':'SUPPORTED','requirementQuote':j['description'],'reason':'Confirmed project supports Python','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
                 elif kind=='MATERIAL_PREPARE':
                     json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['resumes'][0]['id'],'transformation':'REORDER','factIds':[j['facts'][0]['id']]} for j in b['candidates']]},open(b['resultPath'],'w'))
                 else:

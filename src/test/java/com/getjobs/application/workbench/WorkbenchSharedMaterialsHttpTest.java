@@ -220,7 +220,7 @@ class WorkbenchSharedMaterialsHttpTest {
                         if kind == 'CANDIDATE_MATCH':
                             evidence = {'type': 'FACT', 'id': fact['id'], 'quote': fact['value']}
                             row.update(jdSha256=candidate['jdSha256'], findings=[{'kind': 'SUPPORTED',
-                                'requirementQuote': 'Python', 'reason': 'Confirmed local search project', 'evidence': [evidence]}])
+                                'requirementQuote': candidate['description'], 'reason': 'Confirmed local search project', 'evidence': [evidence]}])
                         else:
                             row.update(resumeId=candidate['resumes'][0]['id'], transformation='REORDER', factIds=[fact['id']])
                         results.append(row)
