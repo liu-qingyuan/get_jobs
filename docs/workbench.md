@@ -162,7 +162,7 @@ Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发�
 
 `apply-single` 沿用与 #20 相同的 pinned Scrapling solver 自动完成 Cloudflare/CAPTCHA，无需用户确认；登录/二次验证/会话失效仍停止，不导出 Cookie/密码/验证码。它只填本任务冻结的简历与答案；未知表单问题、缺附件、错岗位/联系方式或登录失效都停止且不猜答。到 review 后先向原账本 claim，再只提交一次；缺失、模糊或绑定不匹配的回执记 UNKNOWN，不自动重投，也不把退出码或积极文案当成功。工作台只记录绑定 attempt、authorization、岗位、Profile/联系方式、附件/答案哈希与回执 SHA256 的 `jobsdb_attempts`；已有 SUBMITTED/UNKNOWN 的同岗再次请求会被拒绝。批量 APPLY/CONTACT/SEND_CV 仍返回 `CAPABILITY_UNVERIFIED`；原 Profile 仍可能包含任务外线上资料，本路径证明的是冻结包与回执绑定，而不是线上 Profile 只含本任务资料。
 
-#16 的受控单岗实现、假站/临时账本测试与默认页面入口已完成；**尚未对真实 JobsDB 提交任何单岗申请**。真实生产单岗验收需要用户给出一个精确岗位、已确认答案和联系方式，且只能提交一次；开发假站/HTTP 测试不是生产能力或推荐质量验收。局部八图需按本增量更新后再关闭 #16。
+#16 的受控单岗实现、假站/临时账本测试与默认页面入口已完成；**2026-11-26 已对真实 JobsDB 岗位 `96118137` 提交一次**：attempt `live-96118137-20261126T194842`，冻结英文 DOCX SHA256 `7196d40e…`，答案 SHA256 `8f7bcc8a…`，结果 `SUBMITTED`，receipt 为 `https://hk.jobsdb.com/job/96118137/apply/success`（text SHA256 `93db7a2d…`），原账本 `96118137|SUBMITTED|2026-11-26 11:49:02`。第一次空答案准备停在 `questionnaire.HK_Q_3217_V_4`，未 claim/submit；带已确认事实答案的运行是唯一 claim/提交，无重投。真实运行使用 CLI 冻结任务；由于 live workbench package 是 `MATERIAL_EXCEPTION`，未走 `/jobsdb/apply` 桥接。CF/CAPTCHA 由 pinned solver 完成，登录沿用现有隔离 `.jobsdb` profile，未导出 Cookie/密码/验证码。生产读取覆盖、批次/联系/附件外发和跨重开仍未验收；局部八图已按本增量更新。
 
 ### 平台连接预检（#20）
 

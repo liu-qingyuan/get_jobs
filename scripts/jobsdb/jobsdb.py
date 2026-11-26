@@ -584,6 +584,7 @@ def run_single(task, browser, store, data):
 
 
 def execute_single(task_file, data):
+    data = Path(data)
     task = json.loads(Path(task_file).read_text())
     with profile_lock(data), Store(data / 'applications.db') as store:
         with Browser(data) as browser:
