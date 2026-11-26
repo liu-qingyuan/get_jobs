@@ -241,6 +241,7 @@ export interface WorkbenchState {
   scope: ScopeWorkspace
   candidates: CandidateWorkspace
   preparations: { packages: PreparationPackage[] }
+  jobsdbAttempts: Array<{ id: string; candidateId: string; preparationId: string; authorizationId: string; jobId: string; url: string; status: string; reason?: string; resumeSha256: string; answersSha256: string; profileHash: string; contactHash: string; receipt?: { url?: string; textSha256?: string }; at: string }>
   workflow: { cycles: WorkflowCycle[] }
   projects: { projects: GapProject[] }
   runtime: { verifierConfigured: boolean; projectConfigured: boolean; agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string; jobsDbSingleJobSupported: boolean; jobsDbSingleJobReason: string; connections?: Record<'boss' | 'jobsDb', { status: string; reason: string }> }

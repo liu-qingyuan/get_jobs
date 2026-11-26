@@ -70,7 +70,10 @@ class WorkbenchJobsDbHttpTest {
         String script = """
                 import json,sys
                 if sys.argv[1]=='apply-single':
+                    import hashlib
                     t=json.load(open(sys.argv[2]))
+                    sha=hashlib.sha256(json.dumps(t['answers'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+                    assert sha==t['answersSha256'], (sha,t['answersSha256'])
                     r={k:t[k] for k in ('attemptId','authorizationId','url','answersSha256','profileHash','contactHash')}
                     r['resumeSha256']=__SHA__
                     r['jobId']=t['url'].rsplit('/',1)[-1]
@@ -582,6 +585,21 @@ class WorkbenchJobsDbHttpTest {
             var after = state(http);
             assertEquals(0, after.path("jobsdbAttempts").size());
             assertEquals(0, after.path("scope").path("usage").path("outbound").asInt());
+        }
+    }
+
+    @Test void nonAsciiAnswersUseTheSameCanonicalHashAsThePythonCli() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
+            request.putObject("answers").put("questionnaire.why", "我熟悉 Python");
+            var applied = post(http, "/jobsdb/apply", request);
+            assertEquals("SUBMITTED", applied.path("status").asText(), applied.toPrettyString());
+            assertEquals(1, state(http).path("jobsdbAttempts").size());
         }
     }
 
