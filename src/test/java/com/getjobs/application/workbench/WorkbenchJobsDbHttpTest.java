@@ -542,12 +542,96 @@ class WorkbenchJobsDbHttpTest {
             assertEquals(pkg.path("snapshot").path("resume").path("sha256").asText(), applied.path("resumeSha256").asText());
             assertTrue(applied.path("receipt").path("textSha256").asText().matches("[a-f0-9]{64}"));
             var after = state(http);
-            assertEquals(1, after.path("jobsdbAttempts").size(), after.toPrettyString());
+            assertEquals(0, after.path("jobsdbAttempts").size(), "New controlled attempts belong only to task storage");
+            assertEquals(1, after.path("tasks").size(), after::toPrettyString);
+            var task = after.path("tasks").get(0);
+            assertEquals(applied.path("id"), task.path("id"));
+            assertEquals(task.path("id"), task.path("attemptId"));
+            assertEquals("SUBMITTED", task.path("state").asText());
+            assertTrue(task.has("outboundClaim"));
+            assertTrue(task.path("events").toString().contains("SUBMITTING"));
+            assertTrue(task.path("events").toString().contains("SUBMITTED"));
             assertEquals(1, after.path("scope").path("usage").path("outbound").asInt());
             assertTrue(runner.runtime().path("jobsDbSingleJobSupported").asBoolean());
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
                     .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(request.toString())).andExpect(status().isConflict());
-            assertEquals(1, state(http).path("jobsdbAttempts").size());
+            assertEquals(0, state(http).path("jobsdbAttempts").size());
+            assertEquals(1, state(http).path("tasks").size());
+        }
+    }
+
+    @Test void aliasAndTaskStartRaceKeepsOneTaskAndEffectAcrossCyclesAndRestart() throws Exception {
+        var service = service(); var command = reader();
+        Path script = Path.of(command.get(1));
+        Files.writeString(script, Files.readString(script).replace("import hashlib", """
+                import hashlib,pathlib,time
+                root=pathlib.Path(__file__).parent
+                with (root/'effects').open('a') as effect: effect.write('APPLY\\n')
+                (root/'held').write_text('started')
+                while not (root/'release').exists(): time.sleep(0.02)
+                """.stripIndent().replace("\n", "\n    ")));
+        ObjectNode request;
+        String taskId;
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, "http://127.0.0.1:1", 10);
+             var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var pkg = state(http).at("/preparations/packages/0");
+            request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+            var firstRequest = request.deepCopy();
+            var first = workers.submit(() -> post(http, "/jobsdb/apply", firstRequest));
+            await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("held")));
+            var running = state(http).at("/tasks/0"); taskId = running.path("id").asText();
+            assertEquals(taskId, running.path("attemptId").asText());
+            assertEquals("UNKNOWN", running.path("state").asText(), "Claim must be durable before the fake effect");
+            String id = taskId;
+            var start = workers.submit(() -> http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + id + "/start")).andReturn().getResponse().getStatus());
+            var alias = workers.submit(() -> http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(firstRequest.toString())).andReturn().getResponse().getStatus());
+            Files.writeString(root.resolve("release"), "continue");
+            assertEquals(taskId, first.get(10, TimeUnit.SECONDS).path("id").asText());
+            assertEquals(409, start.get(10, TimeUnit.SECONDS));
+            assertEquals(409, alias.get(10, TimeUnit.SECONDS));
+            post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            assertEquals(1, state(http).path("tasks").size());
+            assertEquals(taskId, state(http).at("/workflow/cycles/1/entries/0/taskId").asText(), "A cycle must reference the existing alias task, not a parallel lifecycle");
+            assertEquals(1, state(http).at("/scope/usage/outbound").asInt());
+            assertEquals(List.of("APPLY"), Files.readAllLines(root.resolve("effects")));
+        }
+        service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
+            assertEquals(taskId, state(http).at("/tasks/0/id").asText());
+            assertEquals(List.of("APPLY"), Files.readAllLines(root.resolve("effects")));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SUBMITTED", "UNKNOWN"})
+    void legacyBridgeAttemptsStayReadOnlyAndVetoEveryTaskEntry(String status) throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var pkg = state(http).at("/preparations/packages/0");
+            var old = json.createObjectNode().put("id", "old-bridge").put("candidateId", pkg.path("candidateId").asText())
+                    .put("url", "https://hk.jobsdb.com/job/12345678?ref=old-entry").put("status", status).put("at", "2026-11-25T12:00:00Z");
+            service.store.write(c -> { service.store.save(c, "jobsdb_attempt", old); return null; });
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
+            var taskInput = ((ObjectNode) pkg.path("target")).deepCopy().put("kind", "APPLICATION");
+            taskInput.put("resumeId", state(http).path("resumes").get(0).path("id").asText());
+            var task = post(http, "/tasks", taskInput);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + task.path("id").asText() + "/approve")).andExpect(status().isConflict());
+            post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            assertEquals(old, state(http).at("/jobsdbAttempts/0"));
+            assertEquals(0, state(http).at("/scope/usage/outbound").asInt());
+            assertEquals("PENDING", state(http).at("/tasks/0/state").asText());
+            assertEquals(1, state(http).path("tasks").size(), "No new policy task may bypass a legacy bridge attempt");
         }
     }
 
@@ -599,7 +683,8 @@ class WorkbenchJobsDbHttpTest {
             request.putObject("answers").put("questionnaire.why", "我熟悉 Python");
             var applied = post(http, "/jobsdb/apply", request);
             assertEquals("SUBMITTED", applied.path("status").asText(), applied.toPrettyString());
-            assertEquals(1, state(http).path("jobsdbAttempts").size());
+            assertEquals(0, state(http).path("jobsdbAttempts").size());
+            assertEquals("SUBMITTED", state(http).at("/tasks/0/state").asText());
         }
     }
 
@@ -615,8 +700,9 @@ class WorkbenchJobsDbHttpTest {
             assertEquals("UNKNOWN", applied.path("status").asText(), applied.toPrettyString());
             assertTrue(applied.path("reason").asText().contains("绑定不匹配"), applied.toPrettyString());
             var after = state(http);
-            assertEquals(1, after.path("jobsdbAttempts").size());
-            assertEquals("UNKNOWN", after.path("jobsdbAttempts").get(0).path("status").asText());
+            assertTrue(after.path("jobsdbAttempts").isEmpty());
+            assertEquals(1, after.path("tasks").size());
+            assertEquals("UNKNOWN", after.at("/tasks/0/state").asText());
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
                     .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(request.toString())).andExpect(status().isConflict());
         }

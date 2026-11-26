@@ -98,6 +98,12 @@ OfferToday 在一次范围确认中显式选定已确认的邮箱/电话字段�
 
 不把裸 `Flow.prepare_automatic()` 当作受控申请：原流程的 Profile 会随申请发送，需由工作台冻结包补足绑定。受控单岗 APPLY 只从当前范围 `POLICY_APPROVED` 包发起：策略重核 `JOBSDB`/APPLY/HK/`hk.jobsdb.com`、已核对联系方式、冻结 DOCX 附件 SHA256、显式确认答案及其规范哈希，并原子消费一次 outbound；Runner 复制附件、复核字节、写绑定 attempt/authorization/岗位/Profile 指纹/联系方式/附件/答案的任务，调用独立 `apply-single`。该 CLI 只填冻结简历与答案，未知问题停止；review 后先 claim 再提交一次；缺失、模糊或身份/绑定不匹配的回执记 UNKNOWN，不自动重投；工作台只记录绑定的 `jobsdb_attempt`。批次 APPLY/CONTACT/SEND_CV 仍 `CAPABILITY_UNVERIFIED`，不调用旧 batch、不借用其他渠道。该路径证明冻结包与回执绑定，不证明线上 Profile 只含本任务资料。
 
+### #32：统一受控 task/attempt owner
+
+上述 #16 的独立桥接 owner 由 #25/#32 取代：新 `/jobsdb/apply` 冻结已确认答案后，复用 WorkbenchService 的策略 task、beginTask、events 和 stage claim；task 引用即 attempt 身份，Runner 仍只拥有独占进程槽与具体 worker dispatch。周期和任务启动按规范岗位复用该身份，不另建执行存储或路由；未核实能力仍拒绝，缺冻结答案的 JobsDB 整轮不自动发送。OfferToday 新策略 task 同样使用 taskId 作 attemptId，旧人工任务保持原 attempt 语义。
+
+停止新写 `jobsdb_attempt`，旧桥接记录只读且加入公共重复检查；不回填或重解释 direct frozen CLI 的历史。`96118137` 保留原 ledger row/时间戳和 “workbench bridge not exercised”；材料 `MATERIAL_EXCEPTION` 不能推断匹配 verdict。此迁移不宣称完成 #33 的权限/证据 fence、#34 的三平台 fake 合同或 #28–#30 的真实外发验收；JobsDB worker 的原账本 claim/防重权威不变。
+
 #16 的受控单岗实现、假站/临时账本测试和默认页面入口已完成；2026-11-26 已对真实 JobsDB 岗位 `96118137` 提交一次，attempt `live-96118137-20261126T194842`，冻结英文 DOCX/答案/Profile/联系方式哈希绑定，结果 `SUBMITTED`，receipt `https://hk.jobsdb.com/job/96118137/apply/success`，原账本 `96118137|SUBMITTED|2026-11-26 11:49:02`。空答案准备先停在未配置的雇主问题、未 claim；带已确认事实答案的运行是唯一提交，无重投。真实运行使用 CLI 冻结任务；live workbench package 为 `MATERIAL_EXCEPTION`，未走 `/jobsdb/apply` 桥接。批次/联系/附件外发、生产读取覆盖和跨重开仍未验收。
 
 ## 独立有界项目（issue #17，父 spec #7）

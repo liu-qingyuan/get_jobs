@@ -137,6 +137,7 @@ class WorkbenchWorkflowHttpTest {
             var state = getJson(http, "/state"); assertEquals(2, state.path("tasks").size(), state.toPrettyString());
             for (var task : state.path("tasks")) {
                 assertEquals("SUBMITTED", task.path("state").asText());
+                assertEquals(task.path("id"), task.path("attemptId"), "Policy task is the sole attempt identity");
                 assertNotEquals(task.path("contactReceipt").path("messageId"), task.path("cvReceipt").path("messageId"));
                 assertEquals(task.path("snapshot").path("resume").path("sha256"), task.path("cvReceipt").path("resumeSha256"));
                 assertTrue(task.has("cvClaim"));

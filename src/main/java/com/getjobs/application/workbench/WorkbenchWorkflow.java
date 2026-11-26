@@ -65,9 +65,13 @@ final class WorkbenchWorkflow {
                     for (var row : store.list(c, "candidate")) if ((row.path("runId").asText().equals(cycle.path("discoveryRunId").asText()) || contains(cycle, row.path("id").asText()))
                             && !processed.contains(row.path("id").asText())) {
                         var entry = entry(cycle, row.path("id").asText());
-                        if (entry.has("taskId")) {
-                            var task = store.get(c, "task", entry.path("taskId").asText());
-                            if (Set.of("UNKNOWN", "SUBMITTED", "RUNNING").contains(task.path("state").asText())) continue;
+                        var task = entry.has("taskId") ? store.get(c, "task", entry.path("taskId").asText()) : service.findPolicyTask(c, row.path("url").asText());
+                        if (task != null) {
+                            entry.put("taskId", task.path("id").asText()).put("packageId", task.path("packageId").asText());
+                            if (Set.of("UNKNOWN", "SUBMITTED", "RUNNING").contains(task.path("state").asText())) {
+                                entry.put("status", task.path("state").asText()).put("reason", "复用此岗位的既有 task/attempt；已开始的动作不重放");
+                                continue;
+                            }
                         }
                         selected.add(row.path("id").asText());
                     }
@@ -100,7 +104,7 @@ final class WorkbenchWorkflow {
                         }
                         stage(cycle, "DISPATCH");
                         try {
-                            var task = policyTask(record, entry.path("taskId").asText(), cycle);
+                            var task = service.policyTask(record, entry.path("taskId").asText(), ((ObjectNode) cycle.path("input")).deepCopy().put("cycleId", cycle.path("id").asText()));
                             entry.put("taskId", task.path("id").asText()); save(cycle);
                             executor.execute(task.path("id").asText());
                             task = service.task(task.path("id").asText());
@@ -179,31 +183,6 @@ final class WorkbenchWorkflow {
         save(cycle);
     }
 
-    private ObjectNode policyTask(ObjectNode record, String priorId, ObjectNode cycle) {
-        return store.write(c -> {
-            ObjectNode task;
-            if (!priorId.isEmpty()) {
-                task = store.get(c, "task", priorId);
-                require(Set.of("APPROVED", "FAILED", "NEEDS_INPUT").contains(task.path("state").asText()) && !task.has("outboundClaim"), "只能恢复已知未外发候选，UNKNOWN 不能重投");
-            } else {
-                task = ((ObjectNode) record.path("target")).deepCopy().put("id", id()).put("kind", "APPLICATION").put("createdAt", now());
-                task.putArray("events");
-            }
-            for (String field : List.of("url", "company", "title", "description", "channel", "region", "language", "direction")) task.set(field, record.path("target").path(field));
-            String action = Set.of("OFFERTODAY", "BOSS").contains(task.path("channel").asText()) ? "CONTACT" : "APPLY";
-            var decision = service.preparation.check(c, record, action, task.path("id").asText());
-            require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
-            task.put("state", "APPROVED").put("approvalSource", "SCOPE_POLICY").put("packageId", record.path("id").asText())
-                    .put("cycleId", cycle.path("id").asText()).put("scopeVersion", record.path("scopeVersion").asInt()).put("updatedAt", now());
-            task.remove("executionResourceId");
-            task.put("secondsPerJob", cycle.path("input").path("secondsPerJob").asInt(30)).put("modelTokensPerJob", cycle.path("input").path("modelTokensPerJob").asInt(1000));
-            task.set("snapshot", record.path("snapshot").deepCopy());
-            task.put("resumeId", record.path("snapshot").path("resume").path("id").asText());
-            if (task.path("channel").asText().equals("OFFERTODAY")) task.put("platformJobId", OfferTodayTarget.parse(task.path("url").asText()).id());
-            task.withArray("events").add(object().put("id", id()).put("at", now()).put("type", "POLICY_APPROVED").put("source", "SCOPE_POLICY").put("message", "当前范围与可证实材料策略核准；不是逐岗人审"));
-            store.save(c, "task", task); return task;
-        });
-    }
     ObjectNode workspace(Connection c) throws Exception {
         var cycles = store.list(c, "workflow_cycle");
         for (var cycle : cycles) for (var entry : cycle.path("entries")) if (entry.has("taskId")) ((ObjectNode) entry).set("execution", service.publicTask(store.get(c, "task", entry.path("taskId").asText())));

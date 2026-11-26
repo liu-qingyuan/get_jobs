@@ -315,6 +315,7 @@ final class WorkbenchScopePolicy {
     }
     ObjectNode executionDecision(Connection c, int version, ObjectNode target, String action, String taskId, boolean reserved) throws Exception {
         var request = object().put("scopeVersion", version).put("action", action); request.set("target", target);
+        bindTaskInputs(c, request, taskId);
         return assess(c, request, false, reserved, target.path("lastReadDescription").asText(), false, taskId);
     }
 
@@ -337,6 +338,7 @@ final class WorkbenchScopePolicy {
     ObjectNode claimExecution(Connection c, ObjectNode task, ObjectNode record, String action) throws Exception {
         var request = object().put("scopeVersion", record.path("scopeVersion").asInt()).put("action", action);
         request.set("target", record.path("target"));
+        bindTaskInputs(c, request, task.path("id").asText());
         request.putObject("cost").put("outbound", 1);
         var decision = assess(c, request, false, false, record.path("target").path("lastReadDescription").asText(), false, task.path("id").asText());
         require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
@@ -346,6 +348,12 @@ final class WorkbenchScopePolicy {
         var grant = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", record.path("scopeVersion").asInt())
                 .put("taskId", task.path("id").asText()).put("status", "CONSUMED").put("createdAt", now()).put("consumedAt", now());
         grant.set("request", request); store.save(c, "scope_authorization", grant); return grant;
+    }
+    private void bindTaskInputs(Connection c, ObjectNode request, String taskId) throws Exception {
+        for (var task : store.list(c, "task")) if (task.path("id").asText().equals(taskId) && task.path("channel").asText().equals("JOBSDB")) {
+            request.put("preparationId", task.path("packageId").asText())
+                    .put("answersConfirmed", task.path("answersConfirmed").asBoolean()).put("answersSha256", task.path("answersSha256").asText());
+        }
     }
     void executionResult(Connection c, String id, String outcome, String evidence) throws Exception {
         var grant = store.get(c, "scope_authorization", id);
