@@ -184,6 +184,64 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual('NEEDS_INPUT',flow.prepare_automatic(Path('/tmp/cv.docx'),{'questionnaire.lang':['Python']}))
         self.assertIn('Unavailable checkbox',flow.reason)
 
+    def test_single_apply_freezes_bindings_claims_once_and_never_retries(self):
+        import hashlib, json, tempfile
+        self.review_document = '<p>English_abcd.docx</p>'
+        self.start = """<label><input type="radio" name="document-select" value="new">English_abcd.docx</label>
+        <input id="resume-fileFile" type="file">
+        <label><input type="radio" name="coverLetter-method" value="none">Don't include a cover letter</label>
+        <button onclick="if(document.querySelector('[value=new]').checked) location.href='/job/12345678/apply/review'">Continue</button>"""
+        class FakeBrowser:
+            def __init__(inner, page): inner.page = page
+            def solve(inner, page): return None
+            def run(inner, url, action): inner.page.goto(url); return action(inner.page)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            resume = tmp/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
+            result = tmp/'result.json'
+            answers = {}
+            task = {'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': 'attempt-1', 'authorizationId': 'auth-1',
+                    'url': self.url, 'resumePath': str(resume), 'resumeSha256': hashlib.sha256(resume.read_bytes()).hexdigest(),
+                    'answersSha256': hashlib.sha256(json.dumps(answers, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                    'answers': answers, 'profileHash': 'profile-hash', 'contactHash': 'contact-hash', 'resultPath': str(result)}
+            with jobsdb.Store(tmp/'applications.db') as store:
+                self.assertEqual(0, jobsdb.run_single(task, FakeBrowser(self.page), store, tmp))
+                payload = json.loads(result.read_text())
+                self.assertEqual('SUBMITTED', payload['status'])
+                self.assertEqual('12345678', payload['jobId'])
+                self.assertEqual(task['resumeSha256'], payload['resumeSha256'])
+                self.assertEqual(task['answersSha256'], payload['answersSha256'])
+                self.assertEqual('profile-hash', payload['profileHash'])
+                self.assertEqual('contact-hash', payload['contactHash'])
+                self.assertTrue(payload['receipt']['textSha256'])
+                self.assertEqual(1, self.submissions)
+                self.assertTrue(store.contains('12345678'))
+                second = dict(task, attemptId='attempt-2', authorizationId='auth-2', resultPath=str(tmp/'second.json'))
+                self.assertEqual(0, jobsdb.run_single(second, FakeBrowser(self.page), store, tmp))
+                self.assertEqual('SKIPPED', json.loads((tmp/'second.json').read_text())['status'])
+                self.assertEqual(1, self.submissions)
+
+    def test_single_apply_unknown_question_stops_without_claim(self):
+        import hashlib, json, tempfile
+        self.start = """<select name="questionnaire.salary"><option value="">Choose</option><option value="20">$20K</option></select>
+        <button onclick="location.href='/job/12345678/apply/review'">Continue</button>"""
+        class FakeBrowser:
+            def __init__(inner, page): inner.page = page
+            def solve(inner, page): return None
+            def run(inner, url, action): inner.page.goto(url); return action(inner.page)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp); resume = tmp/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
+            answers = {}; result = tmp/'result.json'
+            task = {'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': 'attempt-1', 'authorizationId': 'auth-1',
+                    'url': self.url, 'resumePath': str(resume), 'resumeSha256': hashlib.sha256(resume.read_bytes()).hexdigest(),
+                    'answersSha256': hashlib.sha256(json.dumps(answers, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                    'answers': answers, 'resultPath': str(result)}
+            with jobsdb.Store(tmp/'applications.db') as store:
+                self.assertEqual(2, jobsdb.run_single(task, FakeBrowser(self.page), store, tmp))
+                self.assertEqual('NEEDS_INPUT', json.loads(result.read_text())['status'])
+                self.assertFalse(store.contains('12345678'))
+                self.assertEqual(0, self.submissions)
+
     def test_automatic_unknown_question_never_submits(self):
         self.start='<input name="questionnaire.unknown"><button>Continue</button>'
         flow=self.flow()

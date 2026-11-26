@@ -3,6 +3,7 @@ package com.getjobs.application.workbench;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.getjobs.worker.boss.BossCandidateReader;
 import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -108,6 +109,8 @@ public final class WorkbenchRunner implements AutoCloseable {
                 .put("offerTodayConfigured", !offerTodayCommand.isEmpty()).put("busy", busy.get()).put("projectConfigured", !projectCommand.isEmpty()).put("verifierConfigured", !verifierCommand.isEmpty())
                 .put("jobsDbConfigured", !jobsDbCommand.isEmpty()).put("jobsDbProductionVerified", false)
                 .put("jobsDbOutboundSupported", false).put("jobsDbCapabilityReason", JobsDbTarget.OUTBOUND_BLOCK_REASON)
+                .put("jobsDbSingleJobSupported", !jobsDbCommand.isEmpty())
+                .put("jobsDbSingleJobReason", jobsDbCommand.isEmpty() ? "JobsDB 受控单岗申请未配置独立脚本" : "受控单岗 APPLY 可用；批次、联系、附件外发仍禁用")
                 .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
         result.set("connections", connections.view(service.json));
         return result;
@@ -337,6 +340,159 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
 
     /** Explicit read-only discovery; shares the same exclusive process slot as applications. */
+    /** One frozen, scope-authorized JobsDB Quick Apply. No batch, retry or answer inference. */
+    public synchronized ObjectNode applyJobsDbSingle(ObjectNode input) {
+        if (closed) throw new WorkbenchException(409, "执行器已关闭，不能启动单岗申请");
+        if (jobsDbCommand.isEmpty()) throw new WorkbenchException(409, "JobsDB 受控单岗申请未配置独立脚本；不会回退官网或旧 batch");
+        if (!busy.compareAndSet(false, true)) throw new WorkbenchException(409, "已有执行任务运行中，请等待或处理人工阻塞");
+        try {
+            int scopeVersion = input.path("scopeVersion").asInt(-1);
+            String candidateId = WorkbenchService.text(input, "candidateId", 80, true);
+            String preparationId = WorkbenchService.text(input, "preparationId", 80, true);
+            if (!input.path("answersConfirmed").asBoolean(false))
+                throw new WorkbenchException(400, "请明确确认本次冻结答案；未知问题不会被猜测");
+            var answers = input.path("answers");
+            if (!answers.isObject()) throw new WorkbenchException(400, "answers 须为 questionnaire 名称到已确认答案的对象");
+            String answersSha = answersHash(answers);
+            var pkg = service.store.write(c -> service.store.get(c, "preparation", preparationId));
+            if (pkg == null || !pkg.path("status").asText().equals("POLICY_APPROVED") || pkg.path("scopeVersion").asInt(-1) != scopeVersion)
+                throw new WorkbenchException(409, "单岗材料未按当前范围核准；不能提交");
+            var target = (ObjectNode) pkg.path("target").deepCopy();
+            var snapshot = pkg.path("snapshot");
+            if (!snapshot.path("contactVerified").asBoolean(false) || !snapshot.path("contactFacts").isArray() || snapshot.path("contactFacts").isEmpty())
+                throw new WorkbenchException(409, "缺少本范围已核实的联系方式；不能提交");
+            var resume = (ObjectNode) snapshot.path("resume");
+            if (!resume.path("approved").asBoolean(false)) throw new WorkbenchException(409, "冻结附件未核准");
+            var candidate = service.store.write(c -> service.store.get(c, "candidate", candidateId));
+            if (candidate == null || !candidate.path("url").asText().equals(target.path("url").asText()))
+                throw new WorkbenchException(409, "候选与准备包不匹配；不能提交");
+            var previous = service.store.write(c -> service.store.list(c, "jobsdb_attempt"));
+            for (var attempt : previous)
+                if (attempt.path("candidateId").asText().equals(candidateId) && Set.of("SUBMITTED", "UNKNOWN").contains(attempt.path("status").asText()))
+                    throw new WorkbenchException(409, "该岗位已有 SUBMITTED/UNKNOWN 尝试；不会自动重投");
+            var request = service.json.createObjectNode().put("scopeVersion", scopeVersion).put("action", "APPLY");
+            request.set("target", target.deepCopy());
+            request.put("preparationId", preparationId).put("answersSha256", answersSha).put("answersConfirmed", true);
+            var preview = service.scope.preview(request);
+            if (!preview.path("allowed").asBoolean()) throw new WorkbenchException(409, preview.path("reasons").toString());
+            var authorized = service.scope.authorize(request);
+            if (!authorized.path("allowed").asBoolean()) throw new WorkbenchException(409, authorized.path("reasons").toString());
+            String authorizationId = authorized.path("authorization").path("id").asText();
+            var consumed = service.scope.consume(authorizationId);
+            if (!consumed.path("allowed").asBoolean()) throw new WorkbenchException(409, consumed.path("reasons").toString());
+            String attemptId = UUID.randomUUID().toString();
+            Path directory = service.store.root.resolve("runs").resolve("jobsdb-apply-" + attemptId);
+            Files.createDirectories(directory.resolve("resume"));
+            String resumePath = copyFrozenResume(directory.resolve("resume"), resume);
+            String profileHash = jobsDbProfileHash();
+            String contactHash = WorkbenchService.hash(snapshot.path("contactFacts").toString().getBytes(StandardCharsets.UTF_8));
+            Path taskFile = directory.resolve("task.json"), resultFile = directory.resolve("result.json"), log = directory.resolve("apply.log");
+            var task = service.json.createObjectNode().put("kind", "JOBSDB_SINGLE_APPLY").put("attemptId", attemptId)
+                    .put("authorizationId", authorizationId).put("url", target.path("url").asText())
+                    .put("resumePath", resumePath).put("resumeSha256", resume.path("sha256").asText())
+                    .put("answersSha256", answersSha).put("profileHash", profileHash).put("contactHash", contactHash)
+                    .put("resultPath", resultFile.toString());
+            task.set("answers", answers.deepCopy());
+            Files.writeString(taskFile, service.json.writeValueAsString(task));
+            try { Files.setPosixFilePermissions(taskFile, PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException ignored) { }
+            List<String> arguments = new ArrayList<>(jobsDbCommand);
+            arguments.add("apply-single"); arguments.add(taskFile.toString()); arguments.add("--data-dir"); arguments.add(service.jobsDbDirectory().toString());
+            Process child = spawn(new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(log.toFile()));
+            child.getOutputStream().close();
+            if (!child.waitFor(300, TimeUnit.SECONDS)) stopProcess(child);
+            ObjectNode payload = readSingleResult(resultFile);
+            if (payload == null) payload = service.json.createObjectNode().put("status", "UNKNOWN").put("reason", "执行器未返回回执；不会自动重投");
+            String status = payload.path("status").asText("UNKNOWN");
+            String jobId = JobsDbTarget.parse(target.path("url").asText()).id();
+            boolean bound = payload.path("attemptId").asText().equals(attemptId) && payload.path("authorizationId").asText().equals(authorizationId)
+                    && payload.path("jobId").asText().equals(jobId) && payload.path("url").asText().equals(target.path("url").asText())
+                    && payload.path("resumeSha256").asText().equals(resume.path("sha256").asText())
+                    && payload.path("answersSha256").asText().equals(answersSha) && payload.path("profileHash").asText().equals(profileHash)
+                    && payload.path("contactHash").asText().equals(contactHash);
+            if (!bound) { status = "UNKNOWN"; payload.put("status", status).put("reason", "回执岗位/attempt/Profile/联系方式/附件绑定不匹配；不会记成功"); }
+            else if ("SUBMITTED".equals(status) && !validReceipt(payload.path("receipt"))) {
+                status = "UNKNOWN"; payload.put("status", status).put("reason", "缺少可验证的平台成功回执；不会记成功");
+            }
+            var record = service.json.createObjectNode().put("id", attemptId).put("candidateId", candidateId)
+                    .put("preparationId", preparationId).put("authorizationId", authorizationId).put("jobId", jobId)
+                    .put("url", target.path("url").asText()).put("status", status).put("reason", payload.path("reason").asText())
+                    .put("resumeSha256", resume.path("sha256").asText()).put("answersSha256", answersSha)
+                    .put("profileHash", profileHash).put("contactHash", contactHash).put("at", WorkbenchService.now());
+            if (payload.path("receipt") instanceof ObjectNode receipt) record.set("receipt", receipt.deepCopy());
+            service.store.write(c -> { service.store.save(c, "jobsdb_attempt", record); return null; });
+            String outcome = status.equals("SUBMITTED") ? "SUCCEEDED" : status.equals("UNKNOWN") ? "UNKNOWN" : "FAILED";
+            service.scope.result(authorizationId, service.json.createObjectNode().put("outcome", outcome).put("evidence", record.toString()));
+            return record;
+        } catch (WorkbenchException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new WorkbenchException(409, "JobsDB 单岗申请未完成；保留原账本与授权消费，不自动重投");
+        } finally {
+            releaseProcess(); busy.set(false);
+        }
+    }
+
+    private String answersHash(com.fasterxml.jackson.databind.JsonNode answers) throws Exception {
+        var sorted = new TreeMap<String, Object>();
+        var fields = answers.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            if (!entry.getKey().startsWith("questionnaire.")) throw new WorkbenchException(400, "答案名必须以 questionnaire. 开头");
+            var value = entry.getValue();
+            if (value.isTextual() && !value.asText().isBlank()) sorted.put(entry.getKey(), value.asText());
+            else if (value.isArray() && !value.isEmpty()) {
+                var list = new ArrayList<String>();
+                for (var item : value) {
+                    if (!item.isTextual() || item.asText().isBlank() || list.contains(item.asText())) throw new WorkbenchException(400, "复选答案须为唯一非空标签");
+                    list.add(item.asText());
+                }
+                sorted.put(entry.getKey(), list);
+            } else throw new WorkbenchException(400, "答案须为非空字符串或唯一标签数组");
+        }
+        return WorkbenchService.hash(service.json.writeValueAsString(sorted).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String copyFrozenResume(Path directory, ObjectNode resume) throws Exception {
+        Path source = service.file(resume);
+        byte[] bytes = Files.readAllBytes(source);
+        String sha = WorkbenchService.hash(bytes);
+        if (!sha.equals(resume.path("sha256").asText())) throw new WorkbenchException(409, "冻结附件字节已变化；不能提交");
+        String name = Path.of(resume.path("filename").asText()).getFileName().toString();
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".docx")) throw new WorkbenchException(409, "JobsDB 单岗附件须为可核验 DOCX");
+        Path target = directory.resolve(name);
+        Files.write(target, bytes);
+        try { Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException ignored) { }
+        if (!sha.equals(WorkbenchService.hash(Files.readAllBytes(target)))) throw new WorkbenchException(409, "冻结附件复制后哈希不一致");
+        return target.toString();
+    }
+
+    private String jobsDbProfileHash() {
+        try {
+            Path root = service.jobsDbDirectory(), profile = root.resolve("scrapling-profile");
+            var value = new StringBuilder(root.toAbsolutePath().normalize().toString());
+            for (Path path : List.of(profile.resolve("Default/Preferences"), profile.resolve("Local State")))
+                if (Files.isRegularFile(path)) value.append('|').append(WorkbenchService.hash(Files.readAllBytes(path)));
+            return WorkbenchService.hash(value.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return WorkbenchService.hash(service.jobsDbDirectory().toString().getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private ObjectNode readSingleResult(Path path) {
+        try {
+            if (!Files.isRegularFile(path)) return null;
+            var node = service.json.readTree(Files.readString(path));
+            return node != null && node.isObject() ? (ObjectNode) node : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private boolean validReceipt(com.fasterxml.jackson.databind.JsonNode receipt) {
+        return receipt.isObject() && receipt.path("url").asText().startsWith("https://hk.jobsdb.com/")
+                && receipt.path("textSha256").asText().matches("[a-f0-9]{64}");
+    }
+
     public synchronized ObjectNode discoverOfferToday() {
         if (closed || offerTodayCommand.isEmpty()) throw new WorkbenchException(409, "请先配置 OfferToday 脚本及已授权的现有浏览器连接");
         if (!busy.compareAndSet(false, true)) throw new WorkbenchException(409, "已有执行任务运行中，暂不能读取 OfferToday");

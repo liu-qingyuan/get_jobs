@@ -63,6 +63,7 @@ public final class WorkbenchService {
             var tasks = store.list(c, "task");
             tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
             result.set("tasks", tasks);
+            result.set("jobsdbAttempts", store.list(c, "jobsdb_attempt"));
             var platforms = legacy.platforms();
             platforms.put("offerTodayUrl", "https://www.offertoday.com/hk/recommend");
             result.set("platforms", platforms);

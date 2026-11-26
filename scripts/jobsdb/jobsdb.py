@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -498,6 +499,97 @@ def application(page, browser, store, url, command, data):
     print('RESULT='+outcome)
     return 0 if outcome == 'SUBMITTED' else 2
 
+def _valid_single_answer(value):
+    if isinstance(value, str): return bool(value.strip())
+    return isinstance(value, list) and bool(value) and all(isinstance(label, str) and label.strip() for label in value) and len(set(value)) == len(value)
+
+
+def load_single(source):
+    task = source if isinstance(source, dict) else json.loads(Path(source).read_text())
+    if task.get('kind') != 'JOBSDB_SINGLE_APPLY': raise ValueError('Expected a frozen JobsDB single-job task')
+    attempt, authorization = task.get('attemptId'), task.get('authorizationId')
+    if not isinstance(attempt, str) or not attempt or not isinstance(authorization, str) or not authorization:
+        raise ValueError('Missing attempt or authorization identity')
+    url = task.get('url'); job = job_id(url)
+    resume = Path(task['resumePath']).expanduser().resolve()
+    if not resume.is_file(): raise ValueError('Frozen resume file is missing')
+    digest = hashlib.sha256(resume.read_bytes()).hexdigest()
+    if digest != task.get('resumeSha256'): raise ValueError('Frozen resume SHA256 mismatch')
+    answers = task.get('answers')
+    if not isinstance(answers, dict) or any(not isinstance(k, str) or not k.startswith('questionnaire.') or not _valid_single_answer(v) for k, v in answers.items()):
+        raise ValueError('answers must map questionnaire names to an exact label or unique checkbox labels')
+    canonical = json.dumps(answers, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+    if hashlib.sha256(canonical).hexdigest() != task.get('answersSha256'): raise ValueError('Frozen answers SHA256 mismatch')
+    result = Path(task['resultPath']); result.parent.mkdir(parents=True, exist_ok=True)
+    return task, job, resume, answers, result
+
+
+def run_single(task, browser, store, data):
+    """One frozen, workbench-approved JobsDB application. No batch, prompts, reruns or answer inference."""
+    task, job, resume, answers, result = load_single(task)
+    payload = {
+        'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': task['attemptId'], 'authorizationId': task['authorizationId'],
+        'jobId': job, 'url': task['url'], 'resumeSha256': task['resumeSha256'],
+        'answersSha256': task['answersSha256'], 'profileHash': task.get('profileHash', ''),
+        'contactHash': task.get('contactHash', ''), 'status': 'RUNNING', 'startedAt': time.time(),
+    }
+    def save():
+        temporary = result.with_suffix(result.suffix + '.tmp')
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        try: os.chmod(temporary, 0o600)
+        except OSError: pass
+        temporary.replace(result)
+    save()
+    if store.contains(job):
+        payload.update(status='SKIPPED', reason='previous submitted/unknown attempt'); save(); return 0
+    outcome = {'state': 'ERROR'}
+    def action(page):
+        flow = Flow(page, task['url'], browser.solve)
+        try:
+            state = flow.prepare_automatic(resume, answers)
+        except Exception as exc:
+            payload.update(status='ERROR', reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
+        payload['reason'] = flow.reason
+        if state != 'REVIEW':
+            login = not on_site(page.url) or re.search(r'/(?:login|sign-in|signin|auth)(?:/|\?|$)', page.url, re.I)
+            payload.update(status='LOGIN_REQUIRED' if login else 'NEEDS_INPUT',
+                           reason=flow.reason or ('Saved session requires login' if login else 'Form requires user input'))
+            save(); return
+        payload['reviewTextSha256'] = hashlib.sha256(page.locator('body').inner_text().encode()).hexdigest()
+        if not store.claim(job):
+            payload.update(status='SKIPPED', reason='already claimed or previously attempted'); save(); return
+        payload.update(status='UNKNOWN', claimedAt=time.time(), reason='submission claimed; no receipt yet'); save()
+        try:
+            submitted = flow.submit()
+        except Exception:
+            submitted = 'UNKNOWN'
+        submitted = 'SUBMITTED' if submitted == 'SUBMITTED' else 'UNKNOWN'
+        store.finish(job, submitted)
+        payload.update(status=submitted, finishedAt=time.time(), reason='')
+        try:
+            payload['receipt'] = {'url': page.url, 'textSha256': hashlib.sha256(page.locator('body').inner_text().encode()).hexdigest(), 'at': time.time()}
+        except Exception:
+            payload['receipt'] = {'url': page.url, 'at': time.time()}
+        save()
+        outcome['state'] = submitted
+    try:
+        browser.run(task['url'], action)
+    except Exception as exc:
+        if payload['status'] not in ('SUBMITTED', 'UNKNOWN'):
+            payload.update(status='ERROR', reason=(str(exc).splitlines() or ['action failed'])[0])
+        else:
+            payload['evidenceError'] = (str(exc).splitlines() or ['evidence failed'])[0]
+        save()
+    return 0 if payload['status'] in ('SUBMITTED', 'SKIPPED') else 2
+
+
+def execute_single(task_file, data):
+    task = json.loads(Path(task_file).read_text())
+    with profile_lock(data), Store(data / 'applications.db') as store:
+        with Browser(data) as browser:
+            return run_single(task, browser, store, data)
+
+
 def main(argv=None, *, supervise_resume_process=False):
     parser = argparse.ArgumentParser(description='JobsDB HK — isolated Scrapling + Chrome CLI; no Boss runtime')
     subs = parser.add_subparsers(dest='command', required=True)
@@ -508,6 +600,9 @@ def main(argv=None, *, supervise_resume_process=False):
         subs.add_parser(name).add_argument('url')
     bulk = subs.add_parser('batch')
     bulk.add_argument('--config', required=True)
+    single = subs.add_parser('apply-single', help='One frozen workbench-approved JobsDB application; never batch, prompt or retry')
+    single.add_argument('task_file')
+    single.add_argument('--data-dir', default=str(DATA))
     read = subs.add_parser('read-candidates', help='Bounded workbench read; never apply or load global answers')
     read.add_argument('task_file')
     read.add_argument('--data-dir', required=True, type=Path)
@@ -523,6 +618,8 @@ def main(argv=None, *, supervise_resume_process=False):
             return supervise_resume(args.task_file, args.data_dir)
         from workbench_read import execute_resume
         return execute_resume(args.task_file, args.data_dir)
+    if args.command == 'apply-single':
+        return execute_single(args.task_file, args.data_dir)
     if args.command == 'help': parser.print_help(); return 0
     id = job_id(args.url) if args.command in ('prepare','apply') else None
     if args.command == 'search' and not args.keywords.strip(): parser.error('keywords must not be blank')

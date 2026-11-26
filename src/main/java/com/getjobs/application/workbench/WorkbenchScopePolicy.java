@@ -140,7 +140,10 @@ final class WorkbenchScopePolicy {
             if (decision.path("allowed").asBoolean()) {
                 var authorization = object().put("id", id()).put("source", "SCOPE_POLICY").put("scopeVersion", decision.path("scopeVersion").asInt())
                         .put("status", "FROZEN").put("createdAt", now());
-                var request = object().put("scopeVersion", decision.path("scopeVersion").asInt()).put("action", text(input, "action", 50, true));
+                var request = object().put("scopeVersion", decision.path("scopeVersion").asInt()).put("action", text(input, "action", 50, true))
+                        .put("answersConfirmed", input.path("answersConfirmed").asBoolean(false));
+                if (input.hasNonNull("preparationId")) request.put("preparationId", text(input, "preparationId", 80, true));
+                if (input.hasNonNull("answersSha256")) request.put("answersSha256", text(input, "answersSha256", 64, true));
                 var target = object();
                 for (String field : List.of("channel", "region", "language", "direction", "company", "title", "description", "resumeId", "transformation"))
                     target.put(field, input.path("target").path(field).asText().trim());
@@ -187,6 +190,28 @@ final class WorkbenchScopePolicy {
         if (!rows.isEmpty()) return (ObjectNode) rows.get(0);
         var used = object().put("id", "total"); for (String meter : METERS) used.put(meter, 0L); return used;
     }
+    /** JobsDB APPLY is allowed only for one exact policy-approved package with frozen answers and contact. */
+    private boolean singleJobApproved(Connection c, ObjectNode input, ObjectNode target) {
+        try {
+            var scope = latest(c);
+            var pkg = store.get(c, "preparation", text(input, "preparationId", 80, true));
+            if (scope == null || !pkg.path("status").asText().equals("POLICY_APPROVED")
+                    || pkg.path("scopeVersion").asInt(-1) != scope.path("version").asInt()) return false;
+            var packageTarget = pkg.path("target");
+            if (!packageTarget.path("channel").asText().equals("JOBSDB")
+                    || !packageTarget.path("url").asText().equals(target.path("url").asText())) return false;
+            var snapshot = pkg.path("snapshot");
+            if (!snapshot.path("contactVerified").asBoolean(false) || !snapshot.path("contactFacts").isArray()
+                    || snapshot.path("contactFacts").isEmpty()) return false;
+            var resume = snapshot.path("resume");
+            if (!resume.path("approved").asBoolean(false) || !resume.path("sha256").asText().matches("[a-f0-9]{64}")) return false;
+            return input.path("answersConfirmed").asBoolean(false)
+                    && text(input, "answersSha256", 64, true).matches("[a-f0-9]{64}");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private ObjectNode cost(String action, JsonNode input) {
         if (!input.isMissingNode() && !input.isObject()) throw new WorkbenchException(400, "cost 须为预算计量对象");
         var cost = object();
@@ -392,7 +417,11 @@ final class WorkbenchScopePolicy {
         if (channel.equals("JOBSDB")) {
             try { JobsDbTarget.validate(link, sourceRead); }
             catch (WorkbenchException e) { deny(reasons, codes, "CHANNEL_DENIED", e.getMessage()); }
-            if (OUTBOUND.contains(action)) deny(reasons, codes, "CAPABILITY_UNVERIFIED", JobsDbTarget.OUTBOUND_BLOCK_REASON);
+            if (OUTBOUND.contains(action)) {
+                if (!action.equals("APPLY") || !singleJobApproved(c, input, target))
+                    deny(reasons, codes, "CAPABILITY_UNVERIFIED",
+                            "JobsDB 仅允许一次范围授权后的受控单岗 APPLY；批次、联系、附件外发仍未核实");
+            }
         }
         if (BossCandidateReader.isHost(link) && !channel.equals("BOSS")) deny(reasons, codes, "CHANNEL_DENIED", "Boss 不能借用其他渠道授权或官网 AI");
         if (channel.equals("BOSS")) {

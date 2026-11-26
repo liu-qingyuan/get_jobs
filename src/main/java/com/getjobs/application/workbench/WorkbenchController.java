@@ -53,6 +53,7 @@ public class WorkbenchController {
     @DeleteMapping("/facts/{id}") public Map<String, Boolean> delete(@PathVariable String id) { service.deleteFact(id); return Map.of("deleted", true); }
     @PostMapping("/import/preview") public ObjectNode preview() { return service.importPreview(); }
     @PostMapping("/offertoday/discover") public ObjectNode discoverOfferToday() { return runner.discoverOfferToday(); }
+    @PostMapping("/jobsdb/apply") public ObjectNode applyJobsDbSingle(@RequestBody ObjectNode input) { return runner.applyJobsDbSingle(input); }
     @PostMapping(value="/resumes", consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
     public ObjectNode resume(@RequestParam Map<String,String> fields, @RequestParam(required=false) MultipartFile file) throws Exception {
         var input = service.json.createObjectNode(); fields.forEach(input::put);

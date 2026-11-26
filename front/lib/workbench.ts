@@ -243,7 +243,7 @@ export interface WorkbenchState {
   preparations: { packages: PreparationPackage[] }
   workflow: { cycles: WorkflowCycle[] }
   projects: { projects: GapProject[] }
-  runtime: { verifierConfigured: boolean; projectConfigured: boolean; agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string; connections?: Record<'boss' | 'jobsDb', { status: string; reason: string }> }
+  runtime: { verifierConfigured: boolean; projectConfigured: boolean; agentConfigured: boolean; offerTodayConfigured: boolean; busy: boolean; bossReadConfigured: boolean; bossOutboundSupported: boolean; bossCapabilityReason: string; jobsDbConfigured: boolean; jobsDbProductionVerified: boolean; jobsDbOutboundSupported: boolean; jobsDbCapabilityReason: string; jobsDbSingleJobSupported: boolean; jobsDbSingleJobReason: string; connections?: Record<'boss' | 'jobsDb', { status: string; reason: string }> }
   platforms: {
     bossUrl: string
     offerTodayUrl: string

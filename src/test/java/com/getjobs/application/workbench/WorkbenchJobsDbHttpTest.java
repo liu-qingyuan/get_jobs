@@ -64,17 +64,28 @@ class WorkbenchJobsDbHttpTest {
                 """);
         return List.of("python3", path.toString(), "{taskFile}");
     }
-    List<String> reader() throws Exception {
+    List<String> reader() throws Exception { return reader(false); }
+    List<String> reader(boolean corruptApply) throws Exception {
         var path = root.resolve("channel-reader.py");
-        Files.writeString(path, """
+        String script = """
                 import json,sys
+                if sys.argv[1]=='apply-single':
+                    t=json.load(open(sys.argv[2]))
+                    r={k:t[k] for k in ('attemptId','authorizationId','url','answersSha256','profileHash','contactHash')}
+                    r['resumeSha256']=__SHA__
+                    r['jobId']=t['url'].rsplit('/',1)[-1]
+                    r['status']='SUBMITTED'
+                    r['receipt']={'url':t['url'],'textSha256':'a'*64}
+                    json.dump(r,open(t['resultPath'],'w')); sys.exit(0)
                 b=json.load(open(sys.argv[2])); assert sys.argv[1]=='read-candidates'
                 channel=b['source']['channel']
                 assert channel in ('JOBSDB','OFFERTODAY') and 'token' not in b and 'resumePath' not in b
                 assert b['limits']['modelTokens']==0
                 url='https://hk.jobsdb.com/job/12345678?ref=search' if channel=='JOBSDB' else 'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv=='
-                json.dump({'jobs':[{'url':url,'title':'Python engineer','company':'Synthetic Corp','description':%s,'descriptionComplete':True}]},open(b['resultPath'],'w'))
-                """.formatted(json.writeValueAsString(JD)));
+                json.dump({'jobs':[{'url':url,'title':'Python engineer','company':'Synthetic Corp','description':__JD__,'descriptionComplete':True}]},open(b['resultPath'],'w'))
+                """;
+        script = script.replace("__SHA__", corruptApply ? "'0'*64" : "t['resumeSha256']");
+        Files.writeString(path, script.replace("__JD__", json.writeValueAsString(JD)));
         return List.of("python3", path.toString());
     }
     @ParameterizedTest
@@ -511,6 +522,51 @@ class WorkbenchJobsDbHttpTest {
             assertFalse(runner.runtime().path("jobsDbOutboundSupported").asBoolean());
         }
     }
+    @Test void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http);
+            var candidate = state.path("candidates").path("jobs").get(0);
+            var pkg = state.path("preparations").path("packages").get(0);
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
+            request.putObject("answers");
+            var applied = post(http, "/jobsdb/apply", request);
+            assertEquals("SUBMITTED", applied.path("status").asText(), applied.toPrettyString());
+            assertEquals("12345678", applied.path("jobId").asText());
+            assertEquals(pkg.path("snapshot").path("resume").path("sha256").asText(), applied.path("resumeSha256").asText());
+            assertTrue(applied.path("receipt").path("textSha256").asText().matches("[a-f0-9]{64}"));
+            var after = state(http);
+            assertEquals(1, after.path("jobsdbAttempts").size(), after.toPrettyString());
+            assertEquals(1, after.path("scope").path("usage").path("outbound").asInt());
+            assertTrue(runner.runtime().path("jobsDbSingleJobSupported").asBoolean());
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
+                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(request.toString())).andExpect(status().isConflict());
+            assertEquals(1, state(http).path("jobsdbAttempts").size());
+        }
+    }
+
+    @Test void mismatchedReceiptIsUnknownAndCannotBeRetriedAsSuccess() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(true), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+            var applied = post(http, "/jobsdb/apply", request);
+            assertEquals("UNKNOWN", applied.path("status").asText(), applied.toPrettyString());
+            assertTrue(applied.path("reason").asText().contains("绑定不匹配"), applied.toPrettyString());
+            var after = state(http);
+            assertEquals(1, after.path("jobsdbAttempts").size());
+            assertEquals("UNKNOWN", after.path("jobsdbAttempts").get(0).path("status").asText());
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
+                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(request.toString())).andExpect(status().isConflict());
+        }
+    }
+
     @Test void jobsDbSearchDetailsUseUnifiedMatchingAndIsolatedPreparedMaterialsWithoutSending() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
