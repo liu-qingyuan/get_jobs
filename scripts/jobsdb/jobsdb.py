@@ -237,11 +237,7 @@ class Browser:
             with deadline(): self.session._cloudflare_solver(page)
         if challenge(page): raise RuntimeError('CF challenge remains; no automatic retry')
     def observe_role_requirements(self, page, task):
-        """Read the same-job role-requirements schema without claiming or uploading.
-
-        Direct navigation is preferred. If JobsDB requires the apply start, this intentionally
-        stops instead of entering Quick apply or uploading just to discover questions.
-        """
+        """Navigate read-only to the role-requirements page; never claim or upload."""
         job = job_id(task['url'])
         self.observed_account = self.observed_account or self._visible_account(page)
         target = 'https://hk.jobsdb.com/job/' + job + '/apply/role-requirements'
@@ -253,6 +249,12 @@ class Browser:
             raise ValueError('CAPABILITY_UNVERIFIED: role-requirements not readable without entering the application') from exc
         if not on_site(page.url) or not re.fullmatch(r'/job/' + job + r'/apply/role-requirements/?', urlsplit(page.url).path):
             raise ValueError('CAPABILITY_UNVERIFIED: role-requirements redirected away from the exact job')
+        return self.read_role_requirements(page, job)
+
+    def read_role_requirements(self, page, job):
+        """Read the complete questionnaire schema from an already-reached same-job page."""
+        if not on_site(page.url) or not re.fullmatch(r'/job/' + job + r'/apply/.*', urlsplit(page.url).path):
+            raise ValueError('CAPABILITY_UNVERIFIED: page is not the exact job application')
         names = page.locator('[name^="questionnaire."]').evaluate_all('(es)=>[...new Set(es.map(e=>e.name))]')
         questions = []
         for name in names:
@@ -302,7 +304,9 @@ class Browser:
         if not account:
             raise ValueError('CAPABILITY_UNVERIFIED: account identity is not observable')
         account_hash = hashlib.sha256(account.encode()).hexdigest()
-        session_hash = hashlib.sha256((account + '|' + job + '|' + page.url).encode()).hexdigest()
+        data = getattr(self, 'data', None)
+        session_key = account + '|' + job + '|' + (profile_fingerprint(data) if data is not None else page.url)
+        session_hash = hashlib.sha256(session_key.encode()).hexdigest()
         jd = task.get('description')
         if not isinstance(jd, str) or not jd.strip():
             raise ValueError('CAPABILITY_UNVERIFIED: frozen JD missing')
@@ -350,6 +354,7 @@ class Browser:
 class Flow:
     def __init__(self, page, url, solve):
         self.page, self.id, self.solve = page, job_id(url), solve
+        self.selected_attachment = None
     def active(self):
         return on_site(self.page.url) and re.fullmatch('/job/' + self.id + r'(?:/.*)?', urlsplit(self.page.url).path) is not None
     def application(self):
@@ -397,7 +402,7 @@ class Flow:
                 self.page.wait_for_function("before => location.href + '\\n' + document.body.innerText !== before", arg=before)
             except Exception: return 'NEEDS_INPUT'
         return 'NEEDS_INPUT'
-    def prepare_automatic(self, resume, answers, *, before_disclosure=None):
+    def prepare_automatic(self, resume, answers, *, before_disclosure=None, on_questions=None):
         """Reach review using an immutable hash-named resume and explicit questionnaire answers.
 
         No stdin and no submission. Missing/unknown controls return NEEDS_INPUT.
@@ -419,6 +424,9 @@ class Flow:
                     self.page.get_by_role('button',name='Submit application',exact=True).wait_for(timeout=15000)
                 self.page.get_by_role('button', name=re.compile(r'^(Continue|Next|Submit application)$',re.I)).first.wait_for(timeout=15000)
             except Exception: return self._needs('Form not ready or session expired')
+            if self.page.url.endswith('/role-requirements') and on_questions is not None:
+                on_questions(self.page)
+                on_questions = None
             if self.button('Submit application') is not None:
                 if self.invalid(): return self._needs('Review contains validation errors')
                 if not self.page.get_by_text(resume.name, exact=True).count():
@@ -438,6 +446,7 @@ class Flow:
                 if before_disclosure: before_disclosure()
                 self.page.get_by_role('radio',name="Don't include a cover letter",exact=True).check()
                 if not choice.is_checked(): return self._needs('Resume selection failed')
+                self.selected_attachment = {'name': resume.name, 'selected': True}
             elif self.page.locator('[name^="questionnaire."]').count():
                 controls = self.page.locator('[name^="questionnaire."]')
                 names = controls.evaluate_all('(es)=>[...new Set(es.map(e=>e.name))]')
@@ -688,12 +697,14 @@ def run_single(task, browser, store, data):
         payload.update(status='STOPPED_BEFORE_EFFECT', reason='Missing confirmed task/stage permission'); save(); return 2
     def action(page):
         claimed = claim_requested = False
+        attachment_context = {}
         def observed_context():
             observer = getattr(browser, 'observe_execution_context', None)
             if observer is None:
                 raise ValueError('CAPABILITY_UNVERIFIED: no verified read-only JD/account/session observer')
             context = observer(page, task)
             if not isinstance(context, dict): raise ValueError('Missing observed JD/account/session binding')
+            if attachment_context: context['attachment'] = dict(attachment_context)
             return context
         def validate(phase):
             load_single(task)  # Frozen bytes/answers must still match, not merely at process startup.
@@ -701,36 +712,53 @@ def run_single(task, browser, store, data):
                 raise ValueError('Profile/session association changed')
             single_permission(task, phase, observed_context())
         try:
-            # Never enter Quick apply or upload just to discover questions. A complete, same-job
-            # read-only observation is checked against the frozen approval by the existing claim owner.
-            observer = getattr(browser, 'observe_role_requirements', None)
-            if observer is None:
-                raise ValueError('CAPABILITY_UNVERIFIED: no verified read-only role-requirements observer')
-            requirements = observer(page, task)
-            if (not isinstance(requirements, dict) or requirements.get('complete') is not True
-                    or requirements.get('jobId') != job or not isinstance(requirements.get('questions'), list)):
-                raise ValueError('Incomplete or misbound role-requirements; no claim/effect')
-            load_single(task)
-            if profile_fingerprint(data) != task.get('profileHash'): raise ValueError('Profile/session association changed')
-            context = observed_context()
-            claim_requested = True
-            task['authorizationId'] = single_permission(task, 'CLAIM', context, requirements)
-            claimed = True
-            payload.update(authorizationId=task['authorizationId'], status='UNKNOWN', reason='task stage claimed; no receipt yet'); save()
-            validate('LAUNCH')
-            # Workbench claim is already durable. The independent permanent platform claim MUST
-            # precede upload/profile disclosure; either crash window remains UNKNOWN, never replayable.
-            if not store.claim(job):
-                payload.update(status='SKIPPED', reason='already claimed or previously attempted'); save(); return
-            payload.update(status='UNKNOWN', claimedAt=time.time(), reason='platform claim before disclosure; no receipt yet'); save()
-            validate('UPLOAD')
+            # B1 pre-submit observation: enter Quick Apply, select/upload the frozen CV and read
+            # the complete questionnaire. No final submit or native ledger claim happens before
+            # the workbench CLAIM accepts the observed questions and exact attachment binding.
+            visible = getattr(browser, '_visible_account', None)
+            if visible is not None:
+                browser.observed_account = getattr(browser, 'observed_account', None) or visible(page)
             flow = Flow(page, task['url'], browser.solve)
-            state = flow.prepare_automatic(resume, answers, before_disclosure=lambda: validate('UPLOAD'))
+
+            def on_questions(qpage):
+                nonlocal claimed, claim_requested
+                reader = getattr(browser, 'read_role_requirements', None)
+                requirements = reader(qpage, job) if reader is not None else browser.observe_role_requirements(qpage, task)
+                if (not isinstance(requirements, dict) or requirements.get('complete') is not True
+                        or requirements.get('jobId') != job or not isinstance(requirements.get('questions'), list)):
+                    raise ValueError('Incomplete or misbound role-requirements; no claim/effect')
+                load_single(task)
+                if profile_fingerprint(data) != task.get('profileHash'):
+                    raise ValueError('Profile/session association changed')
+                if flow.selected_attachment:
+                    attachment_context.update(flow.selected_attachment)
+                    attachment_context['sha256'] = task['resumeSha256']
+                context = observed_context()
+                payload['observedRequirements'] = requirements
+                if attachment_context: payload['attachment'] = dict(attachment_context)
+                save()
+                claim_requested = True
+                task['authorizationId'] = single_permission(task, 'CLAIM', context, requirements)
+                claimed = True
+                payload.update(authorizationId=task['authorizationId'], status='UNKNOWN',
+                               reason='task stage claimed after pre-submit question/attachment check; no receipt yet'); save()
+                # The original platform ledger is claimed only after the workbench accepted the
+                # observed questions/attachment and before the final submit. A crash stays UNKNOWN.
+                if not store.claim(job):
+                    payload.update(reason='already claimed or previously attempted'); save()
+                    raise ValueError('Original JobsDB ledger claim failed after workbench claim')
+                payload.update(status='UNKNOWN', claimedAt=time.time(),
+                               reason='platform claim after pre-submit check; no receipt yet'); save()
+
+            state = flow.prepare_automatic(resume, answers, on_questions=on_questions)
         except Exception as exc:
             # An explicit rejected claim is known unsent. Lost/misbound acknowledgements can hide
             # a durable task claim, so neither this worker nor the workbench may grant a replay.
             uncertain = claimed or claim_requested and not (isinstance(exc, HTTPError) and 400 <= exc.code < 500)
-            payload.update(status='UNKNOWN' if uncertain else 'STOPPED_BEFORE_EFFECT', reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
+            payload.update(status='UNKNOWN' if uncertain else 'STOPPED_BEFORE_EFFECT',
+                           reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
+        if not claimed:
+            payload.update(status='STOPPED_BEFORE_EFFECT', reason='No pre-submit question/attachment claim was performed'); save(); return
         payload['reason'] = flow.reason
         if state != 'REVIEW':
             login = not on_site(page.url) or re.search(r'/(?:login|sign-in|signin|auth)(?:/|\?|$)', page.url, re.I)
