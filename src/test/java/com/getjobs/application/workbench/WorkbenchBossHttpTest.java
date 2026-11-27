@@ -159,6 +159,16 @@ class WorkbenchBossHttpTest {
         }
     }
 
+    @Test void recognizesTheRealBossChatPanelAutoGreetingAndRejectsStaleOrOtherJobs() {
+        String title = "Python开发（接受无经验）";
+        String visible = "刘雨瑶\n外企德科数字·招聘经理\n已发送\n您好，我对" + title
+                + "很感兴趣，希望和您聊聊，谢谢！\n发送\n订阅回复消息";
+        assertTrue(BossContactEffect.sentPlatformGreeting(visible, title));
+        assertFalse(BossContactEffect.sentPlatformGreeting("已向BOSS发送消息", title));
+        assertFalse(BossContactEffect.sentPlatformGreeting(visible, "另一个岗位"));
+        assertFalse(BossContactEffect.sentPlatformGreeting(visible.replace("已发送", ""), title));
+    }
+
     @Test void missingBossSessionIsAnExplicitReadExceptionNeverAnOfficialAiFallback() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, List.of("never-run-official-ai", "{taskFile}"), "http://127.0.0.1:1", 10)) {

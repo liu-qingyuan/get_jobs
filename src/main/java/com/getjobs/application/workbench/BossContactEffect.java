@@ -26,8 +26,8 @@ import java.util.function.Function;
  */
 final class BossContactEffect implements BossSingleJobEffect {
     private static final String START_CHAT = "a.btn-startchat, a.op-btn-chat";
-    private static final String CHAT_INPUT = "div#chat-input.chat-input[contenteditable='true'], textarea.input-area";
     private static final String AUTO_GREETING = "已向BOSS发送消息";
+    private static final String SENT = "已发送";
     private static final String ACCOUNT = "li.nav-figure, .nav-figure";
 
     private static final class Stop extends RuntimeException {
@@ -84,7 +84,7 @@ final class BossContactEffect implements BossSingleJobEffect {
         WorkbenchService.require(page != null && !page.isClosed(), "Boss 浏览器页面不可用；不创建替代会话");
         page.bringToFront();
         boolean preexistingConfirmation = false;
-    page.navigate(canonical, new Page.NavigateOptions()
+        page.navigate(canonical, new Page.NavigateOptions()
                 .setWaitUntil(WaitUntilState.DOMCONTENTLOADED).setTimeout(15_000));
         if (BossCandidateReader.requiresUserAction(page)) throw new Stop("Boss 要求登录或安全验证；未 claim、未点击");
         WorkbenchService.require(sameDetail(page.url(), canonical), "Boss 岗位页面被重定向，不能绑定目标");
@@ -93,6 +93,8 @@ final class BossContactEffect implements BossSingleJobEffect {
                 "Boss 岗位页面的公司/职位与已批准目标不符");
         String account = account(page);
         WorkbenchService.require(!account.isBlank(), "无法观察 Boss 当前账号身份；不能 claim");
+        String greeting = platformGreeting(title);
+        WorkbenchService.require(!body.contains(greeting), "页面已显示此岗位的既有自动招呼，不能重复联系");
 
         Locator confirmation = confirmation(page);
         preexistingConfirmation = visible(confirmation);
@@ -124,25 +126,27 @@ final class BossContactEffect implements BossSingleJobEffect {
             String current;
             try { current = page.locator("body").innerText(); }
             catch (PlaywrightException navigating) { page.waitForTimeout(250); continue; }
-            if (!preexistingConfirmation && visible(confirmation(page)) && sameDetail(page.url(), canonical)
-                    && current.contains(company) && current.contains(title)) {
-                Path evidence = writeEvidence(directory, page, canonical, jobId, company, title, account);
+            String confirmationText = null;
+            if (sameDetail(page.url(), canonical) && current.contains(company) && current.contains(title)) {
+                if (!preexistingConfirmation && visible(confirmation(page))) confirmationText = AUTO_GREETING;
+                else if (sentPlatformGreeting(current, title)) confirmationText = SENT + "：" + greeting;
+            }
+            if (confirmationText != null) {
+                Path evidence = writeEvidence(directory, page, canonical, jobId, company, title, account, confirmationText);
                 var receipt = json.createObjectNode().put("jobId", jobId)
                         .put("attemptId", task.path("attemptId").asText())
                         .put("contactMode", ChatDelivery.PLATFORM_AUTO_GREETING)
-                        .put("platformConfirmation", AUTO_GREETING)
-                        .put("proof", "Boss 详情页一次性点击立即沟通后出现平台文本「" + AUTO_GREETING
+                        .put("platformConfirmation", confirmationText)
+                        .put("proof", "Boss 同岗页面一次性点击立即沟通后出现平台确认「" + confirmationText
                                 + "」；岗位 " + jobId + "、公司/职位匹配；截图 boss-contact.png；无自拟正文、无附件");
                 emit.apply(json.createObjectNode().put("type", "CONTACTED")
                         .put("message", "Boss 平台自动招呼已确认；CV 留待招聘者回复后的独立阶段")
                         .put("evidence", receipt.toString()));
                 return;
             }
-            if (visible(page.locator(CHAT_INPUT).first()))
-                throw new Stop("平台未显示自动招呼，而是打开了聊天编辑框；未发送任何正文，保留 UNKNOWN");
             page.waitForTimeout(250);
         }
-    throw new Stop("已点击一次但未在时间预算内看到平台自动招呼确认；保留 UNKNOWN，不重试");
+        throw new Stop("已点击一次但未在时间预算内看到平台自动招呼确认；保留 UNKNOWN，不重试");
         // Leave the page where the platform put it. Never close the user's browser.
     }
 
@@ -175,6 +179,16 @@ final class BossContactEffect implements BossSingleJobEffect {
 
     private static Locator confirmation(Page page) {
         return page.getByText(AUTO_GREETING, new Page.GetByTextOptions().setExact(true)).first();
+    }
+
+    private static String platformGreeting(String title) {
+        return "您好，我对" + title + "很感兴趣，希望和您聊聊，谢谢！";
+    }
+
+    /** The real Boss UI opens the chat panel and reports the platform greeting as 已发送. */
+    static boolean sentPlatformGreeting(String visible, String title) {
+        return visible != null && title != null && !title.isBlank()
+                && visible.contains(SENT) && visible.contains(platformGreeting(title));
     }
 
     private static boolean visible(Locator locator) {
@@ -223,14 +237,14 @@ final class BossContactEffect implements BossSingleJobEffect {
     }
 
     private Path writeEvidence(Path directory, Page page, String canonical, String jobId,
-            String company, String title, String account) throws Exception {
+            String company, String title, String account, String confirmation) throws Exception {
         Files.createDirectories(directory);
         Path screenshot = directory.resolve("boss-contact.png");
         page.screenshot(new Page.ScreenshotOptions().setPath(screenshot));
         var evidence = json.createObjectNode().put("jobId", jobId).put("url", canonical)
                 .put("company", company).put("title", title).put("accountHash", accountHash(account))
                 .put("contactMode", ChatDelivery.PLATFORM_AUTO_GREETING)
-                .put("platformConfirmation", AUTO_GREETING).put("observedAt", Instant.now().toString())
+                .put("platformConfirmation", confirmation).put("observedAt", Instant.now().toString())
                 .put("screenshot", screenshot.getFileName().toString());
         Files.writeString(directory.resolve("boss-contact.json"), json.writeValueAsString(evidence));
         return screenshot;
