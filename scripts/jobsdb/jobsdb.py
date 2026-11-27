@@ -283,7 +283,7 @@ class Browser:
             if not label and kind in ('radio', 'checkbox'):
                 label = first.evaluate("""(e) => {
                   let p = e.parentElement;
-                  while (p && p !== document.body) { const t = p.innerText ? p.innerText.trim() : ''; if (t && t.length < 1000) return t.split('\n')[0].trim(); p = p.parentElement; }
+                  while (p && p !== document.body) { const t = p.innerText ? p.innerText.trim() : ''; if (t && t.length < 1000) return t.split(String.fromCharCode(10))[0].trim(); p = p.parentElement; }
                   return '';
                 }""")
             if not label or not options:
@@ -760,6 +760,9 @@ def run_single(task, browser, store, data):
                 claimed = True
                 payload.update(authorizationId=task['authorizationId'], status='UNKNOWN',
                                reason='task stage claimed after pre-submit question/attachment check; no receipt yet'); save()
+                # Record the existing launch/disclosure fences before the native claim; the workbench
+                # still requires both before it accepts the final SUBMIT fence.
+                validate('LAUNCH')
                 # The original platform ledger is claimed only after the workbench accepted the
                 # observed questions/attachment and before the final submit. A crash stays UNKNOWN.
                 if not store.claim(job):
@@ -767,6 +770,7 @@ def run_single(task, browser, store, data):
                     raise ValueError('Original JobsDB ledger claim failed after workbench claim')
                 payload.update(status='UNKNOWN', claimedAt=time.time(),
                                reason='platform claim after pre-submit check; no receipt yet'); save()
+                validate('UPLOAD')
 
             state = flow.prepare_automatic(resume, answers, on_questions=on_questions)
         except Exception as exc:
