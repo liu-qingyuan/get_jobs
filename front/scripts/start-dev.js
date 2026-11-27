@@ -13,7 +13,6 @@ const hostname = 'localhost';
 const envContent = `# 这个文件由启动脚本自动生成，请不要手动修改
 PORT=${port}
 HOSTNAME=${hostname}
-API_BASE_URL=${serverConfig.api.baseUrl}
 APP_NAME=${serverConfig.app.name}
 APP_VERSION=${serverConfig.app.version}
 `;
@@ -24,7 +23,6 @@ fs.writeFileSync(envPath, envContent);
 console.log(`🔧 已从 server.config.js 加载配置:`);
 console.log(`   端口: ${port}`);
 console.log(`   主机: ${hostname}`);
-console.log(`   API地址: ${serverConfig.api.baseUrl}`);
 
 // 启动 Next.js，直接传递端口参数
 const nextProcess = spawn('next', ['dev', '-p', port.toString()], {

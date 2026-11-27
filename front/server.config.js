@@ -24,12 +24,6 @@ module.exports = {
     hostname: '0.0.0.0',
   },
 
-  // API 配置（如果需要在构建时使用）
-  api: {
-    // 后端 API 地址，需与 application.yaml 的 server.port 一致
-    baseUrl: 'http://localhost:9527',
-  },
-
   // 其他自定义配置
   app: {
     name: 'Get Jobs',

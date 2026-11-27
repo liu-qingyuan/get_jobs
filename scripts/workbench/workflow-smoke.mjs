@@ -1,6 +1,6 @@
 // #14–17 packaged UI + real HTTP, synthetic data/fake children only. Never touches a running workbench.
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, open, unlink } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, open, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -17,7 +17,6 @@ const projectRoot = await mkdtemp(join(tmpdir(), 'workbench-project-output-'))
 const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
 const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
 const base = `http://127.0.0.1:${port}`
-await mkdir(join(root, 'src/main/resources/dist'), { recursive: true })
 const fake = join(root, 'fake.py')
 await writeFile(fake, `import json,sys,pathlib,urllib.request,os,time,hashlib
 b=json.load(open(sys.argv[-1]));root=pathlib.Path(__file__).parent
@@ -113,16 +112,6 @@ try {
     const url = new URL(route.request().url())
     if (url.pathname === '/api/workbench/cycles' && route.request().method() === 'POST') starts.push(url.pathname)
     if (url.origin === base) return route.continue()
-    if (url.hostname === 'localhost' && url.port === '9527' && url.pathname.startsWith('/api/')) {
-      try {
-        const response = await route.fetch({ url: `${base}${url.pathname}${url.search}`, maxRedirects: 0, headers: { ...route.request().headers(), origin: base } })
-        return route.fulfill({ response, headers: { ...response.headers(), 'access-control-allow-origin': base } })
-      } catch {
-        // The deliberate server crash can race the page's poll. Preserve the real network failure,
-        // not a fabricated application response or an unhandled route-handler rejection.
-        return route.abort('connectionrefused')
-      }
-    }
     return route.abort('blockedbyclient') // All websites/accounts/third-party traffic blocked.
   })
   const page = await context.newPage(); page.on('pageerror', error => failures.push(error.message))

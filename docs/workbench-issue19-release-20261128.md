@@ -1,6 +1,21 @@
 # Issue #19 工作台发布验收（2026-11-28）
 
-## 发布结论
+## 打包修复与切换复核
+
+候选包 `build/libs/get_jobs-2.0.1.issue19-packaging.jar` 通过隔离打包验收。9532 继续运行旧版。此次调整限于静态资源解析和前端 API 基址，沿用现有 HTTP 接口和业务流程。
+
+- 在临时源码目录运行 `npm run build:prod`，以 Java 21 运行 `sh gradlew --no-daemon bootJar test --console=plain`。Java 默认全量套件共 324 项，305 通过、19 项 opt-in 测试跳过、0 失败。候选包 SHA256 为 `2a8571014e764b815f7e2d797b94754630979845e189a05e98cb5a80378d092e`。包内 97 个 UI 文件逐一匹配静态导出，未发现指向本机 9527 或 8888 的固定 API 地址。
+- 旧 JAR 在无磁盘 `dist` 的临时目录复现页面 404。新 JAR 在同样的布局下，`/`、`/workbench`、`/workbench/`、`/boss/analysis` 和嵌套 SPA 回退路径均返回 200。未知 API 和缺失的 JS 资源仍返回 404。
+- Playwright 在全新 Chromium 上直接打开临时实例的 `/workbench`，显示候选岗位队列，`GET /api/workbench/state` 返回 200。43 个浏览器请求全部发往该实例同一源。19 个 JS/CSS 的响应字节逐一匹配 JAR。独立项目验证的合成冒烟通过。既有 baseline 和 workflow 冒烟分别在材料核准和首轮逐岗状态处重现超时，见下方初次验收记录。
+- 使用同一临时端口、启动参数和合成库演练旧 JAR、新 JAR、恢复旧 JAR。磁盘保留旧导出时，新包仍返回自己的 `/workbench` 和资源，磁盘独有的测试资源也可读取。恢复后页面哈希回到旧版，合成事实记录保留，每次启动的状态 API 均返回 200。
+
+9532 的 PID、命令、数据目录、旧 JAR 和磁盘导出已记录或备份。前后核对监听 PID、静态页面哈希、JAR 及磁盘导出一致。按相同参数重启会打开实际工作台库、获取运行锁并执行中断恢复。页面轮询的 `GET /api/workbench/state` 也可能写入匹配结果和占用范围额度。本轮的合成数据限制涵盖这些操作，因此 9532 的启动与状态验收仍待明确授权。没有执行实际切换或回滚。
+
+后续切换需在允许现有启动恢复和状态检查访问实际运行库的维护窗口完成。正常停止旧进程，将候选 JAR 放到原路径，以记录中的命令、数据路径和参数启动，再核对状态 API、页面、资源哈希和浏览器同源请求。若检查失败，停止候选进程，将备份 JAR 恢复到原路径，执行保存的旧启动命令并复核服务。推荐质量、渠道连接范围和真实回执仍待人工验收。
+
+本轮证据位于忽略目录 `.workbench/live-evidence/issue19-release-20261128/packaging-follow-up/`。其中 `package-proof.json` 记录 HTTP、浏览器和演练结果，`previous.jar`、`previous-dist/` 和 `previous-launch.sh` 保留回滚所需的旧产物与启动记录。
+
+## 初次发布结论
 
 暂停切换。以干净的 `main` `109f8acbf5366144c82a6220e735da019c2f49e8` 导出源码，在临时目录重建 Next.js 静态资源并执行 `test bootJar`。同一 JAR 的直接浏览器访问未能从该实例加载候选主屏。合成回归中通过测试端转送验证了部分业务链路。[Issue #19](https://github.com/liu-qingyuan/get_jobs/issues/19)
 

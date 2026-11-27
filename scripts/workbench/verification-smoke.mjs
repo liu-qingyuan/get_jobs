@@ -16,7 +16,7 @@ const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listenin
 const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
 const base = `http://127.0.0.1:${port}`
 const app = join(root, 'app')
-await mkdir(join(app, 'src/main/resources/dist'), { recursive: true }); await mkdir(join(root, 'projects'))
+await mkdir(app); await mkdir(join(root, 'projects'))
 const ai = join(root, 'synthetic-ai.py'), executor = join(root, 'project-executor.py'), verifier = join(root, 'independent-checker.py')
 await writeFile(ai, `import json,sys
 b=json.load(open(sys.argv[-1]))
@@ -94,10 +94,6 @@ try {
   await context.route('**/*', async route => {
     const url = new URL(route.request().url())
     if (url.origin === base) return route.continue()
-    if (url.hostname === 'localhost' && url.port === '9527' && url.pathname.startsWith('/api/')) {
-      const response = await route.fetch({ url: `${base}${url.pathname}${url.search}`, maxRedirects: 0, headers: { ...route.request().headers(), origin: base } })
-      return route.fulfill({ response, headers: { ...response.headers(), 'access-control-allow-origin': base } })
-    }
     return route.abort('blockedbyclient')
   })
   const page = await context.newPage(), errors = []

@@ -21,6 +21,17 @@ bash gradlew --no-daemon workbench --console=plain
 
 `workbench` 会构建管理页、准备原平台 driver，但不会自动打开招聘浏览器、调用模型或发送申请。打开 `/workbench` 使用；Boss 的显式登录/原审核入口和 JobsDB CLI 各自保留独立会话。仅本机访问，额外静态端口也绑定 loopback。跨源仅放行本机后端端口和前端 6866，不信任其他 localhost 端口。
 
+打包的 JAR 从 classpath 提供静态导出，优先于工作目录中的 `src/main/resources/dist`。缺少包内资源时仍可使用磁盘上的开发资源。页面默认通过同源 `/api/…` 访问后端，跟随 JAR 启动端口。
+
+独立运行 Next.js 开发服务器时，先确认 6866 空闲并执行以下命令，再启动使用合成数据的后端，最后打开 `http://127.0.0.1:6866/workbench`。示例中的 API 端口应与开发后端的实际端口一致。先启动前端可以避免 Spring 占用 6866 作为额外的静态资源端口。
+
+```bash
+cd front
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:9535 npm run dev
+```
+
+从未设置 `NEXT_PUBLIC_API_BASE` 的环境运行 `npm run build:prod` 以生成同源发布包。该变量由 Next.js 在构建时注入。
+
 开发验证可覆盖 `--spring.datasource.url`、`--workbench.data-dir`、`--workbench.jobsdb-dir` 指向临时目录，且跳过 driver 安装：
 
 ```bash
@@ -267,7 +278,7 @@ PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/w
 PLAYWRIGHT_MODULE=/absolute/path/to/installed/playwright/index.js node scripts/workbench/workflow-smoke.mjs
 ```
 
-脚本使用临时目录、随机端口、合成最小旧库结构、fake AI 和全新无登录浏览器；所有网站请求拦截，正式前端的默认后端地址仅代理到该临时 HTTP 实例，不请求正在展示的工作台。临时空 `dist` 目录仅满足现有 checkout 启动布局，页面取自 JAR；不复制原数据库或私有状态。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；然后通过界面准备独立岗位 DOCX，查看正文/依据、下载文件、只读动作拒绝与跨刷新复用，并在岗位条件变化后展示失效；共 8 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 3 次/备料 1 次、3 包（核准1/例外2，核准包后来失效）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png`、`preparation.png` 与 `prepared-job.docx` 的临时证据目录和实际计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
+脚本在无磁盘 `dist` 的临时目录运行 JAR，使用随机端口、合成旧库结构、fake AI 和全新无登录浏览器。浏览器直接请求该实例的同源 API，拦截所有其他源。验证可见重复/矛盾/缺证据、集中确认、刷新后复用与模型仅调用一次，以及范围设置/预检/暂停/恢复/变更/撤销和刷新后的历史、默认主屏一次取得官网/OfferToday 两来源的完整候选及描述不足例外；随后验证批量匹配、引用、真实缺口建议、必要核实后的局部自动重评及缓存复用；然后通过界面准备独立岗位 DOCX，查看正文/依据、下载文件、只读动作拒绝与跨刷新复用，并在岗位条件变化后展示失效；共 8 个范围版本、3 候选（2 完整 JD）、材料整理 1 次/匹配 3 次/备料 1 次、3 包（核准1/例外2，核准包后来失效）、0 任务、0 外发。输出 `baseline.png`、`scope.png`、`candidates.png`、`matching.png`、`matching-needs-facts.png`、`preparation.png` 与 `prepared-job.docx` 的临时证据目录和实际计数后关闭自己创建的进程。真实账号、腾讯/阿里/百度等动态表单、推荐质量和真实回执仍需后续单独授权验证。
 
 #14 的 `workflow-smoke.mjs` 使用同样隔离约束，从默认页面一次启动官网与 OfferToday，自动连续推进两岗并保留第三岗的登录例外；处理必要例外后在同一轮恢复，不重放已完成阶段/岗位。另在联系后强制终止自己启动的临时 Java 进程，重启确认旧子进程已释放、旧 token 拒绝，保留联系/UNKNOWN 且不发 CV，并可推进其他岗。#15 另在同一临时实例经默认候选页面提交 Boss 只读来源（不提供任何 Boss 会话），验证明确读取例外、可见能力限制、无官网回退和新增外发。#16 再通过默认页面读取合成 JobsDB 候选，验证统一匹配、独立材料与 APPLY 拒绝、0 新任务/外发；JobsDB 假命令只读取临时任务包，不提供账号或原账本。共输出五张合成页面截图及实际计数；不会切换当前工作台，也不是实站发送验收。
 

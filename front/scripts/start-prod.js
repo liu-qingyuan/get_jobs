@@ -13,7 +13,6 @@ const hostname = serverConfig.production.hostname;
 const envContent = `# 这个文件由启动脚本自动生成，请不要手动修改
 PORT=${port}
 HOSTNAME=${hostname}
-API_BASE_URL=${serverConfig.api.baseUrl}
 APP_NAME=${serverConfig.app.name}
 APP_VERSION=${serverConfig.app.version}
 `;

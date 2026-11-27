@@ -4,9 +4,7 @@ import type { NextConfig } from "next";
 const serverConfig = require('./server.config.js');
 
 const nextConfig: NextConfig = {
-  // 将API配置暴露给客户端
   env: {
-    API_BASE_URL: serverConfig.api.baseUrl,
     APP_NAME: serverConfig.app.name,
     APP_VERSION: serverConfig.app.version,
   },

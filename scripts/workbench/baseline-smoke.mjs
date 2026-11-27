@@ -1,7 +1,7 @@
 // Packaged-app smoke: synthetic materials, a fake AI process, fresh browser, temporary databases.
 // PLAYWRIGHT_MODULE must point to an installed Playwright module; no new project test framework.
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, open } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -19,8 +19,6 @@ await once(probe, 'listening')
 const port = probe.address().port
 await new Promise(resolve => probe.close(resolve))
 const base = `http://127.0.0.1:${port}`
-// Match the existing checkout launcher layout; the empty directory enables classpath static resources.
-await mkdir(join(root, 'src/main/resources/dist'), { recursive: true })
 const fake = join(root, 'fake-ai.py')
 await writeFile(fake, `import json,sys,pathlib
 b=json.load(open(sys.argv[-1]))
@@ -89,17 +87,10 @@ try {
   browser = await chromium.launch({ channel: 'chrome', headless: true })
   const context = await browser.newContext({ viewport: { width: 1365, height: 1000 }, serviceWorkers: 'block' })
   const failures = []
-  // The release bundle retains its normal localhost:9527 configuration. Proxy requests to the real
-  // isolated HTTP application, never to the user's server; no application responses are mocked.
+  // Only the isolated application can receive browser requests.
   await context.route('**/*', async route => {
     const url = new URL(route.request().url())
     if (url.origin === base) return route.continue()
-    if (url.hostname === 'localhost' && url.port === '9527' && url.pathname.startsWith('/api/')) {
-      const response = await route.fetch({ url: `${base}${url.pathname}${url.search}`, maxRedirects: 0,
-        headers: { ...route.request().headers(), origin: base } })
-      return route.fulfill({ response, headers: { ...response.headers(), 'access-control-allow-origin': base } })
-    }
-    // No job site, account, upload endpoint, or other host can be contacted by this smoke.
     return route.abort('blockedbyclient')
   })
   page = await context.newPage()
