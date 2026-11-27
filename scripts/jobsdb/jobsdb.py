@@ -337,9 +337,17 @@ class Browser:
             finally:
                 if self.screenshots:
                     screenshot(page, self.data, 'last-page')
-        with deadline():
-            options = {'page_setup': setup} if setup is not None else {}
-            self.session.fetch(url, solve_cloudflare=setup is None, page_action=perform, **options)
+        try:
+            with deadline():
+                options = {'page_setup': setup} if setup is not None else {}
+                self.session.fetch(url, solve_cloudflare=setup is None, page_action=perform, **options)
+        except RuntimeError as exc:
+            # Scrapling/Patchright can fail while removing its response listener after the page
+            # action (no running event loop). The action's own result/error is authoritative; do
+            # not discard a completed pre-submit observation or turn it into a fake success.
+            if 'no running event loop' not in str(exc) or not (result or errors):
+                raise
+            print('Scrapling listener cleanup warning: ' + str(exc), file=sys.stderr)
         if errors: raise errors[0]
         if not result: raise RuntimeError('Browser action did not run')
         return result[0]
@@ -765,6 +773,8 @@ def run_single(task, browser, store, data):
             # An explicit rejected claim is known unsent. Lost/misbound acknowledgements can hide
             # a durable task claim, so neither this worker nor the workbench may grant a replay.
             uncertain = claimed or claim_requested and not (isinstance(exc, HTTPError) and 400 <= exc.code < 500)
+            import traceback
+            traceback.print_exc()
             payload.update(status='UNKNOWN' if uncertain else 'STOPPED_BEFORE_EFFECT',
                            reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
         if not claimed:
@@ -792,6 +802,8 @@ def run_single(task, browser, store, data):
     try:
         browser.run(task['url'], action)
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         if payload['status'] not in ('SUBMITTED', 'UNKNOWN'):
             payload.update(status='ERROR', reason=(str(exc).splitlines() or ['action failed'])[0])
         else:
