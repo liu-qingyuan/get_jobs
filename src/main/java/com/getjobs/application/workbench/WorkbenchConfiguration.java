@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import static com.getjobs.application.workbench.WorkbenchConnections.Status.*;
 
@@ -19,8 +20,12 @@ import static com.getjobs.application.workbench.WorkbenchConnections.Status.*;
 public class WorkbenchConfiguration {
     @Bean WorkbenchService workbenchService(@Value("${workbench.data-dir:.workbench}") String root,
             @Value("${workbench.jobsdb-dir:.jobsdb}") String jobsdb, ObjectMapper json,
-            @Value("${workbench.projects-root:}") String projectsRoot) {
-        return new WorkbenchService(Path.of(root), Path.of(jobsdb), json, projectsRoot.isBlank() ? null : Path.of(projectsRoot));
+            @Value("${workbench.projects-root:}") String projectsRoot,
+            ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
+            @Value("${workbench.boss-contact-enabled:true}") boolean bossContactEnabled) {
+        boolean bossContact = bossContactEnabled && browsers.getIfAvailable() != null && bossJobs.getIfAvailable() != null;
+        return new WorkbenchService(Path.of(root), Path.of(jobsdb), json, projectsRoot.isBlank() ? null : Path.of(projectsRoot),
+                bossContact ? Map.of("BOSS", List.of("in-process-contact")) : Map.of());
     }
     @Bean(destroyMethod="close") WorkbenchRunner workbenchRunner(WorkbenchService service, ObjectMapper json,
             ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
@@ -30,7 +35,8 @@ public class WorkbenchConfiguration {
             @Value("${workbench.offertoday-command:${WORKBENCH_OFFERTODAY_COMMAND:}}") String offerTodayCommand,
             @Value("${workbench.jobsdb-command:${WORKBENCH_JOBSDB_COMMAND:}}") String jobsDbCommand,
             @Value("${server.port:9527}") int port,
-            @Value("${workbench.agent-timeout-seconds:1800}") long timeout) throws Exception {
+            @Value("${workbench.agent-timeout-seconds:1800}") long timeout,
+            @Value("${workbench.boss-contact-enabled:true}") boolean bossContactEnabled) throws Exception {
         if (timeout < 1) throw new IllegalArgumentException("执行器超时须为正数");
         List<String> offerToday;
         if (offerTodayCommand.isBlank()) {
@@ -107,7 +113,21 @@ public class WorkbenchConfiguration {
             if (jobsDb.isEmpty()) return NOT_CONFIGURED;
             return managedJobsDb ? WorkbenchConnections.jobsDb(service.jobsDbDirectory().resolve("scrapling-profile")) : CHECK_AT_READ;
         });
-        return new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss, arguments(json, projectCommand), arguments(json, verifierCommand), "http://127.0.0.1:" + port + "/api/workbench", timeout, connections);
+        var runner = new WorkbenchRunner(service, arguments(json, command), offerToday, jobsDb, boss,
+                arguments(json, projectCommand), arguments(json, verifierCommand),
+                "http://127.0.0.1:" + port + "/api/workbench", timeout, connections);
+        if (bossContactEnabled && browser != null && legacyBoss != null)
+            runner.setBossSingleJobEffect(new BossContactEffect(browser, legacyBoss, json));
+        return runner;
+    }
+
+    /** Direct-call adapter for focused tests; the Spring bean above remains the only composition root. */
+    WorkbenchRunner workbenchRunner(WorkbenchService service, ObjectMapper json,
+            ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
+            String command, String projectCommand, String verifierCommand, String offerTodayCommand,
+            String jobsDbCommand, int port, long timeout) throws Exception {
+        return workbenchRunner(service, json, browsers, bossJobs, command, projectCommand, verifierCommand,
+                offerTodayCommand, jobsDbCommand, port, timeout, true);
     }
 
     private static List<String> arguments(ObjectMapper json, String command) throws Exception {

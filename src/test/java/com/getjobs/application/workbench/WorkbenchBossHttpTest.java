@@ -11,6 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.*;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -114,6 +116,46 @@ class WorkbenchBossHttpTest {
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks").contentType("application/json").content(target.toString())).andExpect(status().isBadRequest());
             assertTrue(state(http).path("tasks").isEmpty());
             assertEquals(0, state(http).path("scope").path("usage").path("outbound").asInt());
+        }
+    }
+
+    @Test void bossContactOnlyEffectUsesTheTaskClaimAndRecordsAutoGreetingWithoutCv() throws Exception {
+        var service = new WorkbenchService(root.resolve("state"), root.resolve("empty-legacy"), json, null,
+                Map.of("BOSS", List.of("boss-single-job")));
+        var calls = new AtomicInteger();
+        BossSingleJobEffect effect = (bundle, emit, directory, stopped) -> {
+            calls.incrementAndGet();
+            var task = (ObjectNode) bundle.path("task");
+            var context = json.createObjectNode()
+                    .put("jdSha256", WorkbenchService.hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8)))
+                    .put("accountHash", "a".repeat(64)).put("sessionHash", "b".repeat(64))
+                    .put("jobId", task.path("platformJobId").asText());
+            var submitting = json.createObjectNode().put("type", "SUBMITTING").put("message", "fixture contact claim").put("action", "CONTACT");
+            submitting.set("context", context);
+            assertTrue(emit.apply(submitting).has("outboundClaim"));
+            var receipt = json.createObjectNode().put("jobId", task.path("platformJobId").asText())
+                    .put("attemptId", task.path("attemptId").asText()).put("proof", "platform confirmation visible")
+                    .put("contactMode", ChatDelivery.PLATFORM_AUTO_GREETING).put("platformConfirmation", "已向BOSS发送消息");
+            emit.apply(json.createObjectNode().put("type", "CONTACTED").put("message", "platform auto greeting").put("evidence", receipt.toString()));
+        };
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), bundle -> jobs(), "http://127.0.0.1:1", 30)) {
+            runner.setBossSingleJobEffect(effect);
+            var http = http(service, runner); setup(http, true);
+            post(http, "/cycles", input());
+            await().atMost(Duration.ofSeconds(15)).until(() -> !runner.runtime().path("busy").asBoolean());
+            var state = state(http);
+            // The cycle already created and dispatched the durable task; reusing it is the only
+            // correct path. Minting a second task would have to replay an UNKNOWN attempt.
+            assertEquals(2, state.path("tasks").size(), state.toPrettyString());
+            assertEquals(state.path("tasks").size(), calls.get(), state.toPrettyString());
+            for (var saved : state.path("tasks")) {
+                assertEquals("UNKNOWN", saved.path("state").asText(), saved.toPrettyString());
+                assertTrue(saved.has("outboundClaim"), saved.toPrettyString());
+                assertEquals(saved.path("attemptId").asText(), saved.path("claimedAttemptId").asText(), saved.toPrettyString());
+                assertTrue(saved.has("contactReceipt"), saved.toPrettyString());
+                assertEquals("PLATFORM_AUTO_GREETING", saved.path("contactReceipt").path("contactMode").asText());
+                assertFalse(saved.has("cvReceipt"), saved.toPrettyString());
+            }
         }
     }
 

@@ -21,6 +21,7 @@ public final class WorkbenchRunner implements AutoCloseable {
     private final List<String> verifierCommand;
     private record PendingCandidateRead(ObjectNode bundle) { }
     private final WorkbenchCandidates.Reader bossReader;
+    private volatile BossSingleJobEffect bossSingleJob;
     private final WorkbenchConnections connections;
     private final Map<String, PendingCandidateRead> pendingCandidateReads = new ConcurrentHashMap<>();
     private final Map<String, ObjectNode> resumedCandidateReads = new ConcurrentHashMap<>();
@@ -111,16 +112,22 @@ public final class WorkbenchRunner implements AutoCloseable {
                 .put("jobsDbOutboundSupported", false).put("jobsDbCapabilityReason", JobsDbTarget.OUTBOUND_BLOCK_REASON)
                 .put("jobsDbSingleJobSupported", !jobsDbCommand.isEmpty())
                 .put("jobsDbSingleJobReason", jobsDbCommand.isEmpty() ? "JobsDB 受控单岗申请未配置独立脚本" : "受控单岗 APPLY 可用；批次、联系、附件外发仍禁用")
-                .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", false).put("bossCapabilityReason", BossCandidateReader.OUTBOUND_BLOCK_REASON);
+                .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", bossSingleJob != null)
+                .put("bossCvSupported", false)
+                .put("bossCapabilityReason", bossSingleJob != null
+                        ? "Boss 受控 CONTACT：只记录平台自动招呼，不发送自拟正文或 CV；需应用持有已登录 browser-data 会话，点击前再次核验"
+                        : BossCandidateReader.OUTBOUND_BLOCK_REASON);
         result.set("connections", connections.view(service.json));
         return result;
     }
+
+    void setBossSingleJobEffect(BossSingleJobEffect effect) { this.bossSingleJob = effect; }
 
     private List<String> effectCommand(String channel, boolean application) {
         var configured = switch (channel) {
             case "JOBSDB" -> jobsDbCommand;
             case "OFFERTODAY" -> offerTodayCommand;
-            case "BOSS" -> application ? List.<String>of() : command; // Drafts are not platform sends.
+            case "BOSS" -> application && bossSingleJob != null ? List.of("boss-single-job") : application ? List.<String>of() : command;
             default -> command;
         };
         return application ? service.effectCommand(channel, configured) : configured;
@@ -309,9 +316,10 @@ public final class WorkbenchRunner implements AutoCloseable {
         WorkbenchService.require(value == null || value instanceof ObjectNode, "项目进度/结果格式无效"); return (ObjectNode) value;
     }
 
-    private record TaskProcess(Process child, String token, Path resultFile) { }
+    private record TaskProcess(Process child, String token, Path resultFile, Path taskFile, ObjectNode bundle) { }
 
     private void waitForTask(String id, TaskProcess running) {
+        if (running.child() == null && running.bundle() != null) { runBossSingleJob(id, running); return; }
         Process child = running.child();
         try {
             if (!child.waitFor(service.task(id).path("executionSeconds").asLong(timeoutSeconds), TimeUnit.SECONDS)) stopProcess(child);
@@ -327,6 +335,19 @@ public final class WorkbenchRunner implements AutoCloseable {
         }
         catch (InterruptedException e) { stopProcess(child); Thread.currentThread().interrupt(); }
         finally { try { releaseProcess(); } finally { service.processEnded(id); } }
+    }
+
+    private void runBossSingleJob(String id, TaskProcess running) {
+        try {
+            bossSingleJob.run(running.bundle(), event -> service.agentEvent(id, event, running.token()),
+                    running.taskFile().getParent(), () -> closed || Thread.currentThread().isInterrupted());
+        } catch (Exception e) {
+            try {
+                service.agentEvent(id, service.json.createObjectNode().put("type", "NEEDS_INPUT")
+                        .put("message", e.getMessage() == null ? "Boss contact stopped" : e.getMessage())
+                        .put("evidence", ""), running.token());
+            } catch (Exception ignored) { }
+        } finally { service.processEnded(id); }
     }
 
     private TaskProcess launch(String id) {
@@ -349,6 +370,8 @@ public final class WorkbenchRunner implements AutoCloseable {
             Files.writeString(file, service.json.writerWithDefaultPrettyPrinter().writeValueAsString(bundle));
             try { Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------")); }
             catch (UnsupportedOperationException ignored) { }
+            if (channel.equals("BOSS") && application && bossSingleJob != null)
+                return new TaskProcess(null, token, null, file, bundle);
             List<String> arguments;
             Path resultFile = null;
             if (jobsDb) {
@@ -388,7 +411,7 @@ public final class WorkbenchRunner implements AutoCloseable {
             builder.environment().put("WORKBENCH_TASK_FILE", file.toString());
             Process child = spawn(builder, bundle.path("task").has("packageId")); launched = child;
             child.getOutputStream().close();
-            return new TaskProcess(child, token, resultFile);
+            return new TaskProcess(child, token, resultFile, null, null);
         } catch (WorkbenchException e) { if (claimed) service.processEnded(id); throw e; }
         catch (Exception e) {
             if (launched != null) { stopProcess(launched); service.processEnded(id); }
