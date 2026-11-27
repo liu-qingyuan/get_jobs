@@ -201,6 +201,17 @@ class Browser:
     def __init__(self, data, *, read_only=False, allow_existing_worker=False, screenshots=True):
         self.data, self.read_only = data, read_only
         self.allow_existing_worker, self.screenshots = allow_existing_worker, screenshots
+        self.observed_account = None
+    def _visible_account(self, page):
+        for selector in ('li.nav-figure', '.nav-figure', '[class*="nav-user"]', '[class*="user-name"]'):
+            try:
+                loc = page.locator(selector).first
+                if loc.count() and loc.is_visible():
+                    text = loc.inner_text().strip().split('\n')[0].strip()
+                    if text: return text
+            except Exception:
+                pass
+        return ''
     def __enter__(self):
         # Ordinary strict reads still refuse persisted workers. A resume may use the same profile only
         # with browser-level blocking plus per-page CDP bypass installed before navigation.
@@ -225,6 +236,79 @@ class Browser:
             # Pinned private seam: preserves the current form instead of re-fetching it.
             with deadline(): self.session._cloudflare_solver(page)
         if challenge(page): raise RuntimeError('CF challenge remains; no automatic retry')
+    def observe_role_requirements(self, page, task):
+        """Read the same-job role-requirements schema without claiming or uploading.
+
+        Direct navigation is preferred. If JobsDB requires the apply start, this intentionally
+        stops instead of entering Quick apply or uploading just to discover questions.
+        """
+        job = job_id(task['url'])
+        self.observed_account = self.observed_account or self._visible_account(page)
+        target = 'https://hk.jobsdb.com/job/' + job + '/apply/role-requirements'
+        try:
+            page.goto(target, wait_until='domcontentloaded', timeout=30000)
+            self.solve(page)
+            page.locator('[name^="questionnaire."]').first.wait_for(timeout=15000)
+        except Exception as exc:
+            raise ValueError('CAPABILITY_UNVERIFIED: role-requirements not readable without entering the application') from exc
+        if not on_site(page.url) or not re.fullmatch(r'/job/' + job + r'/apply/role-requirements/?', urlsplit(page.url).path):
+            raise ValueError('CAPABILITY_UNVERIFIED: role-requirements redirected away from the exact job')
+        names = page.locator('[name^="questionnaire."]').evaluate_all('(es)=>[...new Set(es.map(e=>e.name))]')
+        questions = []
+        for name in names:
+            group = page.locator('[name=' + json.dumps(name) + ']')
+            first = group.first
+            tag = first.evaluate('(e)=>e.tagName.toLowerCase()')
+            input_type = (first.get_attribute('type') or '').lower()
+            if tag == 'select':
+                kind = 'select'
+                options = first.locator('option').evaluate_all('(os)=>os.filter(o=>o.value && o.textContent.trim()).map(o=>o.textContent.trim())')
+            elif input_type in ('radio', 'checkbox'):
+                kind = input_type
+                options = group.evaluate_all('(es)=>es.map(e=>e.labels && e.labels.length ? e.labels[0].innerText.trim() : "").filter(Boolean)')
+            else:
+                raise ValueError('CAPABILITY_UNVERIFIED: unsupported role-requirements control')
+            label = first.evaluate("""(e) => {
+              const fs = e.closest('fieldset');
+              const legend = fs && fs.querySelector('legend');
+              if (legend && legend.innerText.trim()) return legend.innerText.trim();
+              const labelled = e.getAttribute('aria-labelledby');
+              if (labelled) { const n = document.getElementById(labelled); if (n && n.innerText.trim()) return n.innerText.trim(); }
+              return '';
+            }""")
+            if not label and kind == 'select' and first.evaluate('(e)=>e.labels && e.labels.length'):
+                label = first.evaluate('(e)=>e.labels[0].innerText.trim()')
+            if not label and kind in ('radio', 'checkbox'):
+                label = first.evaluate("""(e) => {
+                  let p = e.parentElement;
+                  while (p && p !== document.body) { const t = p.innerText ? p.innerText.trim() : ''; if (t && t.length < 1000) return t.split('\n')[0].trim(); p = p.parentElement; }
+                  return '';
+                }""")
+            if not label or not options:
+                raise ValueError('CAPABILITY_UNVERIFIED: role-requirements question identity/options incomplete')
+            required = first.evaluate("(e)=>!!e.required || e.getAttribute('aria-required')==='true' || !!(e.closest('fieldset') && e.closest('fieldset').querySelector('[required]'))")
+            questions.append({'name': name, 'label': label, 'type': kind, 'required': bool(required),
+                              'options': list(dict.fromkeys(options))})
+        if not questions:
+            raise ValueError('CAPABILITY_UNVERIFIED: no role-requirements questions')
+        return {'complete': True, 'jobId': job, 'questions': questions}
+
+    def observe_execution_context(self, page, task):
+        """Observe the exact job/account/session association for the frozen task."""
+        job = job_id(task['url'])
+        if not on_site(page.url) or not re.fullmatch(r'/job/' + job + r'(?:/.*)?', urlsplit(page.url).path):
+            raise ValueError('CAPABILITY_UNVERIFIED: execution page is not the exact job')
+        account = self.observed_account or self._visible_account(page)
+        if not account:
+            raise ValueError('CAPABILITY_UNVERIFIED: account identity is not observable')
+        account_hash = hashlib.sha256(account.encode()).hexdigest()
+        session_hash = hashlib.sha256((account + '|' + job + '|' + page.url).encode()).hexdigest()
+        jd = task.get('description')
+        if not isinstance(jd, str) or not jd.strip():
+            raise ValueError('CAPABILITY_UNVERIFIED: frozen JD missing')
+        return {'jdSha256': hashlib.sha256(jd.encode()).hexdigest(),
+                'accountHash': account_hash, 'sessionHash': session_hash}
+
     def run(self, url, action, *, setup=None):
         result, errors = [], []
         def perform(page):

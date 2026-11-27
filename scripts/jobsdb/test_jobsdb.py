@@ -109,7 +109,11 @@ class BrowserTests(unittest.TestCase):
         self.page.set_default_timeout(1500)
         self.page.set_default_navigation_timeout(3000)
         self.url = 'https://hk.jobsdb.com/job/12345678'
-        self.detail = '<h1>Engineer</h1><a href="/job/12345678/apply/start">Quick apply</a>'
+        self.detail = '<li class="nav-figure">Qingyuan Liu</li><h1>Engineer</h1><a href="/job/12345678/apply/start">Quick apply</a>'
+        self.requirements = '''<fieldset><legend>Which right to work?</legend>
+        <label><input type="radio" name="questionnaire.HK_Q_3217_V_4" value="a" required> IANG</label>
+        <label><input type="radio" name="questionnaire.HK_Q_3217_V_4" value="b"> Citizen</label></fieldset>
+        <label>How many years?<select name="questionnaire.HK_Q_D3FEB" required><option value="">Choose</option><option>No experience</option><option>1 year</option></select></label>'''
         self.start = '<button onclick="location.href=\'/job/12345678/apply/review\'">Continue</button>'
         self.success = '<h1>Your application has been submitted</h1>'
         self.review_document = ''
@@ -124,6 +128,8 @@ class BrowserTests(unittest.TestCase):
             self.external += 1; route.fulfill(body='External'); return
         if path.endswith('/success'):
             self.submissions += 1; body = self.success
+        elif path.endswith('/apply/role-requirements'):
+            body = self.requirements
         elif path.endswith('/review'):
             body = self.review_document + '<p>Review and submit</p><button onclick="location.href=\'/job/12345678/apply/success\'">Submit application</button>'
         elif path.endswith('/profile'): body = self.profile
@@ -133,6 +139,36 @@ class BrowserTests(unittest.TestCase):
     def flow(self):
         self.page.goto(self.url)
         return jobsdb.Flow(self.page,self.url,lambda p: None)
+    def test_observer_reads_same_job_questions_and_context_without_submitting(self):
+        reader = jobsdb.Browser.__new__(jobsdb.Browser)
+        reader.solve = lambda p: None
+        reader.observed_account = None
+        task = {'url': self.url, 'description': 'Engineer JD'}
+        self.page.goto(self.url)
+        requirements = reader.observe_role_requirements(self.page, task)
+        self.assertTrue(requirements['complete'])
+        self.assertEqual('12345678', requirements['jobId'])
+        by_name = {q['name']: q for q in requirements['questions']}
+        self.assertEqual('radio', by_name['questionnaire.HK_Q_3217_V_4']['type'])
+        self.assertEqual('Which right to work?', by_name['questionnaire.HK_Q_3217_V_4']['label'])
+        self.assertEqual(['IANG', 'Citizen'], by_name['questionnaire.HK_Q_3217_V_4']['options'])
+        self.assertEqual('select', by_name['questionnaire.HK_Q_D3FEB']['type'])
+        self.assertEqual(['No experience', '1 year'], by_name['questionnaire.HK_Q_D3FEB']['options'])
+        context = reader.observe_execution_context(self.page, task)
+        self.assertRegex(context['jdSha256'], r'^[a-f0-9]{64}$')
+        self.assertRegex(context['accountHash'], r'^[a-f0-9]{64}$')
+        self.assertRegex(context['sessionHash'], r'^[a-f0-9]{64}$')
+        self.assertEqual(0, self.submissions)
+
+    def test_observer_stops_when_questions_require_entering_application(self):
+        reader = jobsdb.Browser.__new__(jobsdb.Browser)
+        reader.solve = lambda p: None
+        reader.observed_account = None
+        self.requirements = '<h1>Choose documents</h1><button>Continue</button>'
+        with self.assertRaises(ValueError) as caught:
+            reader.observe_role_requirements(self.page, {'url': self.url, 'description': 'Engineer JD'})
+        self.assertIn('CAPABILITY_UNVERIFIED', str(caught.exception))
+
     def test_quick_apply_with_different_accessible_name(self):
         self.detail = '<a data-automation="job-detail-apply" aria-label="Apply for Engineer at Employer" href="/job/12345678/apply/start"><span>Quick apply</span></a>'
         self.assertEqual('REVIEW', self.flow().open())
