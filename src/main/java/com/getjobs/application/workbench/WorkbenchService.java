@@ -33,6 +33,7 @@ public final class WorkbenchService {
     final WorkbenchWorkflow workflow;
     final WorkbenchProjects projects;
     final WorkbenchVerification verification;
+    final ChatDelivery chat;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this(root, jobsdb, json, null);
@@ -65,17 +66,13 @@ public final class WorkbenchService {
         this.workflow = new WorkbenchWorkflow(this);
         this.projects = new WorkbenchProjects(this, projectsRoot);
         this.verification = new WorkbenchVerification(this);
+        this.chat = new ChatDelivery(this);
     }
 
     List<String> effectCommand(String channel, List<String> configured) { return platformEffects.getOrDefault(channel, configured); }
     boolean hasPlatformEffect(String channel) { return platformEffects.containsKey(channel); }
-    static String firstAction(com.fasterxml.jackson.databind.JsonNode task) {
-        return Set.of("OFFERTODAY", "BOSS").contains(task.path("channel").asText()) ? "CONTACT" : "APPLY";
-    }
-    private boolean chatTask(ObjectNode task) {
-        return task.path("channel").asText().equals("OFFERTODAY")
-                || task.path("channel").asText().equals("BOSS") && task.has("packageId") && hasPlatformEffect("BOSS");
-    }
+    static String firstAction(com.fasterxml.jackson.databind.JsonNode task) { return ChatDelivery.firstAction(task); }
+    private boolean chatTask(ObjectNode task) { return chat.isChat(task); }
 
     public ObjectNode state() {
         return store.write(c -> {
@@ -550,18 +547,14 @@ public final class WorkbenchService {
                 }
                 case "CONTACTED" -> {
                     require(state.equals("UNKNOWN") && !task.has("contactReceipt"), "只有已占位且尚未登记联系的申请可记录联系回执");
-                    var receipt = chatReceipt(task, evidence);
-                    require(text(receipt, "initialMessageSha256", 64, true).equals(task.path("snapshot").path("initialMessageSha256").asText()), "联系回执必须匹配已批准的精确消息");
+                    var receipt = chat.contactReceipt(task, evidence);
                     task.set("contactReceipt", receipt);
                     if (task.has("packageId")) scope.executionResult(c, task.path("outboundClaim").asText(), "CONTACTED", evidence);
                 }
                 case "CV_DELIVERED" -> {
                     require(state.equals("UNKNOWN") && task.has("contactReceipt"), "简历送达必须在已登记的同岗联系之后核实");
                     if (task.has("packageId")) require(task.has("cvClaim"), "附件阶段尚未独立核验并取得 claim，联系不能授权 CV");
-                    var receipt = chatReceipt(task, evidence);
-                    require(text(receipt, "conversationId", 300, true).equals(task.path("contactReceipt").path("conversationId").asText()), "简历送达回执必须属于本次联系的同一会话");
-                    require(!text(receipt, "messageId", 300, true).equals(task.path("contactReceipt").path("messageId").asText()), "OfferToday 文字与简历分开发送，不能复用文字消息编号冒充附件回执");
-                    require(text(receipt, "resumeSha256", 64, true).equals(task.path("snapshot").path("resume").path("sha256").asText()), "简历送达回执必须匹配冻结附件哈希");
+                    var receipt = chat.cvReceipt(task, evidence);
                     task.set("cvReceipt", receipt);
                     if (task.has("packageId")) scope.executionResult(c, task.path("cvClaim").asText(), "SUCCEEDED", evidence);
                     task.put("state", "SUBMITTED");
@@ -649,33 +642,7 @@ public final class WorkbenchService {
     }
 
     private void bindExecutionContext(ObjectNode task, com.fasterxml.jackson.databind.JsonNode context) {
-        require(context.isObject() && context.path("jdSha256").asText().equals(hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8))), "观察的 JD 已变化或无法核验");
-        for (String field : java.util.List.of("accountHash", "sessionHash")) require(context.path(field).asText().matches("[a-f0-9]{64}"), "缺少已核实账号/会话关联，必须停止");
-        if (chatTask(task)) {
-            require(context.path("jobId").equals(task.path("platformJobId")) && !context.path("conversationId").asText().isBlank(), "观察的岗位/会话缺失或错绑");
-            if (task.has("contactReceipt")) require(context.path("conversationId").equals(task.path("contactReceipt").path("conversationId")), "附件阶段会话已变化");
-        }
-        if (task.has("observedExecutionContext")) require(task.path("observedExecutionContext").equals(context), "JD/account/session 已变化，旧权限不能继续");
-        else task.set("observedExecutionContext", context.deepCopy());
-    }
-
-    private ObjectNode chatReceipt(ObjectNode task, String evidence) throws Exception {
-        require(chatTask(task) && task.path("kind").asText().equals("APPLICATION"), "此回执仅适用于受控聊天平台单岗申请");
-        ObjectNode receipt;
-        try {
-            var parsed = json.readTree(evidence);
-            if (!(parsed instanceof ObjectNode object)) throw new IllegalArgumentException();
-            receipt = object.deepCopy();
-        } catch (Exception e) { throw new WorkbenchException(400, "OfferToday 回执须为含岗位、会话、消息编号和证明的 JSON"); }
-        require(text(receipt, "jobId", 150, true).equals(task.path("platformJobId").asText()), "回执岗位与批准岗位不符");
-        String attempt = task.path("attemptId").asText();
-        require(!attempt.isEmpty() && text(receipt, "attemptId", 100, true).equals(attempt), "回执不属于本次执行");
-        require(attempt.equals(task.path("claimedAttemptId").asText()), "本次执行尚未成功登记提交前占位；进程退出导致的 UNKNOWN 不能代替占位");
-        text(receipt, "conversationId", 300, true);
-        if (task.has("packageId")) require(receipt.path("conversationId").equals(task.path("observedExecutionContext").path("conversationId")), "回执不是本次观察/dispatch 的同一会话");
-        text(receipt, "messageId", 300, true);
-        text(receipt, "proof", 3000, true);
-        return receipt;
+        chat.bindContext(task, context);
     }
 
     public ObjectNode task(String id) { return store.write(c -> publicTask(store.get(c, "task", id))); }
