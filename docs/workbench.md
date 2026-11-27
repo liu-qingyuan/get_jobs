@@ -238,6 +238,10 @@ OfferToday 使用独立的 `CONTACTED` 和 `CV_DELIVERED` 回执事件，其 evi
 
 ## 验证
 
+`WorkbenchCycleContractHttpTest` 通过包内组合构造器注入平台 effect 命令，仅替换 JobsDB/Boss/OfferToday 的外部动作；真实 scope/policy、匹配备料、task/attempt、资源预留和 stage claim 不替换。JobsDB fake 调用原 Python `Store`，在临时 `applications.db` 永久 claim 后才记录合成 effect。JobsDB 正例仍通过 `/jobsdb/apply` 显式确认答案，fresh `/cycles` 不会借 fake 猜测答案。
+
+替身脚本只在测试临时目录生成，不存在生产配置项、HTTP 路由或打包资源。默认 `WorkbenchConfiguration` 不注入替身，Boss 仍为 `CAPABILITY_UNVERIFIED`；测试组合的 CONTACT/SEND_CV 和回执沿用现有 task 合同，不证明真实平台能力或送达。
+
 ```bash
 bash gradlew --no-daemon test -x buildFrontend --console=plain
 python3 -m unittest discover -s scripts/workbench -v

@@ -11,6 +11,8 @@ import java.security.MessageDigest;
 import java.sql.Connection;
 import java.util.HexFormat;
 import java.util.Locale;
+import java.util.List;
+import java.util.Map;
 import java.time.Instant;
 import java.util.Set;
 import java.util.UUID;
@@ -21,6 +23,7 @@ public final class WorkbenchService {
     final ObjectMapper json;
     final Path jobsdb;
     private final WorkbenchLegacy legacy;
+    private final Map<String, List<String>> platformEffects;
     final WorkbenchMaterials materials;
     final WorkbenchScopePolicy scope;
     final WorkbenchCandidates candidates;
@@ -35,6 +38,19 @@ public final class WorkbenchService {
     }
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json, Path projectsRoot) {
+        this(root, jobsdb, json, projectsRoot, Map.of());
+    }
+
+    // Internal composition Seam: actual effect commands, never a capability flag or production property.
+    // Test Adapters stay in src/test; all policy, persistence and claim logic below remains real.
+    WorkbenchService(Path root, Path jobsdb, ObjectMapper json, Path projectsRoot, Map<String, List<String>> platformEffects) {
+        var effects = new java.util.HashMap<String, List<String>>();
+        platformEffects.forEach((channel, command) -> {
+            require(Set.of("BOSS", "JOBSDB", "OFFERTODAY").contains(channel) && !command.isEmpty()
+                    && command.stream().noneMatch(String::isBlank), "平台 effect 须为明确渠道的非空命令");
+            effects.put(channel, List.copyOf(command));
+        });
+        this.platformEffects = Map.copyOf(effects);
         this.store = new WorkbenchStore(root, json);
         this.json = json;
         this.jobsdb = jobsdb.toAbsolutePath().normalize();
@@ -47,6 +63,16 @@ public final class WorkbenchService {
         this.workflow = new WorkbenchWorkflow(this);
         this.projects = new WorkbenchProjects(this, projectsRoot);
         this.verification = new WorkbenchVerification(this);
+    }
+
+    List<String> effectCommand(String channel, List<String> configured) { return platformEffects.getOrDefault(channel, configured); }
+    boolean hasPlatformEffect(String channel) { return platformEffects.containsKey(channel); }
+    static String firstAction(com.fasterxml.jackson.databind.JsonNode task) {
+        return Set.of("OFFERTODAY", "BOSS").contains(task.path("channel").asText()) ? "CONTACT" : "APPLY";
+    }
+    private boolean chatTask(ObjectNode task) {
+        return task.path("channel").asText().equals("OFFERTODAY")
+                || task.path("channel").asText().equals("BOSS") && task.has("packageId") && hasPlatformEffect("BOSS");
     }
 
     public ObjectNode state() {
@@ -319,9 +345,10 @@ public final class WorkbenchService {
         task.set("snapshot", record.path("snapshot").deepCopy());
         task.put("resumeId", record.path("snapshot").path("resume").path("id").asText());
         if (task.path("channel").asText().equals("OFFERTODAY")) task.put("platformJobId", OfferTodayTarget.parse(task.path("url").asText()).id());
+        if (task.path("channel").asText().equals("BOSS")) task.put("platformJobId", BossCandidateReader.jobId(task.path("url").asText()));
         // The policy decision reads frozen JobsDB inputs from this task, never from a second attempt store.
         store.save(c, "task", task);
-        String action = Set.of("OFFERTODAY", "BOSS").contains(task.path("channel").asText()) ? "CONTACT" : "APPLY";
+        String action = firstAction(task);
         var decision = preparation.check(c, record, action, task.path("id").asText());
         require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
         append(task, "POLICY_APPROVED", "当前范围与可证实材料策略核准；不是逐岗人审", "", "SCOPE_POLICY");
@@ -400,18 +427,19 @@ public final class WorkbenchService {
             var task = store.get(c, "task", id);
             if (!task.path("state").asText().equals("APPROVED")) throw new WorkbenchException(409, "只能启动已批准且尚未执行的任务");
             boolean jobsDb = task.path("channel").asText().equals("JOBSDB") && task.has("packageId") && task.path("answersConfirmed").asBoolean();
-            if (task.path("kind").asText().equals("GAP") || (task.path("kind").asText().equals("APPLICATION") && !Set.of("OFFICIAL", "OFFERTODAY").contains(task.path("channel").asText()) && !jobsDb))
+            boolean boss = task.path("channel").asText().equals("BOSS") && task.has("packageId") && hasPlatformEffect("BOSS");
+            if (task.path("kind").asText().equals("GAP") || (task.path("kind").asText().equals("APPLICATION") && !Set.of("OFFICIAL", "OFFERTODAY").contains(task.path("channel").asText()) && !jobsDb && !boss))
                 throw new WorkbenchException(409, "平台申请请使用原有审核入口；此执行器只处理官网、OfferToday 单岗或简历草稿任务");
             if (task.path("kind").asText().equals("APPLICATION") && JobsDbTarget.isHost(task.path("url").asText()) && !jobsDb)
                 throw new WorkbenchException(409, JobsDbTarget.OUTBOUND_BLOCK_REASON);
-            if (task.path("kind").asText().equals("APPLICATION") && BossCandidateReader.isHost(task.path("url").asText()))
+            if (task.path("kind").asText().equals("APPLICATION") && BossCandidateReader.isHost(task.path("url").asText()) && !boss)
                 throw new WorkbenchException(409, BossCandidateReader.OUTBOUND_BLOCK_REASON);
             if (task.path("kind").asText().equals("APPLICATION") && OfferTodayTarget.isHost(task.path("url").asText()) && !task.path("channel").asText().equals("OFFERTODAY"))
                 throw new WorkbenchException(409, "历史 OfferToday 官网任务不能绕过平台授权，请新建 OfferToday 单岗任务");
             duplicate(c, task);
             if (task.has("packageId")) {
                 var record = store.get(c, "preparation", task.path("packageId").asText());
-                var decision = preparation.check(c, record, task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY", id);
+                var decision = preparation.check(c, record, firstAction(task), id);
                 require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
                 require(record.path("snapshot").equals(task.path("snapshot")), "执行快照与策略材料不符");
                 seconds = Math.min(seconds, task.path("secondsPerJob").asLong(30));
@@ -462,7 +490,7 @@ public final class WorkbenchService {
                     validateExecution(c, task, input);
                 }
                 case "SUBMITTING" -> {
-                    boolean cvStage = task.has("packageId") && task.path("channel").asText().equals("OFFERTODAY") && input.path("action").asText().equals("SEND_CV");
+                    boolean cvStage = task.has("packageId") && chatTask(task) && input.path("action").asText().equals("SEND_CV");
                     require(task.path("kind").asText().equals("APPLICATION") && (cvStage
                             ? state.equals("UNKNOWN") && task.has("contactReceipt") && !task.has("cvClaim")
                             : state.equals("RUNNING")), "只有当前未开始的阶段可以登记提交；未知动作不得重试");
@@ -471,7 +499,7 @@ public final class WorkbenchService {
                         require(source.equals("agent"), "策略任务仅接受当前执行器的动作 claim");
                         scope.confirmedExecution(c, task);
                         var record = store.get(c, "preparation", task.path("packageId").asText());
-                        String action = cvStage ? "SEND_CV" : task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
+                        String action = cvStage ? "SEND_CV" : firstAction(task);
                         require(input.path("action").asText().equals(action), "请明确请求当前不可逆动作的 claim");
                         if (!task.path("channel").asText().equals("JOBSDB")) bindExecutionContext(task, input.path("context"));
                         var decision = preparation.check(c, record, action, id);
@@ -480,11 +508,11 @@ public final class WorkbenchService {
                         task.put(cvStage ? "cvClaim" : "outboundClaim", grant.path("id").asText());
                     }
                     task.put("state", "UNKNOWN");
-                    if (task.path("channel").asText().equals("OFFERTODAY")) task.put("claimedAttemptId", task.path("attemptId").asText());
+                    if (chatTask(task)) task.put("claimedAttemptId", task.path("attemptId").asText());
                 }
                 case "CONTACTED" -> {
                     require(state.equals("UNKNOWN") && !task.has("contactReceipt"), "只有已占位且尚未登记联系的申请可记录联系回执");
-                    var receipt = offerTodayReceipt(task, evidence);
+                    var receipt = chatReceipt(task, evidence);
                     require(text(receipt, "initialMessageSha256", 64, true).equals(task.path("snapshot").path("initialMessageSha256").asText()), "联系回执必须匹配已批准的精确消息");
                     task.set("contactReceipt", receipt);
                     if (task.has("packageId")) scope.executionResult(c, task.path("outboundClaim").asText(), "CONTACTED", evidence);
@@ -492,7 +520,7 @@ public final class WorkbenchService {
                 case "CV_DELIVERED" -> {
                     require(state.equals("UNKNOWN") && task.has("contactReceipt"), "简历送达必须在已登记的同岗联系之后核实");
                     if (task.has("packageId")) require(task.has("cvClaim"), "附件阶段尚未独立核验并取得 claim，联系不能授权 CV");
-                    var receipt = offerTodayReceipt(task, evidence);
+                    var receipt = chatReceipt(task, evidence);
                     require(text(receipt, "conversationId", 300, true).equals(task.path("contactReceipt").path("conversationId").asText()), "简历送达回执必须属于本次联系的同一会话");
                     require(!text(receipt, "messageId", 300, true).equals(task.path("contactReceipt").path("messageId").asText()), "OfferToday 文字与简历分开发送，不能复用文字消息编号冒充附件回执");
                     require(text(receipt, "resumeSha256", 64, true).equals(task.path("snapshot").path("resume").path("sha256").asText()), "简历送达回执必须匹配冻结附件哈希");
@@ -501,7 +529,7 @@ public final class WorkbenchService {
                     task.put("state", "SUBMITTED");
                 }
                 case "SUBMITTED" -> {
-                    require(!task.path("channel").asText().equals("OFFERTODAY"), "OfferToday 须分别登记联系及简历送达回执，不能用打招呼记录代替投递");
+                    require(!chatTask(task), "聊天平台须分别登记联系及简历送达回执，不能用打招呼记录代替投递");
                     require(task.path("kind").asText().equals("APPLICATION") && state.equals("UNKNOWN") && !evidence.isBlank(), "只有已登记提交且有明确回执的申请才能记录已投递");
                     if (task.path("channel").asText().equals("JOBSDB") && task.has("packageId")) {
                         require(task.at("/fences/APPLY").has("SUBMIT"), "未确认本次最终提交 fence，不能以 worker 自述记成功");
@@ -585,7 +613,7 @@ public final class WorkbenchService {
     private void bindExecutionContext(ObjectNode task, com.fasterxml.jackson.databind.JsonNode context) {
         require(context.isObject() && context.path("jdSha256").asText().equals(hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8))), "观察的 JD 已变化或无法核验");
         for (String field : java.util.List.of("accountHash", "sessionHash")) require(context.path(field).asText().matches("[a-f0-9]{64}"), "缺少已核实账号/会话关联，必须停止");
-        if (task.path("channel").asText().equals("OFFERTODAY")) {
+        if (chatTask(task)) {
             require(context.path("jobId").equals(task.path("platformJobId")) && !context.path("conversationId").asText().isBlank(), "观察的岗位/会话缺失或错绑");
             if (task.has("contactReceipt")) require(context.path("conversationId").equals(task.path("contactReceipt").path("conversationId")), "附件阶段会话已变化");
         }
@@ -593,8 +621,8 @@ public final class WorkbenchService {
         else task.set("observedExecutionContext", context.deepCopy());
     }
 
-    private ObjectNode offerTodayReceipt(ObjectNode task, String evidence) throws Exception {
-        require(task.path("channel").asText().equals("OFFERTODAY") && task.path("kind").asText().equals("APPLICATION"), "此回执仅适用于 OfferToday 单岗申请");
+    private ObjectNode chatReceipt(ObjectNode task, String evidence) throws Exception {
+        require(chatTask(task) && task.path("kind").asText().equals("APPLICATION"), "此回执仅适用于受控聊天平台单岗申请");
         ObjectNode receipt;
         try {
             var parsed = json.readTree(evidence);

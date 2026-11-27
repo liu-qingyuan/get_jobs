@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -27,8 +28,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Local fake effects only, not production acceptance. JobsDB answers and Boss capability
- * currently prevent the complete three-platform contract in #34; keep those stops intact.
+ * Test composition replaces platform effects only, never scope/policy/task/claim or the
+ * JobsDB Store. Default composition keeps the production capability/answer stops intact.
  */
 class WorkbenchCycleContractHttpTest {
     @TempDir Path root;
@@ -38,6 +39,9 @@ class WorkbenchCycleContractHttpTest {
     static final String OFFER_URL = "https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv==";
 
     WorkbenchService service() { return new WorkbenchService(root.resolve("state"), root.resolve("empty-ledger"), json); }
+    WorkbenchService service(String channel, List<String> effect) {
+        return new WorkbenchService(root.resolve("state"), root.resolve("empty-ledger"), json, null, java.util.Map.of(channel, effect));
+    }
     MockMvc http(WorkbenchService service, WorkbenchRunner runner) {
         return MockMvcBuilders.standaloneSetup(new WorkbenchController(service, runner))
                 .addFilters(new WorkbenchLocalOnlyFilter()).build();
@@ -64,8 +68,17 @@ class WorkbenchCycleContractHttpTest {
                 .put("value", FACT).put("scope", region).put("confirmed", true));
         var contact = post(http, "/facts", json.createObjectNode().put("key", "contact_email").put("label", "Synthetic contact")
                 .put("value", "applicant@example.test").put("scope", region).put("confirmed", true));
-        var file = new MockMultipartFile("file", "synthetic.pdf", "application/pdf",
-                "%PDF-1.4\nSynthetic fixture only\n%%EOF".getBytes(StandardCharsets.UTF_8));
+        var bytes = "%PDF-1.4\nSynthetic fixture only\n%%EOF".getBytes(StandardCharsets.UTF_8);
+        if (channel.equals("JOBSDB")) {
+            var archive = new java.io.ByteArrayOutputStream();
+            try (var zip = new java.util.zip.ZipOutputStream(archive)) {
+                zip.putNextEntry(new java.util.zip.ZipEntry("word/document.xml"));
+                zip.write(("<document><body>" + FACT + "</body></document>").getBytes(StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
+            bytes = archive.toByteArray();
+        }
+        var file = new MockMultipartFile("file", channel.equals("JOBSDB") ? "synthetic.docx" : "synthetic.pdf", "application/octet-stream", bytes);
         var resume = json.readTree(http.perform(multipart("/api/workbench/resumes").file(file)
                 .param("label", "Explicit synthetic baseline").param("region", region).param("language", "en").param("content", FACT))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8));
@@ -98,7 +111,7 @@ class WorkbenchCycleContractHttpTest {
                 import hashlib,json,pathlib,sys,time,urllib.request
                 root=pathlib.Path(__file__).parent
                 scenario=(root/'scenario').read_text() if (root/'scenario').exists() else ''
-                b=json.load(open(sys.argv[2] if sys.argv[1] in ('read-candidates','run') else sys.argv[1]))
+                b=json.load(open(sys.argv[2] if sys.argv[1] in ('read-candidates','run','apply-single') else sys.argv[1]))
                 kind=b.get('kind','EXECUTE')
                 if kind=='CANDIDATE_READ':
                     channel=b['source']['channel']
@@ -110,9 +123,42 @@ class WorkbenchCycleContractHttpTest {
                     json.dump({'results':[{'candidateId':j['candidateId'],'jdSha256':j['jdSha256'],'findings':[{'kind':finding,'requirementQuote':j['description'],'reason':'Synthetic matching fixture','evidence':[{'type':'FACT','id':j['facts'][0]['id'],'quote':j['facts'][0]['value']}]}]} for j in b['candidates']]},open(b['resultPath'],'w'))
                 elif kind=='MATERIAL_PREPARE':
                     json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['target']['resumeId'],'transformation':'ORIGINAL'} for j in b['candidates']]},open(b['resultPath'],'w'))
+                elif kind=='JOBSDB_SINGLE_APPLY':
+                    sys.path.insert(0,%s)
+                    from jobsdb import Store
+                    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    def validate(phase):
+                        event={'type':'VALIDATE','action':'APPLY','phase':phase,'message':'Synthetic fence',
+                               'binding':b,'context':{'jdSha256':b['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}}
+                        req=urllib.request.Request(b['callbackUrl'],json.dumps(event).encode(),
+                            headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
+                        with opener.open(req,timeout=5) as response:
+                            ack=json.load(response)['validatedPermission']
+                            assert ack['taskId']==b['taskId'] and ack['authorizationId']==b['authorizationId']
+                            assert ack['executionResourceId']==b['executionResourceId'] and ack['phase']==phase
+                    validate('LAUNCH')
+                    data=pathlib.Path(sys.argv[4]); data.mkdir(parents=True,exist_ok=True)
+                    with Store(data/'applications.db') as ledger:
+                        assert ledger.claim(b['jobId']), 'Permanent native claim vetoes duplicate effects'
+                        validate('UPLOAD'); validate('SUBMIT')
+                        assert hashlib.sha256(pathlib.Path(b['resumePath']).read_bytes()).hexdigest()==b['resumeSha256']
+                        assert hashlib.sha256(json.dumps(b['answers'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()==b['answersSha256']
+                        with (root/'effects').open('a') as log:
+                            log.write(json.dumps({'taskId':b['taskId'],'attemptId':b['attemptId'],'action':'APPLY',
+                                'claimId':b['authorizationId'],'nativeClaimed':ledger.contains(b['jobId'])})+'\\n')
+                        receipt={k:b[k] for k in ('attemptId','authorizationId','jobId','url','resumeSha256','answersSha256','profileHash','contactHash')}
+                        receipt.update(status='SUBMITTED',receipt={'url':b['url']+'/apply/success','textSha256':'a'*64})
+                        json.dump(receipt,open(b['resultPath'],'w')); ledger.finish(b['jobId'],'SUBMITTED')
+                elif b.get('task',{}).get('kind')=='RESUME':
+                    assert sys.argv[1]!='run', 'Drafts retain the generic executor protocol'
+                    event={'type':'DRAFT','message':'Synthetic draft','content':'Synthetic unapproved draft'}
+                    req=urllib.request.Request(b['callbackUrl'],json.dumps(event).encode(),
+                        headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
+                    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=5) as response:
+                        assert json.load(response)['state']=='COMPLETED'
                 else:
                     t=b['task']; s=t['snapshot']
-                    assert t['channel']=='OFFERTODAY', 'No fallback or synthetic production capability'
+                    assert t['channel'] in ('BOSS','OFFERTODAY'), 'No OFFICIAL fallback'
                     assert t['id']==t['attemptId'] and t['approvalSource']=='SCOPE_POLICY'
                     assert hashlib.sha256(pathlib.Path(b['resumePath']).read_bytes()).hexdigest()==s['resume']['sha256']
                     context={'jdSha256':hashlib.sha256(t['description'].encode()).hexdigest(),'accountHash':'c'*64,'sessionHash':'d'*64,
@@ -123,6 +169,9 @@ class WorkbenchCycleContractHttpTest {
                             'message':'Synthetic '+kind,'evidence':json.dumps(proof) if proof else ''}).encode(),
                             headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
                         with opener.open(req,timeout=5) as response: return json.load(response)
+                    if scenario=='WAIT_FOR_CLAIM':
+                        (root/'awaiting-claim').write_text(t['id'])
+                        while not (root/'release').exists(): time.sleep(0.02)
                     if scenario=='VERIFY':
                         report('NEEDS_INPUT'); sys.exit(0)
                     common={'jobId':t['platformJobId'],'attemptId':t['id'],'conversationId':context['conversationId'],'proof':'Synthetic fresh history only'}
@@ -139,7 +188,8 @@ class WorkbenchCycleContractHttpTest {
                                 while not (root/'release').exists(): time.sleep(0.02)
                         elif scenario=='UNKNOWN': sys.exit(0)
                         else: report('CV_DELIVERED',proof=dict(common,messageId='cv',resumeSha256=s['resume']['sha256']))
-                """.formatted(json.writeValueAsString(OFFER_URL), json.writeValueAsString(JD)));
+                """.formatted(json.writeValueAsString(OFFER_URL), json.writeValueAsString(JD),
+                        json.writeValueAsString(Path.of("scripts/jobsdb").toAbsolutePath().toString())));
         return List.of("python3", script.toString());
     }
     HttpServer callback(AtomicReference<MockMvc> http) throws Exception {
@@ -188,6 +238,114 @@ class WorkbenchCycleContractHttpTest {
             assertNotEquals(task.at("/contactReceipt/messageId"), task.at("/cvReceipt/messageId"));
             assertEquals(task.at("/snapshot/resume/sha256"), task.at("/cvReceipt/resumeSha256"));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BOSS", "OFFERTODAY"})
+    void injectedChatEffectStillUsesRealPolicyTaskResourcesAndStageClaims(String channel) throws Exception {
+        var prefix = fake();
+        var service = service(channel, prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            post(http, "/cycles", setup(http, channel)); idle(runner);
+            var state = state(http);
+            assertOneAttemptAndClaimPerStage(state, "SUBMITTED");
+            assertEquals(channel, state.at("/tasks/0/channel").asText());
+            assertEquals("COMPLETED", state.at("/workflow/cycles/0/status").asText());
+            assertEquals(1, state.at("/scope/authorizations").findValues("executionResourceId").stream().distinct().count());
+            assertTrue(state.at("/tasks/0/executionLimits/seconds").asLong() > 0);
+            assertFalse(state.at("/runtime/bossOutboundSupported").asBoolean(), "A fake is not production support");
+        } finally { callback.stop(0); }
+        if (channel.equals("BOSS")) {
+            var production = service();
+            var request = json.createObjectNode().put("scopeVersion", 1).put("action", "CONTACT");
+            request.set("target", production.state().at("/preparations/packages/0/target"));
+            var decision = production.scope.preview(request);
+            assertFalse(decision.path("allowed").asBoolean());
+            assertTrue(decision.path("reasonCodes").toString().contains("CAPABILITY_UNVERIFIED"), "Injected capability must not persist");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BOSS", "OFFERTODAY"})
+    void injectedEffectCannotClaimAfterRealScopeIsPaused(String channel) throws Exception {
+        Files.writeString(root.resolve("scenario"), "WAIT_FOR_CLAIM");
+        var prefix = fake(); var service = service(channel, prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            post(http, "/cycles", setup(http, channel));
+            await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("awaiting-claim")));
+            var launched = state(http);
+            assertEquals("CONFIRMED", launched.at("/tasks/0/launchPermission/status").asText());
+            assertEquals(19, launched.at("/scope/usage/seconds").asInt(), "Reserve discovery + matching + preparation + full execution before effect");
+            try { post(http, "/scope/1/pause", json.createObjectNode()); }
+            finally { Files.writeString(root.resolve("release"), "continue"); }
+            idle(runner);
+            var state = state(http);
+            assertEquals(0, state.at("/scope/usage/outbound").asInt());
+            assertFalse(state.at("/tasks/0").has("outboundClaim"));
+            assertEquals("NEEDS_INPUT", state.at("/tasks/0/state").asText());
+            assertFalse(Files.exists(root.resolve("effects")), "Fake effects require a real, current claim");
+        } finally { callback.stop(0); }
+    }
+
+    @Test
+    void bossResumeDraftRetainsTheExistingGenericExecutor() throws Exception {
+        var prefix = fake(); var service = service();
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http); setup(http, "BOSS");
+            var task = post(http, "/tasks", json.createObjectNode().put("kind", "RESUME").put("channel", "BOSS")
+                    .put("region", "MAINLAND").put("language", "en").put("direction", "AI_APPLICATION").put("title", "Synthetic draft")
+                    .put("resumeId", state(http).at("/resumes/0/id").asText()));
+            String id = task.path("id").asText();
+            post(http, "/tasks/" + id + "/approve", json.createObjectNode());
+            post(http, "/tasks/" + id + "/start", json.createObjectNode()); idle(runner);
+            var state = state(http);
+            assertEquals("COMPLETED", state.at("/tasks/0/state").asText(), state::toPrettyString);
+            assertFalse(state.at("/tasks/0/draftResumeId").asText().isEmpty());
+            assertFalse(state.at("/resumes/1/approved").asBoolean(), "AI drafts must remain unapproved");
+            assertEquals(0, state.at("/scope/usage/outbound").asInt());
+            assertFalse(Files.exists(root.resolve("effects")));
+        } finally { callback.stop(0); }
+    }
+
+    @Test
+    void injectedJobsDbEffectUsesConfirmedAnswersRealTaskAndOriginalLedger() throws Exception {
+        var prefix = fake(); var service = service("JOBSDB", prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            post(http, "/cycles", setup(http, "JOBSDB")); idle(runner);
+            var before = state(http);
+            assertTrue(before.path("tasks").isEmpty(), "The effect cannot invent confirmed answers for a fresh cycle");
+            var pkg = before.at("/preparations/packages/0");
+            var input = json.createObjectNode().put("scopeVersion", 1).put("preparationId", pkg.path("id").asText())
+                    .put("candidateId", pkg.path("candidateId").asText()).put("answersConfirmed", true);
+            input.putObject("answers").put("questionnaire.experience", "Synthetic confirmed answer");
+            var task = post(http, "/jobsdb/apply", input);
+            assertEquals("SUBMITTED", task.path("state").asText(), task::toPrettyString);
+            var state = state(http);
+            assertEquals(1, state.path("tasks").size());
+            assertEquals(task.path("id"), task.path("attemptId"));
+            assertEquals("JOBSDB", task.path("channel").asText());
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
+            assertTrue(task.at("/executionLimits/seconds").asLong() > 0);
+            assertTrue(state.path("jobsdbAttempts").isEmpty());
+            var effects = Files.readAllLines(root.resolve("effects"));
+            assertEquals(1, effects.size());
+            var effect = json.readTree(effects.get(0));
+            assertEquals(task.path("id"), effect.path("taskId"));
+            assertEquals(task.path("outboundClaim"), effect.path("claimId"));
+            assertTrue(effect.path("nativeClaimed").asBoolean(), "Original Store must claim before the fake effect");
+            assertEquals("12345678", state.at("/platforms/jobsdbHistory/0/id").asText());
+            assertEquals("SUBMITTED", state.at("/platforms/jobsdbHistory/0/status").asText());
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
+                    .contentType("application/json").content(input.toString())).andExpect(status().isConflict());
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
+        } finally { callback.stop(0); }
     }
 
     @ParameterizedTest

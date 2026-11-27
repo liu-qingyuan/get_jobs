@@ -116,10 +116,21 @@ public final class WorkbenchRunner implements AutoCloseable {
         return result;
     }
 
+    private List<String> effectCommand(String channel, boolean application) {
+        var configured = switch (channel) {
+            case "JOBSDB" -> jobsDbCommand;
+            case "OFFERTODAY" -> offerTodayCommand;
+            case "BOSS" -> application ? List.<String>of() : command; // Drafts are not platform sends.
+            default -> command;
+        };
+        return application ? service.effectCommand(channel, configured) : configured;
+    }
+
     public synchronized ObjectNode start(String id) {
         if (closed) throw new WorkbenchException(409, "执行器已关闭，不能启动任务");
-        String channel = service.task(id).path("channel").asText();
-        if ((channel.equals("JOBSDB") ? jobsDbCommand : channel.equals("OFFERTODAY") ? offerTodayCommand : command).isEmpty())
+        var task = service.task(id);
+        String channel = task.path("channel").asText();
+        if (effectCommand(channel, task.path("kind").asText().equals("APPLICATION")).isEmpty())
             throw new WorkbenchException(409, "此渠道尚未配置单岗执行器；不会回退其他渠道");
         if (!busy.compareAndSet(false, true)) throw new WorkbenchException(409, "已有执行任务运行中，请等待或处理人工阻塞");
         try {
@@ -319,9 +330,12 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
 
     private TaskProcess launch(String id) {
-        String channel = service.task(id).path("channel").asText();
-        boolean offerToday = channel.equals("OFFERTODAY"), jobsDb = channel.equals("JOBSDB");
-        if ((jobsDb ? jobsDbCommand : offerToday ? offerTodayCommand : command).isEmpty()) throw new WorkbenchException(409, "此渠道尚未配置单岗执行器");
+        var selectedTask = service.task(id);
+        String channel = selectedTask.path("channel").asText();
+        boolean application = selectedTask.path("kind").asText().equals("APPLICATION");
+        boolean chat = channel.equals("OFFERTODAY") || channel.equals("BOSS") && application, jobsDb = channel.equals("JOBSDB");
+        var effect = effectCommand(channel, application);
+        if (effect.isEmpty()) throw new WorkbenchException(409, "此渠道尚未配置单岗执行器");
         boolean claimed = false;
         Process launched = null;
         try {
@@ -363,12 +377,12 @@ public final class WorkbenchRunner implements AutoCloseable {
                 // Callback credentials live only in the private run file, never in public task/state.
                 dispatch.put("callbackUrl", bundle.path("callbackUrl").asText()).put("token", token);
                 Files.writeString(file, service.json.writeValueAsString(dispatch));
-                arguments = new ArrayList<>(jobsDbCommand);
+                arguments = new ArrayList<>(effect);
                 arguments.add("apply-single"); arguments.add(file.toString()); arguments.add("--data-dir"); arguments.add(service.jobsDbDirectory().toString());
-            } else if (offerToday) {
-                arguments = new ArrayList<>(offerTodayCommand);
+            } else if (chat) {
+                arguments = new ArrayList<>(effect);
                 arguments.add("run"); arguments.add(file.toString());
-            } else arguments = command.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
+            } else arguments = effect.stream().map(arg -> arg.replace("{taskFile}", file.toString())).toList();
             var builder = new ProcessBuilder(arguments).redirectErrorStream(true).redirectOutput(directory.resolve("executor.log").toFile());
             builder.environment().put("WORKBENCH_TASK_FILE", file.toString());
             Process child = spawn(builder, bundle.path("task").has("packageId")); launched = child;
@@ -385,7 +399,7 @@ public final class WorkbenchRunner implements AutoCloseable {
 
     /** Compatibility alias: freeze confirmed answers, then run the existing durable task lifecycle. */
     public synchronized ObjectNode applyJobsDbSingle(ObjectNode input) {
-        if (closed || jobsDbCommand.isEmpty()) throw new WorkbenchException(409, "JobsDB 单岗执行器未配置或已关闭；不会回退官网或旧 batch");
+        if (closed || effectCommand("JOBSDB", true).isEmpty()) throw new WorkbenchException(409, "JobsDB 单岗执行器未配置或已关闭；不会回退官网或旧 batch");
         if (!busy.compareAndSet(false, true)) throw new WorkbenchException(409, "已有执行任务运行中，请等待或处理人工阻塞");
         try {
             var task = service.jobsDbTask(input);

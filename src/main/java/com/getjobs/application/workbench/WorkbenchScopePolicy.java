@@ -322,7 +322,7 @@ final class WorkbenchScopePolicy {
     /** Reserve the complete executor envelope even if preflight fails without a send. */
     ObjectNode reserveExecutionResources(Connection c, ObjectNode task, ObjectNode record, long seconds, long tokens) throws Exception {
         require(seconds > 0 && tokens >= 0, "执行资源必须有明确的正秒数上限");
-        String action = task.path("channel").asText().equals("OFFERTODAY") ? "CONTACT" : "APPLY";
+        String action = firstAction(task);
         var decision = executionDecision(c, record.path("scopeVersion").asInt(), (ObjectNode) record.path("target"), action, task.path("id").asText(), false);
         require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
         var used = usage(c); var scope = latest(c);
@@ -454,7 +454,8 @@ final class WorkbenchScopePolicy {
                 if (sourceRead) BossCandidateReader.validateSource(link); else BossCandidateReader.detailUrl(link);
             } catch (IllegalArgumentException e) { deny(reasons, codes, "CHANNEL_DENIED", e.getMessage()); }
             if (!target.path("region").asText().equals("MAINLAND")) deny(reasons, codes, "CHANNEL_DENIED", "Boss 只读候选仅支持内地范围");
-            if (OUTBOUND.contains(action)) deny(reasons, codes, "CAPABILITY_UNVERIFIED", BossCandidateReader.OUTBOUND_BLOCK_REASON);
+            if (OUTBOUND.contains(action) && (!service.hasPlatformEffect("BOSS") || action.equals("APPLY")))
+                deny(reasons, codes, "CAPABILITY_UNVERIFIED", BossCandidateReader.OUTBOUND_BLOCK_REASON);
         }
         if (OfferTodayTarget.isHost(link) && !channel.equals("OFFERTODAY")) deny(reasons, codes, "CHANNEL_DENIED", "OfferToday 不能借用其他渠道授权");
         if (channel.equals("OFFERTODAY")) try {
