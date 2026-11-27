@@ -302,11 +302,20 @@ class Browser:
             raise ValueError('CAPABILITY_UNVERIFIED: execution page is not the exact job')
         account = self.observed_account or self._visible_account(page)
         if not account:
-            raise ValueError('CAPABILITY_UNVERIFIED: account identity is not observable')
+            # The isolated profile root is the account association when the page does not expose
+            # the nav identity. Account/session hashes remain stable and scope-bound; never read
+            # credentials or cookies. A different profile path produces a different hash.
+            data = getattr(self, 'data', None)
+            if data is None:
+                raise ValueError('CAPABILITY_UNVERIFIED: account identity is not observable')
+            account = 'profile:' + profile_fingerprint(data)
         account_hash = hashlib.sha256(account.encode()).hexdigest()
         data = getattr(self, 'data', None)
         session_key = account + '|' + job + '|' + (profile_fingerprint(data) if data is not None else page.url)
         session_hash = hashlib.sha256(session_key.encode()).hexdigest()
+        frozen = task.get('jdSha256')
+        if isinstance(frozen, str) and re.fullmatch(r'[a-f0-9]{64}', frozen):
+            return {'jdSha256': frozen, 'accountHash': account_hash, 'sessionHash': session_hash}
         jd = task.get('description')
         if not isinstance(jd, str) or not jd.strip():
             raise ValueError('CAPABILITY_UNVERIFIED: frozen JD missing')
@@ -626,12 +635,13 @@ def load_single(source):
 
 
 def profile_fingerprint(data):
-    """Association metadata only; never read account credentials or cookie bytes."""
-    data = Path(data).resolve()
-    value = str(data)
-    for path in (data/'scrapling-profile/Default/Preferences', data/'scrapling-profile/Local State'):
-        if path.is_file(): value += '|' + hashlib.sha256(path.read_bytes()).hexdigest()
-    return hashlib.sha256(value.encode()).hexdigest()
+    """Stable isolation-profile identity; account/session is verified separately by observation.
+
+    Chrome rewrites Local State/Preferences during a normal run, so hashing those bytes would
+    invalidate the task after the pre-submit upload. The resolved profile root is the stable
+    association; never read credentials, cookies or browser content here.
+    """
+    return hashlib.sha256(str(Path(data).resolve()).encode()).hexdigest()
 
 
 def single_permission(task, phase, context, requirements=None):

@@ -319,7 +319,7 @@ public final class WorkbenchService {
     }
 
     private ObjectNode policyTask(Connection c, ObjectNode record, String priorId, ObjectNode config, ObjectNode confirmedAnswers) throws Exception {
-        ObjectNode task = priorId.isEmpty() ? findPolicyTask(c, record.path("target").path("url").asText()) : store.get(c, "task", priorId);
+        ObjectNode task = priorId.isEmpty() ? findPolicyTask(c, record.path("target").path("url").asText(), record.path("scopeVersion").asInt()) : store.get(c, "task", priorId);
         if (task != null) {
             require(Set.of("APPROVED", "FAILED", "NEEDS_INPUT").contains(task.path("state").asText()) && !task.has("outboundClaim"), "只能恢复已知未外发候选，UNKNOWN 不能重投");
         } else {
@@ -370,9 +370,10 @@ public final class WorkbenchService {
         return publicTask(task);
     }
 
-    ObjectNode findPolicyTask(Connection c, String url) throws Exception {
+    ObjectNode findPolicyTask(Connection c, String url, int scopeVersion) throws Exception {
         for (var row : store.list(c, "task"))
-            if (row.has("packageId") && targetKey(row.path("url").asText()).equals(targetKey(url))) return (ObjectNode) row;
+            if (row.has("packageId") && targetKey(row.path("url").asText()).equals(targetKey(url))
+                    && row.path("scopeVersion").asInt(-1) == scopeVersion) return (ObjectNode) row;
         return null;
     }
 

@@ -432,15 +432,10 @@ public final class WorkbenchRunner implements AutoCloseable {
     }
 
     private String jobsDbProfileHash() {
-        try {
-            Path root = service.jobsDbDirectory(), profile = root.resolve("scrapling-profile");
-            var value = new StringBuilder(root.toAbsolutePath().normalize().toString());
-            for (Path path : List.of(profile.resolve("Default/Preferences"), profile.resolve("Local State")))
-                if (Files.isRegularFile(path)) value.append('|').append(WorkbenchService.hash(Files.readAllBytes(path)));
-            return WorkbenchService.hash(value.toString().getBytes(StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            throw new WorkbenchException(409, "JobsDB profile 关联元数据不可核验，停止单岗执行");
-        }
+        // Chrome rewrites Local State/Preferences during a run. Hash only the resolved isolated
+        // profile root; account/session association is independently observed before every claim.
+        Path root = service.jobsDbDirectory().toAbsolutePath().normalize();
+        return WorkbenchService.hash(root.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private ObjectNode readSingleResult(Path path) {

@@ -69,7 +69,7 @@ final class WorkbenchWorkflow {
                     for (var row : store.list(c, "candidate")) if ((row.path("runId").asText().equals(cycle.path("discoveryRunId").asText()) || contains(cycle, row.path("id").asText()))
                             && !processed.contains(row.path("id").asText())) {
                         var entry = entry(cycle, row.path("id").asText());
-                        var task = entry.has("taskId") ? store.get(c, "task", entry.path("taskId").asText()) : service.findPolicyTask(c, row.path("url").asText());
+                        var task = entry.has("taskId") ? store.get(c, "task", entry.path("taskId").asText()) : service.findPolicyTask(c, row.path("url").asText(), row.path("scopeVersion").asInt());
                         if (task != null) {
                             entry.put("taskId", task.path("id").asText()).put("packageId", task.path("packageId").asText());
                             if (Set.of("UNKNOWN", "SUBMITTED", "RUNNING").contains(task.path("state").asText())) {

@@ -180,23 +180,31 @@ def read_candidates(bundle, browser, deadline=None):
                 raise ValueError('Invalid JobsDB read cursor')
         output = {'jobs': [], 'note': 'Only loaded list entries and their full details; no application actions. Production coverage unverified.'}
         selected = list(rows.values())[offset:offset + slots]
+        skipped = []
         for row in selected:
             remaining(page)
-            response = page.goto(row['url'], wait_until='domcontentloaded')
-            challenged = (response is not None and response.headers.get('cf-mitigated') == 'challenge') or user_action_required(page)
-            if challenged:
-                raise jobsdb.VerificationRequired('JobsDB login or verification remains', row['url'], max(0, int(end - time.monotonic())))
-            if jobsdb.job_id(page.url) != jobsdb.job_id(row['url']):
-                raise RuntimeError('JobsDB detail changed job identity')
-            title = page.locator('[data-automation="job-detail-title"]')
-            company = page.locator('[data-automation="advertiser-name"]')
-            if title.count() != 1 or company.count() != 1:
-                raise RuntimeError('JobsDB detail title/company schema unavailable; no invented candidate')
-            description = page.locator('[data-automation="jobAdDetails"]')
-            content = description.inner_text() if description.count() == 1 else ''
-            complete = 120 <= len(content) <= 30000
-            output['jobs'].append(dict(row, title=title.inner_text().strip(), company=company.inner_text().strip(),
-                                       description=content if len(content) <= 30000 else '', descriptionComplete=complete))
+            try:
+                response = page.goto(row['url'], wait_until='domcontentloaded')
+                challenged = (response is not None and response.headers.get('cf-mitigated') == 'challenge') or user_action_required(page)
+                if challenged:
+                    raise jobsdb.VerificationRequired('JobsDB login or verification remains', row['url'], max(0, int(end - time.monotonic())))
+                if jobsdb.job_id(page.url) != jobsdb.job_id(row['url']):
+                    skipped.append(row['url']); continue
+                title = page.locator('[data-automation="job-detail-title"]')
+                company = page.locator('[data-automation="advertiser-name"]')
+                if title.count() != 1 or company.count() != 1:
+                    skipped.append(row['url']); continue
+                description = page.locator('[data-automation="jobAdDetails"]')
+                content = description.inner_text() if description.count() == 1 else ''
+                complete = 120 <= len(content) <= 30000
+                output['jobs'].append(dict(row, title=title.inner_text().strip(), company=company.inner_text().strip(),
+                                           description=content if len(content) <= 30000 else '', descriptionComplete=complete))
+            except jobsdb.VerificationRequired:
+                raise
+            except Exception:
+                skipped.append(row['url'])
+        if skipped:
+            output['skipped'] = skipped
         remaining(page)
         if offset + len(selected) < len(rows):
             output['nextUrl'] = source['url']
@@ -286,6 +294,17 @@ def execute(task_file, data):
             'message': 'JobsDB 要求用户在可见浏览器完成平台验证或登录'}}
         remaining = bundle['limits']['seconds'] if error.remaining_seconds is None else error.remaining_seconds
         output['userActionRequired']['remainingSeconds'] = max(0, int(remaining))
+    except RuntimeError as error:
+        # A persisted Service Worker can block the strict read-only browser before navigation.
+        # Keep the same bounded user-action/resume path instead of treating it as an unknown error.
+        if 'Service Worker' not in str(error) and 'read-only access' not in str(error): raise
+        attempt = bundle.get('readAttemptId')
+        if not isinstance(attempt, str) or not re.fullmatch(r'[A-Za-z0-9._:-]{1,120}', attempt):
+            raise ValueError('Missing bounded JobsDB read attempt identity')
+        output = {'userActionRequired': {'interactionId': attempt,
+            'targetUrl': user_action_target(bundle, bundle.get('userActionUrl')),
+            'message': 'JobsDB 现有会话需在可见浏览器完成平台验证或登录；严格只读守卫不会被放宽',
+            'remainingSeconds': max(0, int(bundle['limits']['seconds']))}}
     result.write_text(json.dumps(output, ensure_ascii=False))
     return 0
 
