@@ -197,7 +197,7 @@ async page => {
   if (typeof input.jobId !== 'string' || !jobPattern.test(`/hk/job/${input.jobId}`) ||
       typeof input.title !== 'string' || !input.title.trim() || typeof input.company !== 'string' || !input.company.trim())
     return blocked('Approved job identity is incomplete');
-  const sendUnavailable = () => blocked('OfferToday automatic sending is disabled: native CV uses an attachment ID without a verified immutable version or per-action receipt');
+  const sendUnavailable = () => blocked('OfferToday automatic sending is disabled: unverified input-to-native attachment ownership or per-action receipt');
   // No preflight navigation is useful when neither production build can send.
   if (!dispatchProofByBuild.legacy && !dispatchProofByBuild.current) return sendUnavailable();
   const targetUrl = `${origin}/hk/job/${input.jobId}`;

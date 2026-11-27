@@ -45,7 +45,7 @@ JobsDB 默认候选页已接入有界只读列表/完整详情、统一匹配与
 
 ## OfferToday HK
 
-**OfferToday 公开找岗通过实站验证；随附单岗脚本暂不自动发送。** 两版的材料校验与分阶段回执通过隔离测试，正文增验应用层同步与独立历史的同 ID 对应。真实客户端仍缺已验证的原生动作确认来源和可冻结的附件版本，旧版和新版都在发送占位前停止。可选匿名公开搜索与发送分开，配置见 [渠道脚本](https://github.com/liu-qingyuan/get_jobs/blob/main/scripts/offertoday/README.md)。
+**OfferToday 公开找岗通过实站验证；随附单岗脚本暂不自动发送。** #25/#30 的转换附件 A 接受平台副本变化，但要求核准本地输入 hash → 原生附件/账号/岗位/会话 → 本次实际 dispatch → 新鲜 CV 送达回执的完整归属；输入 hash 不证明招聘者端字节相同。真实两版尚无合格发送绑定，生产 send registry 均为空，仍在 claim 前停止；不可变版本 fixture、配置或 flag 不代表 A 已实现或真实 MATCH 已验收。可选匿名公开搜索与发送分开，合同与证据缺口见 [OfferToday](offertoday-v1.md)。
 
 在平台入口或任务渠道中选择 OfferToday。先在普通 Chrome 登录，并通过官方 Playwright 扩展只共享所需标签页，不必重新登录或复制登录态。平台页保留的旧「读取当前职位」仅取已加载卡片，选择后填入待审表单；默认候选页的新只读发现按当前范围和预算读取列表及必要详情，不会创建或发送申请。两者都不猜测未加载的远端分页。
 
@@ -135,7 +135,7 @@ bash gradlew --no-daemon workbench --console=plain
 - JobsDB APPLY 的 fresh `/cycles` 在启动任何模型/worker 前要求当前 scope 的已确认答案库，无库即 409；仅准备范围仍可只读匹配/备料。MATCH task 冻结 `answers/answersSha256/answerBank/answersSource`（`kind=SCOPE_ANSWER_BANK`、来源 id、scopeVersion/version、确认时间及库 hash），使用现有 task/answers 存储，`attemptId=taskId`。恢复保持同一来源与快照；范围/快照变化时不换库重猜，保留原 task 并停止。
 - `POST /api/workbench/cycles/{id}/resume`：`{scopeVersion:当前版本}`。必要资料/登录/未知页面解决或累计预算上限补充后恢复同一轮；保留来源游标、候选、缓存与安全任务 ID。相同输入复用匹配/准备（含失败）；事实/范围变化才重新核验，不续签旧冻结快照。已有 RUNNING/UNKNOWN/SUBMITTED 持续去重，UNKNOWN 仅收集/人工核对证据，不重投或继续未开始 CV；其他合格岗位不因此阻塞。暂停/撤销按钮在执行期间可用；已开始动作只允许收集结果，不开始下一阶段。
 - 策略任务写 `approvalSource=SCOPE_POLICY` 和单岗 `POLICY_APPROVED` 事件，绑定 preparation 的精确快照，禁止经旧 `/approve` 转成人审。启动前预扣完整秒数和官网模型 token 上限，失败/无 claim 不退款；OfferToday 执行零模型。任务包携带 `limits`，可信官网 CLI 必须执行 token 上限，否则报告 NEEDS_INPUT；不是 OS/模型沙箱。Runner 对进程实施秒数硬截止。
-- 每个不可逆阶段由当前执行 token 提交 `SUBMITTING` 并明确 `action=APPLY/CONTACT/SEND_CV`；在同一存储事务中重核目标、范围、事实/匹配、冻结文件，消费该阶段外发预算并取得 claim，HTTP 200 才能动作。执行时间已在启动预扣，不在阶段重复扣；外发每阶段各扣一次。官网一次 APPLY；OfferToday CONTACT 之后记录对应 CONTACTED，再独立 SEND_CV claim，最后新 CV 消息必须同岗/attempt/会话且绑定冻结实际附件哈希。旧 claim、文件选中、退出0或只联系都不是成功。
+- 每个不可逆阶段由当前执行 token 提交 `SUBMITTING` 并明确 `action=APPLY/CONTACT/SEND_CV`；在同一存储事务中重核目标、范围、事实/匹配、冻结文件，消费该阶段外发预算并取得 claim，HTTP 200 才能动作。执行时间已在启动预扣，不在阶段重复扣；外发每阶段各扣一次。官网一次 APPLY；OfferToday CONTACT 之后记录对应 CONTACTED，再独立 SEND_CV claim，最后新 CV 消息必须同岗/attempt/会话，并以 A 归属链关联冻结输入 hash 与平台原生附件、本次实际 dispatch 和新鲜回执；不要求转换副本与输入字节相同。旧 claim、文件选中、退出0或只联系都不是成功。
 - task/stage 权限在 launch 前以 `launchPermission` 持久确认，绑定 taskId/attemptId、首阶段、scopeVersion 和完整 `executionResourceId/limits`；阶段 claim 另绑定该 reservation，不把非空 ID、配置 flag 或历史 HTTP 200 当权限。可信 Adapter 在每个阶段的 `SUBMITTING` 交付只读观察的 `context={jdSha256,accountHash,sessionHash}`；聊天渠道另含本岗 `jobId/conversationId`，附件阶段必须与已联系会话一致。缺少经核实的观察能力则停止；profile 元数据 hash 不是账号/会话证明。
 - JobsDB worker 启动时只有 launch permission/资源 reservation，没有 outbound claim。任何 apply/上传/填表前，可信 `observe_role_requirements(page,task)` 只读返回 `{jobId,complete:true,questions:[{name,label,type,options,required:true|false}]}`；必须包含全部实际问题，不能从冻结答案反推。worker 将观察随既有 `SUBMITTING/APPLY` 的 `roleRequirements`、冻结 `binding` 与当前 `context` 交回同一 task owner；事务内检查每个问题、批准值/控件/唯一精确选项和冻结来源，范围库还核对实际题干及完整选项集合，通过才 claim 并将同一 dispatch 的 authorizationId 固定。未知/缺失/歧义/无 observer 时 task 可存在但 0 stage/native claim/effect；不为探题点击 Quick apply。只读观察由可信本机 Adapter 遵守，不是 OS 沙箱或通用 DOM 完整性证明。
 - JobsDB 用现有 `agent-event` 的 `VALIDATE`（`action=APPLY`、`phase=LAUNCH/UPLOAD/SUBMIT`、冻结 `binding` 和新鲜 `context`）复核**已有**已确认 claim，不再扣量或创建 dispatch。首个 LAUNCH 只确认当前只读观察，UPLOAD 前必须已获原账本永久 claim；每次上传/表单继续前 fresh validation，最终 SUBMIT fence 只确认一次。返回的 `validatedPermission` 必须精确匹配当前 task/attempt/stage/resource/phase，失败立即停止。Workbench claim 已落盘但原 ledger 未写、或两边都已写但未获回执的两个崩溃窗口均保留 UNKNOWN，不授予 replay。迟到回执只解析已有 UNKNOWN；原 uncertainty 与后续 resolution 分开留存，不续签权限。
@@ -154,7 +154,7 @@ bash gradlew --no-daemon workbench --console=plain
 | 精确首条文本 CONTACT | **待核实，不执行**；旧「立即沟通」可能先发未知自动招呼，DOM 联系提示不绑定核准正文 |
 | APPLY / SEND_CV / 在线资料 / 图片 / 重复联系 | **不支持，不执行**；没有可核验送达合同，范围或未知开关不能开启 |
 
-Boss 的外发预检/核准明确返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim，不占外发量、不调用原批次，也不回退官网任务/查询。Boss 草稿消息不声称已随附 CV。原 Boss 单岗审核、配置和历史数据仍保留；只证明联系时不能记 CV 送达或申请完成，退出码或模型判断也不能替代证明。`runtime.bossReadConfigured` 只表示只读 Adapter 已安装，连接在读取时检查；`bossOutboundSupported=false` 与 `bossCapabilityReason` 明示限制。
+Boss 的附件验收同样采用转换附件 A，不要求平台副本字节相同；但输入来源、同岗账号/会话、原生附件、本次 dispatch 与新鲜 CV 回执必须可追踪，不能用文件名、附件 ID、旧消息或本地 hash 回显补齐。此合同不证明实际首击/自动招呼或发送能力。Boss 的外发预检/核准仍明确返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim，不占外发量、不调用原批次，也不回退官网任务/查询。Boss 草稿消息不声称已随附 CV。原 Boss 单岗审核、配置和历史数据仍保留；只证明联系时不能记 CV 送达或申请完成，退出码或模型判断也不能替代证明。`runtime.bossReadConfigured` 只表示只读 Adapter 已安装，连接在读取时检查；`bossOutboundSupported=false` 与 `bossCapabilityReason` 明示限制。
 
 本票尚欠精确单岗外发验收，保持待能力核实；后续须另获授权的只读核对或脱敏回放证明动作前的精确消息控制与真实回执。开发授权不包含真实联系、上传或试投，也不切换正在运行的工作台。原因及局部目标图见 #15，取舍见 ADR 0003。
 
@@ -229,7 +229,7 @@ python3 /path/to/scripts/workbench/report.py /private/path/task.json DRAFT '真�
 python3 /path/to/scripts/workbench/report.py /private/path/task.json EMPLOYER_STATUS '实际查询结果' --evidence '页面或申请编号对应的证据'
 ```
 
-OfferToday 使用独立的 `CONTACTED` 和 `CV_DELIVERED` 回执事件，其 evidence 为绑定岗位、attemptId、会话、消息编号、相应消息/附件哈希及 proof 的 JSON。文字与简历分开发送，消息编号必须不同；联系回执得到回调确认后才进入附件步骤。仅联系后保持 UNKNOWN；同会话的附件字节绑定和新平台历史记录核验后才记 SUBMITTED，不走上例普通 SUBMITTED。此状态不保证雇主已读或站内求职记录已更新。脚本使用相同 reporter 和占位确认，不自动重试。
+OfferToday 使用独立的 `CONTACTED` 和 `CV_DELIVERED` 回执事件，其 evidence 为绑定岗位、attemptId、会话、消息编号、消息 hash 或 CV 输入 `resumeSha256` 及 proof 的 JSON；本地 hash 回显本身不证明 A 归属。文字与简历须不同新消息，联系回执确认后再独立取得 SEND_CV claim；仅联系保持 UNKNOWN。受信 Adapter 须先核验完整输入→原生附件→本次 dispatch→新鲜同岗/会话 CV 回执，再报告 CV_DELIVERED，不走上例普通 SUBMITTED，不声称招聘者端字节一致、已读或原生申请状态。当前脚本使用通用 reporter，但尚未交付策略 claim 所需的只读 context 与精确阶段确认，真实发送继续停止；不自动重试。
 
 所有事件明确标记来源为 agent/user/system；工作台没有声称直接观察了浏览器。正常退出 0、打印“完成”均不算提交证明。提交前占位后 UNKNOWN 禁止重投；未提供最终回执而结束的旧人工申请也保守保留 UNKNOWN；新策略任务无外发 claim 则保留已知未外发断点。重启不会恢复自动投递，只提示核实。
 
