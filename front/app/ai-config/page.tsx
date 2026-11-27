@@ -13,6 +13,7 @@ export default function AiConfigPage() {
   const [aiConfig, setAiConfig] = useState({
     introduce: '',
     prompt: '',
+    provider: 'HTTP',
   })
 
   const [loading, setLoading] = useState(false)
@@ -43,6 +44,7 @@ export default function AiConfigPage() {
         setAiConfig({
           introduce: result.data.introduce || '',
           prompt: result.data.prompt || '',
+          provider: result.data.provider === 'CODEX' ? 'CODEX' : 'HTTP',
         })
       }
     } catch (error) {
@@ -132,7 +134,7 @@ export default function AiConfigPage() {
       <PageHeader
         icon={<BiBrain className="text-2xl" />}
         title="AI配置"
-        subtitle="配置AI相关的技能介绍和提示词"
+        subtitle="配置 AI 提供方、技能介绍和提示词"
         iconClass="text-white"
         accentBgClass="bg-purple-500"
         actions={
@@ -174,6 +176,23 @@ export default function AiConfigPage() {
           </CardHeader>
           <CardContent>
             <div className="space-y-6">
+              <div className="space-y-2">
+                <Label htmlFor="provider">AI 提供方</Label>
+                <select
+                  id="provider"
+                  value={aiConfig.provider}
+                  onChange={(e) => setAiConfig({ ...aiConfig, provider: e.target.value })}
+                  aria-describedby="provider-help"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <option value="HTTP">HTTP API</option>
+                  <option value="CODEX">Codex CLI（本地订阅）</option>
+                </select>
+                <p id="provider-help" className="text-xs text-muted-foreground">
+                  HTTP API 使用环境配置中的 BASE_URL、API_KEY 和 MODEL。Codex CLI 使用运行后端的机器上已登录的 codex 命令。
+                </p>
+              </div>
+
               <div className="space-y-2">
                 <Label htmlFor="introduce">技能介绍</Label>
                 <Textarea

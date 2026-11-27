@@ -1,6 +1,8 @@
 package com.getjobs.application.service;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.getjobs.application.entity.AiEntity;
+import com.getjobs.application.entity.AiProvider;
 import com.getjobs.application.mapper.AiMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +23,7 @@ import java.time.format.DateTimeFormatter;
 
 /**
  * AI 服务（Spring 管理）
- * 从数据库配置获取 BASE_URL、API_KEY、MODEL 并发起 AI 请求。
+ * 根据配置使用 HTTP API 或本地 Codex CLI 生成文本。
  */
 @Service
 @Slf4j
@@ -36,7 +38,7 @@ public class AiService {
      * @return AI 回复文本
      */
     public String sendRequest(String content) {
-        if ("codex".equalsIgnoreCase(System.getenv("GET_JOBS_AI_PROVIDER"))) {
+        if (resolveProvider(findLatestConfig()) == AiProvider.CODEX) {
             return CodexClient.generate(content);
         }
         // 读取并校验配置
@@ -251,16 +253,24 @@ public class AiService {
 
     // ================= 合并的 AI 配置管理方法 =================
 
+    private AiEntity findLatestConfig() {
+        return aiMapper.selectOne(Wrappers.<AiEntity>lambdaQuery().orderByDesc(AiEntity::getId).last("LIMIT 1"));
+    }
+
+    private AiProvider resolveProvider(AiEntity config) {
+        return AiProvider.resolve(config == null ? null : config.getProvider(), System.getenv("GET_JOBS_AI_PROVIDER"));
+    }
+
     /**
      * 获取AI配置（获取最新一条，如果不存在则创建默认配置）
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public AiEntity getAiConfig() {
-        var list = aiMapper.selectList(null);
-        AiEntity aiEntity = (list == null || list.isEmpty()) ? null : list.get(list.size() - 1);
+        AiEntity aiEntity = findLatestConfig();
         if (aiEntity == null) {
-            aiEntity = createDefaultConfig();
+            return createDefaultConfig();
         }
+        aiEntity.setProvider(resolveProvider(aiEntity).name());
         return aiEntity;
     }
 
@@ -281,25 +291,31 @@ public class AiService {
     }
 
     /**
-     * 保存或更新AI配置（introduce/prompt）
+     * 保存或更新AI配置，旧调用默认使用 HTTP。
      */
     @Transactional
     public AiEntity saveOrUpdateAiConfig(String introduce, String prompt) {
-        var list = aiMapper.selectList(null);
-        AiEntity aiEntity = (list == null || list.isEmpty()) ? null : list.get(list.size() - 1);
+        return saveOrUpdateAiConfig(introduce, prompt, AiProvider.HTTP);
+    }
 
-        if (aiEntity == null) {
+    @Transactional
+    public AiEntity saveOrUpdateAiConfig(String introduce, String prompt, AiProvider provider) {
+        AiEntity aiEntity = findLatestConfig();
+        boolean isNew = aiEntity == null;
+        LocalDateTime now = LocalDateTime.now();
+        if (isNew) {
             aiEntity = new AiEntity();
-            aiEntity.setIntroduce(introduce);
-            aiEntity.setPrompt(prompt);
-            aiEntity.setCreatedAt(java.time.LocalDateTime.now());
-            aiEntity.setUpdatedAt(java.time.LocalDateTime.now());
+            aiEntity.setCreatedAt(now);
+        }
+        aiEntity.setIntroduce(introduce);
+        aiEntity.setPrompt(prompt);
+        aiEntity.setProvider((provider == null ? AiProvider.HTTP : provider).name());
+        aiEntity.setUpdatedAt(now);
+
+        if (isNew) {
             aiMapper.insert(aiEntity);
             log.info("创建新的AI配置，ID: {}", aiEntity.getId());
         } else {
-            aiEntity.setIntroduce(introduce);
-            aiEntity.setPrompt(prompt);
-            aiEntity.setUpdatedAt(java.time.LocalDateTime.now());
             aiMapper.updateById(aiEntity);
             log.info("更新AI配置，ID: {}", aiEntity.getId());
         }
@@ -328,6 +344,7 @@ public class AiService {
         AiEntity aiEntity = new AiEntity();
         aiEntity.setIntroduce("请在此填写您的技能介绍");
         aiEntity.setPrompt("请在此填写AI提示词模板");
+        aiEntity.setProvider(resolveProvider(null).name());
         aiEntity.setCreatedAt(java.time.LocalDateTime.now());
         aiEntity.setUpdatedAt(java.time.LocalDateTime.now());
         aiMapper.insert(aiEntity);

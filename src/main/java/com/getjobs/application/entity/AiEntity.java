@@ -33,6 +33,9 @@ public class AiEntity {
     @TableField("prompt")
     private String prompt;
 
+    @TableField("provider")
+    private String provider;
+
     /**
      * 创建时间
      */

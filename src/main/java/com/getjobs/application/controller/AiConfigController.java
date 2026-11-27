@@ -1,9 +1,10 @@
 package com.getjobs.application.controller;
 
 import com.getjobs.application.entity.AiEntity;
+import com.getjobs.application.entity.AiProvider;
 import com.getjobs.application.service.AiService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -18,11 +19,10 @@ import java.util.Map;
 @RequestMapping("/api/ai")
 @CrossOrigin(origins = "*")
 @Slf4j
+@RequiredArgsConstructor
 public class AiConfigController {
 
-
-    @Autowired
-    private AiService aiService;
+    private final AiService aiService;
 
     /**
      * 获取AI配置
@@ -51,7 +51,7 @@ public class AiConfigController {
 
     /**
      * 保存或更新AI配置
-     * @param requestBody 请求体包含introduce和prompt
+     * @param requestBody 请求体包含 introduce、prompt 和可选的 provider
      * @return 保存结果
      */
     @PostMapping("/config")
@@ -68,7 +68,15 @@ public class AiConfigController {
                 return ResponseEntity.badRequest().body(response);
             }
 
-            AiEntity aiEntity = aiService.saveOrUpdateAiConfig(introduce, prompt);
+            String value = requestBody.get("provider");
+            AiProvider provider = value == null ? AiProvider.HTTP : AiProvider.parse(value);
+            if (provider == null) {
+                response.put("success", false);
+                response.put("message", "provider 必须为 HTTP 或 CODEX");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            AiEntity aiEntity = aiService.saveOrUpdateAiConfig(introduce, prompt, provider);
 
             response.put("success", true);
             response.put("data", aiEntity);
