@@ -71,7 +71,15 @@ final class WorkbenchLegacy {
         var history = json.createArrayNode();
         if (Files.isRegularFile(jobsdb.resolve("applications.db"))) {
             try (var c = openLedger(); var q = c.prepareStatement("SELECT job_id,status,updated_at FROM applications ORDER BY updated_at DESC LIMIT 100"); var rows = q.executeQuery()) {
-                while (rows.next()) history.add(json.createObjectNode().put("id", rows.getString(1)).put("status", rows.getString(2)).put("updated_at", rows.getString(3)));
+                while (rows.next()) {
+                    var row = json.createObjectNode().put("id", rows.getString(1)).put("status", rows.getString(2)).put("updated_at", rows.getString(3))
+                            .put("provenance", "ORIGINAL_LEDGER").put("provenanceNote", "原账本未记录执行入口或匹配结论；不补造 task 或 claim");
+                    // This exact historical row is documented in ADR 0003; a job ID alone is not provenance.
+                    if (row.path("id").asText().equals("96118137") && row.path("status").asText().equals("SUBMITTED")
+                            && row.path("updated_at").asText().equals("2026-11-26 11:49:02"))
+                        row.put("provenance", "DIRECT_FROZEN_CLI").put("provenanceNote", "SUBMITTED in original ledger — direct frozen CLI run; workbench bridge not exercised。材料 MATERIAL_EXCEPTION 不是匹配 verdict；不补造 scope、package、预算或 claim。");
+                    history.add(row);
+                }
             } catch (Exception e) { result.put("jobsdbError", "JobsDB 历史不可读取，请检查原 CLI；未修改原账本"); }
         }
         result.set("jobsdbHistory", history);

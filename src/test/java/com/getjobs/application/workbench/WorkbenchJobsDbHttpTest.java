@@ -51,6 +51,57 @@ class WorkbenchJobsDbHttpTest {
         return json.readTree(http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench" + path).contentType("application/json").content(body.toString())).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8));
     }
     JsonNode state(MockMvc http) throws Exception { return json.readTree(http.perform(get("/api/workbench/state")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8)); }
+    @Test void directCliLedgerProvenancePreservesTheOriginalRowWithoutInventingATaskOrMatch() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, List.of(), List.of(), List.of(), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner);
+            assertTrue(state(http).at("/platforms/jobsdbHistory").isEmpty(), "No synthetic history when the original ledger is absent");
+            ledgerRow("96118137", "SUBMITTED", "2026-11-26 11:49:02");
+            Path ledger = root.resolve("legacy/applications.db");
+            byte[] original = Files.readAllBytes(ledger);
+            var current = state(http);
+            var history = current.at("/platforms/jobsdbHistory");
+            assertEquals(1, history.size());
+            var row = history.get(0);
+            assertEquals("96118137", row.path("id").asText());
+            assertEquals("SUBMITTED", row.path("status").asText());
+            assertEquals("2026-11-26 11:49:02", row.path("updated_at").asText());
+            assertEquals("DIRECT_FROZEN_CLI", row.path("provenance").asText());
+            assertTrue(row.path("provenanceNote").asText().contains("direct frozen CLI run; workbench bridge not exercised"));
+            assertTrue(row.path("provenanceNote").asText().contains("MATERIAL_EXCEPTION"));
+            for (String field : List.of("taskId", "attemptId", "packageId", "scopeVersion", "authorizationId", "outboundClaim", "matchVerdict", "verdict"))
+                assertFalse(row.has(field), "The ledger must not invent " + field);
+            assertTrue(current.path("tasks").isEmpty());
+            assertTrue(current.path("jobsdbAttempts").isEmpty());
+            assertTrue(current.at("/preparations/packages").isEmpty());
+            assertEquals(0, current.at("/scope/usage/outbound").asInt(-1));
+            assertArrayEquals(original, Files.readAllBytes(ledger), "History reads must leave the authoritative ledger unchanged");
+        }
+    }
+
+    void ledgerRow(String jobId, String status, String updatedAt) throws Exception {
+        Files.createDirectories(root.resolve("legacy"));
+        try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db")); var q = c.createStatement()) {
+            q.execute("CREATE TABLE IF NOT EXISTS applications(job_id TEXT PRIMARY KEY,status TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+            try (var insert = c.prepareStatement("INSERT INTO applications(job_id,status,updated_at) VALUES(?,?,?)")) {
+                insert.setString(1, jobId); insert.setString(2, status); insert.setString(3, updatedAt); insert.executeUpdate();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ID", "STATUS", "TIMESTAMP"})
+    void undocumentedLedgerRowsDoNotInheritTheKnownDirectCliProvenance(String mutation) throws Exception {
+        ledgerRow(mutation.equals("ID") ? "96118138" : "96118137", mutation.equals("STATUS") ? "UNKNOWN" : "SUBMITTED",
+                mutation.equals("TIMESTAMP") ? "2026-11-27 11:49:02" : "2026-11-26 11:49:02");
+        var current = service().state();
+        var row = current.at("/platforms/jobsdbHistory/0");
+        assertEquals("ORIGINAL_LEDGER", row.path("provenance").asText());
+        assertFalse(row.path("provenanceNote").asText().contains("direct frozen CLI"));
+        assertFalse(row.has("matchVerdict"));
+        assertTrue(current.path("tasks").isEmpty());
+    }
+
     void setup(MockMvc http, boolean outbound) throws Exception {
         var fact = post(http, "/facts", json.createObjectNode().put("key", "project").put("label", "Synthetic project").put("value", FACT).put("scope", "HK").put("confirmed", true));
         var contact = post(http, "/facts", json.createObjectNode().put("key", "contact_email").put("label", "Synthetic email").put("value", "applicant@example.test").put("scope", "HK").put("confirmed", true));
@@ -733,6 +784,7 @@ class WorkbenchJobsDbHttpTest {
     }
 
     @Test void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries() throws Exception {
+        ledgerRow("96118137", "SUBMITTED", "2026-11-26 11:49:02");
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
             var http = http(service, runner); setup(http, true); prepareForAlias(http);
@@ -759,6 +811,14 @@ class WorkbenchJobsDbHttpTest {
             assertTrue(task.path("events").toString().contains("SUBMITTING"));
             assertTrue(task.path("events").toString().contains("SUBMITTED"));
             assertEquals(1, after.path("scope").path("usage").path("outbound").asInt());
+            assertEquals(2, after.at("/platforms/jobsdbHistory").size(), "Original ledger and actual controlled task remain separate histories");
+            for (var row : after.at("/platforms/jobsdbHistory")) {
+                boolean direct = row.path("id").asText().equals("96118137");
+                assertEquals(direct ? "DIRECT_FROZEN_CLI" : "ORIGINAL_LEDGER", row.path("provenance").asText());
+                assertFalse(row.has("taskId"), "Ledger provenance must not synthesize a task association");
+                if (direct) assertEquals("2026-11-26 11:49:02", row.path("updated_at").asText());
+            }
+            assertEquals("12345678", task.path("jobId").asText());
             assertTrue(runner.runtime().path("jobsDbSingleJobSupported").asBoolean());
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
                     .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(request.toString())).andExpect(status().isConflict());

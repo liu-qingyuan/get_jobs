@@ -260,7 +260,7 @@ export interface WorkbenchState {
   platforms: {
     bossUrl: string
     offerTodayUrl: string
-    jobsdbHistory: Array<{ id: string; status: string; updated_at: string }>
+    jobsdbHistory: Array<{ id: string; status: string; updated_at: string; provenance: 'ORIGINAL_LEDGER' | 'DIRECT_FROZEN_CLI'; provenanceNote: string }>
     jobsdbAvailable: boolean
     jobsdbError?: string
   }
