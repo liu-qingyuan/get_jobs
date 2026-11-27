@@ -126,8 +126,18 @@ export interface MaterialReview {
 
 export type ScopeAction = 'DISCOVER' | 'MATCH' | 'PREPARE' | 'APPLY' | 'CONTACT' | 'SEND_CV' | 'PROJECT_EXECUTE' | 'PROJECT_VERIFY' | 'PROJECT_FEEDBACK'
 export type ScopeMeter = 'candidates' | 'modelTokens' | 'seconds' | 'outbound'
+export interface JobsDbAnswerBank {
+  confirmed: boolean
+  entries: Array<{ name: string; label: string; type: 'select' | 'radio' | 'checkbox'; options: string[]; value: string | string[] }>
+  id?: string
+  scopeVersion?: number
+  version?: number
+  confirmedAt?: string
+  sha256?: string
+}
 export interface ScopeConfig {
   expectedVersion?: number
+  jobsDbAnswerBank?: JobsDbAnswerBank
   channels: string[]
   hosts: string[]
   regions: string[]

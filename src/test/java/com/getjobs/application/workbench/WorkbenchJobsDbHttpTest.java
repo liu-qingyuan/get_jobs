@@ -64,7 +64,14 @@ class WorkbenchJobsDbHttpTest {
         scope.putArray("contactFactIds").add(contact.path("id").asText());
         scope.putArray("actions").add("DISCOVER").add("MATCH").add("PREPARE"); if (outbound) scope.withArray("actions").add("APPLY");
         scope.putObject("budgets").put("candidates", 50).put("seconds", 300).put("modelTokens", 10000).put("outbound", 10);
+        if (outbound) scope.putObject("jobsDbAnswerBank").put("confirmed", true).putArray("entries");
         post(http, "/scope", scope);
+    }
+    void prepareForAlias(MockMvc http) throws Exception {
+        post(http, "/candidates/discover", input());
+        var batch = json.createObjectNode().put("scopeVersion", 1).put("secondsPerBatch", 3).put("modelTokensPerCandidate", 50);
+        post(http, "/candidates/match", batch);
+        post(http, "/candidates/prepare", batch);
     }
     ObjectNode input() throws Exception { return (ObjectNode) json.readTree("{\"scopeVersion\":1,\"maxPages\":1,\"jobsPerPage\":5,\"secondsPerPage\":3,\"secondsPerBatch\":3,\"modelTokensPerCandidate\":50,\"sources\":[{\"channel\":\"JOBSDB\",\"url\":\"https://hk.jobsdb.com/python-jobs\",\"region\":\"HK\",\"language\":\"en\",\"direction\":\"AI_APPLICATION\"}]}"); }
     List<String> model() throws Exception {
@@ -91,6 +98,12 @@ class WorkbenchJobsDbHttpTest {
                     t=json.load(open(sys.argv[2]))
                     context={'jdSha256':t['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}
                     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    questions=[{'name':name,'label':'Synthetic question','type':'checkbox' if isinstance(value,list) else 'select',
+                        'options':value if isinstance(value,list) else [value],'required':True} for name,value in t['answers'].items()]
+                    event={'type':'SUBMITTING','action':'APPLY','message':'Complete question check before claim','binding':t,'context':context,
+                        'roleRequirements':{'jobId':t['jobId'],'complete':True,'questions':questions}}
+                    req=urllib.request.Request(t['callbackUrl'],json.dumps(event).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+t['token']})
+                    with opener.open(req,timeout=5) as response: t['authorizationId']=json.load(response)['outboundClaim']
                     for phase in ('LAUNCH','UPLOAD','SUBMIT'):
                         if phase=='UPLOAD':
                             data=pathlib.Path(sys.argv[4]); data.mkdir(exist_ok=True)
@@ -536,7 +549,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void unverifiedJobsDbOutboundCannotAuthorizeClaimOrFallBackToOfficial() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http);
             var pkg = state.path("preparations").path("packages").get(0);
@@ -550,27 +563,29 @@ class WorkbenchJobsDbHttpTest {
             }
             assertTrue(state.path("tasks").isEmpty(), state.toPrettyString());
             assertEquals(0, state.path("scope").path("usage").path("outbound").asInt());
-            assertEquals("EXCEPTION", state.path("workflow").path("cycles").get(0).path("status").asText());
+            assertTrue(state.at("/workflow/cycles").isEmpty(), "Explicit preparation does not execute a cycle or authorize an outbound stage");
             var smuggled = ((ObjectNode) pkg.path("target")).deepCopy().put("channel", "OFFICIAL").put("kind", "APPLICATION");
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks").contentType("application/json").content(smuggled.toString())).andExpect(status().isBadRequest());
             assertFalse(runner.runtime().path("jobsDbOutboundSupported").asBoolean());
         }
     }
     ObjectNode claimedFenceTask(MockMvc http, WorkbenchService service) throws Exception {
-        setup(http, true); post(http, "/cycles", input());
-        await().atMost(Duration.ofSeconds(10)).until(() -> !state(http).at("/runtime/busy").asBoolean());
+        setup(http, true); prepareForAlias(http);
         var pkg = state(http).at("/preparations/packages/0");
         var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
                 .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
         String id = service.jobsDbTask(request).path("id").asText();
         service.beginTask(id, "current-worker", "http://127.0.0.1:1/api/workbench", 30);
-        var task = service.agentEvent(id, json.createObjectNode().put("type", "SUBMITTING").put("action", "APPLY").put("message", "Fake stage claim"), "current-worker");
-        var dispatch = json.createObjectNode().put("attemptId", id).put("authorizationId", task.path("outboundClaim").asText())
-                .put("jobId", "12345678").put("url", task.path("url").asText())
+        var task = service.task(id);
+        var dispatch = json.createObjectNode().put("taskId", id).put("attemptId", id).put("stage", "APPLY")
+                .put("executionResourceId", task.path("executionResourceId").asText()).put("jobId", "12345678").put("url", task.path("url").asText())
                 .put("resumeSha256", task.at("/snapshot/resume/sha256").asText()).put("answersSha256", task.path("answersSha256").asText())
                 .put("profileHash", "a".repeat(64)).put("contactHash", "b".repeat(64));
+        dispatch.set("answersSource", task.path("answersSource"));
         service.store.write(c -> { var stored = service.store.get(c, "task", id); stored.set("jobsDbDispatch", dispatch); service.store.save(c, "task", stored); return null; });
-        return service.task(id);
+        var event = fenceEvent(service.task(id), "CLAIM").put("type", "SUBMITTING");
+        event.putObject("roleRequirements").put("jobId", "12345678").put("complete", true).putArray("questions");
+        return service.agentEvent(id, event, "current-worker");
     }
     ObjectNode fenceEvent(JsonNode task, String phase) {
         var event = json.createObjectNode().put("type", "VALIDATE").put("action", "APPLY").put("phase", phase).put("message", "Fake fresh fence");
@@ -697,7 +712,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void launchPermissionIsConfirmedAndBoundToTheTaskStageAndRealResourceEnvelope() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var pkg = state(http).at("/preparations/packages/0");
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
@@ -720,7 +735,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http);
             var candidate = state.path("candidates").path("jobs").get(0);
@@ -766,7 +781,7 @@ class WorkbenchJobsDbHttpTest {
         String taskId;
         try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, callbackUrl(service), 10);
              var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var pkg = state(http).at("/preparations/packages/0");
             request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
@@ -787,7 +802,7 @@ class WorkbenchJobsDbHttpTest {
             post(http, "/cycles", input());
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             assertEquals(1, state(http).path("tasks").size());
-            assertEquals(taskId, state(http).at("/workflow/cycles/1/entries/0/taskId").asText(), "A cycle must reference the existing alias task, not a parallel lifecycle");
+            assertEquals(taskId, state(http).at("/workflow/cycles/0/entries/0/taskId").asText(), "A cycle must reference the existing alias task, not a parallel lifecycle");
             assertEquals(1, state(http).at("/scope/usage/outbound").asInt());
             assertEquals(List.of("APPLY"), Files.readAllLines(root.resolve("effects")));
         }
@@ -805,7 +820,7 @@ class WorkbenchJobsDbHttpTest {
     void legacyBridgeAttemptsStayReadOnlyAndVetoEveryTaskEntry(String status) throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var pkg = state(http).at("/preparations/packages/0");
             var old = json.createObjectNode().put("id", "old-bridge").put("candidateId", pkg.path("candidateId").asText())
@@ -830,7 +845,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void originalJobsDbLedgerBlocksBeforeOutboundAuthorization() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
             Files.createDirectories(root.resolve("legacy"));
@@ -850,7 +865,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void changedFrozenBytesStopBeforeOutboundConsumption() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
             Path resume = service.file((ObjectNode) pkg.path("snapshot").path("resume"));
@@ -867,7 +882,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void nonAsciiAnswersUseTheSameCanonicalHashAsThePythonCli() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
@@ -883,7 +898,7 @@ class WorkbenchJobsDbHttpTest {
     @Test void mismatchedReceiptIsUnknownAndCannotBeRetriedAsSuccess() throws Exception {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(true), null, callbackUrl(service), 10)) {
-            var http = http(service, runner); setup(http, true); post(http, "/cycles", input());
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())

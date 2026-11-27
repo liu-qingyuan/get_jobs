@@ -30,6 +30,10 @@ final class WorkbenchWorkflow {
                 require(!Set.of("RUNNING", "COMPLETED", "PREPARED").contains(cycle.path("status").asText()), "本轮正在运行或已完成");
                 ((ObjectNode) cycle.path("input")).put("scopeVersion", scope.path("version").asInt());
             }
+            // Answer approval is a user input, not a model/reader result. Reject before launching any work.
+            for (var action : scope.path("actions")) if (action.asText().equals("APPLY"))
+                for (var source : cycle.path("input").path("sources"))
+                    if (source.path("channel").asText().equals("JOBSDB")) service.jobsDbAnswers.current(scope);
             cycle.remove("pauseReason");
             cycle.put("scopeVersion", scope.path("version").asInt()).put("status", "RUNNING");
             event(cycle, "START", cycleId == null ? "一次启动发现、匹配、备料及允许的逐岗执行" : "仅恢复已知未外发断点；UNKNOWN 不重投，累计预算不重置");

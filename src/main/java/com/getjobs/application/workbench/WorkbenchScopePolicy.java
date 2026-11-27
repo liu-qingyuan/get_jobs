@@ -73,6 +73,10 @@ final class WorkbenchScopePolicy {
                 }
             }
             scope.put("version", previous == null ? 1 : previous.path("version").asInt() + 1);
+            if (input.hasNonNull("jobsDbAnswerBank")) {
+                require(contains(scope.path("channels"), "JOBSDB") && input.path("jobsDbAnswerBank") instanceof ObjectNode, "JobsDB 答案库须属于本范围的 JobsDB 渠道");
+                scope.set("jobsDbAnswerBank", service.jobsDbAnswers.confirm((ObjectNode) input.path("jobsDbAnswerBank"), scope.path("version").asInt()));
+            }
             scope.put("id", Integer.toString(scope.path("version").asInt())).put("status", "ACTIVE").put("source", "USER_SCOPE").put("createdAt", now());
             store.save(c, "scope_version", scope);
             return scope;

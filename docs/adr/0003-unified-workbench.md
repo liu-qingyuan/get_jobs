@@ -110,6 +110,14 @@ OfferToday 在一次范围确认中显式选定已确认的邮箱/电话字段�
 
 scope/JD/材料/答案及只读观察的账号/会话关联均须有效；聊天 CONTACT/SEND_CV 分别核对同一岗位/会话。profile 配置指纹只是关联元数据，不能证明账号身份。当前内置 JobsDB Browser 尚无经核实的 JD/account/session observer，OfferToday 策略脚本尚不交付该观察合同，因此在新 fence 下安全停止；#33 的 fake/HTTP/全路由浏览器测试不是生产能力声明。真实 Adapter 观察与外发验收仍归 #28–#30，不通过配置、旧 frozen CLI 凭据或合成 context 绕过。旧交互式人工 CLI 与已保存 direct CLI 历史不改写。
 
+### #37：范围答案库与 before-claim 问题核对
+
+#25 的 B 方案取代「fresh JobsDB 周期必须逐岗确认答案」：范围保存用户明确确认的问题身份/题干、现有控件类型、全部精确选项标签和批准值，来源绑定本范围版本、确认时间和规范 JSON SHA256。不能把普通事实或旧全局 answers 默认为跨岗问卷批准。新 task 冻结同一来源和答案；恢复不覆盖来源，范围或材料快照变化则停止，历史记录不补造确认。暂停/恢复生成的新范围版本不自动续签答案库，须重新保存并确认；仅准备范围不因缺库而被授予外发。
+
+本决定同时修正 #33 的 JobsDB 启动顺序：Runner 仅先确认 task/stage launch permission 和预留完整资源，不在启动 worker 前取得 outbound claim。可信 worker 的只读 observer 提供同岗完整 role-requirements，交由现有 SUBMITTING 事务逐题核对批准值/控件/选项（范围库另核对题干和来源），通过才消费一次 stage claim；未知/缺失/歧义时 task 可存在但 0 stage/native claim、0 effect。不为探查表单点击 Quick apply；已确认 stage 后仍保持 LAUNCH → 原永久 ledger claim → UPLOAD → SUBMIT fences 及两库崩溃窗口的 UNKNOWN/禁止 replay。问题匹配规则由现有 task Module 拥有，worker 不另造批准策略或第二 attempt。
+
+生产 Browser 当前没有经核实的只读问题及 JD/account/session observer，保持 `STOPPED_BEFORE_EFFECT`/capability stop；HTTP/fake 与全路由页面测试只证明开发合同，不证明实站发送。真实 observer/外发验收仍由 #28 负责。
+
 #16 的受控单岗实现、假站/临时账本测试和默认页面入口已完成；2026-11-26 已对真实 JobsDB 岗位 `96118137` 提交一次，attempt `live-96118137-20261126T194842`，冻结英文 DOCX/答案/Profile/联系方式哈希绑定，结果 `SUBMITTED`，receipt `https://hk.jobsdb.com/job/96118137/apply/success`，原账本 `96118137|SUBMITTED|2026-11-26 11:49:02`。空答案准备先停在未配置的雇主问题、未 claim；带已确认事实答案的运行是唯一提交，无重投。真实运行使用 CLI 冻结任务；live workbench package 为 `MATERIAL_EXCEPTION`，未走 `/jobsdb/apply` 桥接。批次/联系/附件外发、生产读取覆盖和跨重开仍未验收。
 
 ## 独立有界项目（issue #17，父 spec #7）

@@ -25,6 +25,7 @@ public final class WorkbenchService {
     private final WorkbenchLegacy legacy;
     private final Map<String, List<String>> platformEffects;
     final WorkbenchMaterials materials;
+    final JobsDbAnswers jobsDbAnswers;
     final WorkbenchScopePolicy scope;
     final WorkbenchCandidates candidates;
     final WorkbenchMatching matching;
@@ -56,6 +57,7 @@ public final class WorkbenchService {
         this.jobsdb = jobsdb.toAbsolutePath().normalize();
         this.legacy = new WorkbenchLegacy(this.jobsdb, json);
         this.materials = new WorkbenchMaterials(this);
+        this.jobsDbAnswers = new JobsDbAnswers(json);
         this.scope = new WorkbenchScopePolicy(this);
         this.candidates = new WorkbenchCandidates(this);
         this.matching = new WorkbenchMatching(this);
@@ -331,17 +333,29 @@ public final class WorkbenchService {
         if (config.has("cycleId")) task.set("cycleId", config.path("cycleId"));
         task.put("secondsPerJob", config.path("secondsPerJob").asInt(30)).put("modelTokensPerJob", config.path("modelTokensPerJob").asInt(1000));
         if (task.path("channel").asText().equals("JOBSDB")) {
-            if (confirmedAnswers == null && !task.path("snapshot").equals(record.path("snapshot"))) {
-                task.remove(java.util.List.of("answers", "answersSha256", "answersConfirmed"));
-            }
-            if (confirmedAnswers != null) {
+            if (task.path("answersConfirmed").asBoolean()) {
+                require(task.path("snapshot").equals(record.path("snapshot")), "JobsDB 快照已变化，不能替换同一 task 的冻结答案来源");
+                if (confirmedAnswers != null) require(answersHash(confirmedAnswers).equals(task.path("answersSha256").asText()), "同一 task 恢复须沿用原冻结答案，不能重新猜答或覆盖");
+                if (task.at("/answersSource/kind").asText().equals("SCOPE_ANSWER_BANK"))
+                    require(task.at("/answersSource/scopeVersion").equals(task.path("scopeVersion")), "答案库范围版本已变化，不能续用旧来源");
+            } else if (confirmedAnswers != null) {
                 task.set("answers", confirmedAnswers.deepCopy());
                 task.put("answersSha256", answersHash(confirmedAnswers)).put("answersConfirmed", true);
+                task.set("answersSource", json.createObjectNode().put("kind", "SINGLE_JOB_CONFIRMATION").put("scopeVersion", task.path("scopeVersion").asInt())
+                        .put("version", 1).put("sha256", task.path("answersSha256").asText()).put("confirmedAt", now()));
+            } else {
+                var bank = jobsDbAnswers.current(scope.latest(c));
+                var answers = jobsDbAnswers.values(bank);
+                task.set("answerBank", bank);
+                var source = bank.deepCopy(); source.remove("entries"); source.put("kind", "SCOPE_ANSWER_BANK");
+                task.set("answersSource", source);
+                task.set("answers", answers);
+                task.put("answersSha256", answersHash(answers)).put("answersConfirmed", true);
             }
-            require(task.path("answersConfirmed").asBoolean(), "JobsDB 单岗须先冻结已确认答案；不会猜测或自动提交");
             task.put("jobId", JobsDbTarget.parse(task.path("url").asText()).id());
+            verifyJobsDbAnswers(c, task);
         }
-        task.remove("executionResourceId");
+        task.remove(java.util.List.of("executionResourceId", "launchPermission", "fences", "observedExecutionContext", "jobsDbDispatch", "roleRequirements"));
         task.set("snapshot", record.path("snapshot").deepCopy());
         task.put("resumeId", record.path("snapshot").path("resume").path("id").asText());
         if (task.path("channel").asText().equals("OFFERTODAY")) task.put("platformJobId", OfferTodayTarget.parse(task.path("url").asText()).id());
@@ -392,6 +406,18 @@ public final class WorkbenchService {
         return hash(json.writeValueAsString(sorted).getBytes(StandardCharsets.UTF_8));
     }
 
+    private void verifyJobsDbAnswers(Connection c, ObjectNode task) throws Exception {
+        require(task.path("answersConfirmed").asBoolean() && task.path("answers") instanceof ObjectNode
+                && answersHash((ObjectNode) task.path("answers")).equals(task.path("answersSha256").asText()), "答案未确认或已变化");
+        var source = task.path("answersSource");
+        require(source.path("scopeVersion").equals(task.path("scopeVersion")), "冻结答案来源范围不符，不能自动重新猜答");
+        if (source.path("kind").asText().equals("SCOPE_ANSWER_BANK")) {
+            var bank = jobsDbAnswers.current(scope.latest(c));
+            var metadata = bank.deepCopy(); metadata.remove("entries"); metadata.put("kind", "SCOPE_ANSWER_BANK");
+            require(bank.equals(task.path("answerBank")) && metadata.equals(source) && jobsDbAnswers.values(bank).equals(task.path("answers")), "冻结答案库来源/version/hash 不符");
+        } else require(source.path("kind").asText().equals("SINGLE_JOB_CONFIRMATION") && source.path("sha256").equals(task.path("answersSha256")), "缺少本任务的已确认答案来源");
+    }
+
     void duplicate(Connection c, ObjectNode task) throws Exception { duplicate(c, task, false); }
     void duplicate(Connection c, ObjectNode task, boolean validatingClaim) throws Exception {
         if (!task.path("kind").asText().equals("APPLICATION")) return;
@@ -428,6 +454,7 @@ public final class WorkbenchService {
             if (!task.path("state").asText().equals("APPROVED")) throw new WorkbenchException(409, "只能启动已批准且尚未执行的任务");
             boolean jobsDb = task.path("channel").asText().equals("JOBSDB") && task.has("packageId") && task.path("answersConfirmed").asBoolean();
             boolean boss = task.path("channel").asText().equals("BOSS") && task.has("packageId") && hasPlatformEffect("BOSS");
+            if (jobsDb) verifyJobsDbAnswers(c, task);
             if (task.path("kind").asText().equals("GAP") || (task.path("kind").asText().equals("APPLICATION") && !Set.of("OFFICIAL", "OFFERTODAY").contains(task.path("channel").asText()) && !jobsDb && !boss))
                 throw new WorkbenchException(409, "平台申请请使用原有审核入口；此执行器只处理官网、OfferToday 单岗或简历草稿任务");
             if (task.path("kind").asText().equals("APPLICATION") && JobsDbTarget.isHost(task.path("url").asText()) && !jobsDb)
@@ -501,11 +528,21 @@ public final class WorkbenchService {
                         var record = store.get(c, "preparation", task.path("packageId").asText());
                         String action = cvStage ? "SEND_CV" : firstAction(task);
                         require(input.path("action").asText().equals(action), "请明确请求当前不可逆动作的 claim");
-                        if (!task.path("channel").asText().equals("JOBSDB")) bindExecutionContext(task, input.path("context"));
+                        if (task.path("channel").asText().equals("JOBSDB")) {
+                            verifyJobsDbAnswers(c, task);
+                            var dispatch = task.path("jobsDbDispatch");
+                            require(dispatch.isObject() && !dispatch.has("authorizationId"), "JobsDB dispatch 缺失或已 claim，不允许 replay");
+                            for (String field : java.util.List.of("taskId", "attemptId", "stage", "executionResourceId", "jobId", "url", "resumeSha256", "answersSha256", "profileHash", "contactHash", "answersSource"))
+                                require(dispatch.hasNonNull(field) && dispatch.path(field).equals(input.path("binding").path(field)), "worker claim 输入错绑：" + field);
+                            jobsDbAnswers.checkQuestions(task, input.path("roleRequirements"));
+                            task.set("roleRequirements", input.path("roleRequirements").deepCopy());
+                        }
+                        bindExecutionContext(task, input.path("context"));
                         var decision = preparation.check(c, record, action, id);
                         require(decision.path("allowed").asBoolean(), decision.path("reasons").toString());
                         var grant = scope.claimExecution(c, task, record, action);
                         task.put(cvStage ? "cvClaim" : "outboundClaim", grant.path("id").asText());
+                        if (task.path("channel").asText().equals("JOBSDB")) ((ObjectNode) task.path("jobsDbDispatch")).put("authorizationId", grant.path("id").asText());
                     }
                     task.put("state", "UNKNOWN");
                     if (chatTask(task)) task.put("claimedAttemptId", task.path("attemptId").asText());
@@ -596,8 +633,8 @@ public final class WorkbenchService {
         require(!fences.has("SUBMIT") && (phase.equals("LAUNCH") ? !fences.has("LAUNCH") : fences.has("LAUNCH")), "阶段已完成或缺少本次 launch 确认，不授权 replay");
         if (phase.equals("SUBMIT")) require(fences.has("UPLOAD"), "最终提交前尚未确认 disclosure fence");
         if (task.path("channel").asText().equals("JOBSDB")) {
-            require(action.equals("APPLY") && task.path("answersConfirmed").asBoolean()
-                    && answersHash((ObjectNode) task.path("answers")).equals(task.path("answersSha256").asText()), "答案未确认或已变化");
+            require(action.equals("APPLY"), "JobsDB 仅允许 APPLY");
+            verifyJobsDbAnswers(c, task);
             var dispatch = task.path("jobsDbDispatch");
             for (String field : java.util.List.of("attemptId", "authorizationId", "jobId", "url", "resumeSha256", "answersSha256", "profileHash", "contactHash"))
                 require(dispatch.hasNonNull(field) && dispatch.path(field).equals(input.path("binding").path(field)), "worker 冻结输入绑定不符：" + field);

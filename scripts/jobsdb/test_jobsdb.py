@@ -114,6 +114,7 @@ class BrowserTests(unittest.TestCase):
         self.success = '<h1>Your application has been submitted</h1>'
         self.review_document = ''
         self.submissions = self.external = 0
+        self.questions = []
     def tearDown(self): self.context.close()
     def route(self, route):
         from urllib.parse import urlsplit
@@ -203,17 +204,19 @@ class BrowserTests(unittest.TestCase):
     def single_task(self, data):
         import hashlib
         resume = data/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
-        return {'kind':'JOBSDB_SINGLE_APPLY', 'taskId':'attempt-1', 'attemptId':'attempt-1', 'authorizationId':'auth-1',
+        return {'kind':'JOBSDB_SINGLE_APPLY', 'taskId':'attempt-1', 'attemptId':'attempt-1',
                 'executionResourceId':'resource-1', 'stage':'APPLY', 'token':'current-credential', 'jobId':'12345678',
                 'url':self.url, 'resumePath':str(resume), 'resumeSha256':hashlib.sha256(resume.read_bytes()).hexdigest(),
                 'answers':{}, 'answersSha256':hashlib.sha256(b'{}').hexdigest(), 'profileHash':jobsdb.profile_fingerprint(data),
                 'contactHash':'b'*64, 'jdSha256':'e'*64, 'resultPath':str(data/'result.json')}
 
     def single_browser(self, task, *, observer=True):
-        page = self.page
+        page, questions = self.page, self.questions
         class FixtureBrowser:
             def solve(self, _): return None
             def run(self, url, action): page.goto(url); return action(page)
+            def observe_role_requirements(self, page, task):
+                return {'jobId':task['jobId'], 'complete':True, 'questions':questions}
         browser = FixtureBrowser()
         if observer:
             browser.observe_execution_context = lambda page, task: {'jdSha256':task['jdSha256'], 'accountHash':'c'*64, 'sessionHash':'d'*64}
@@ -232,13 +235,20 @@ class BrowserTests(unittest.TestCase):
                     claimed = db.execute('SELECT 1 FROM applications WHERE job_id=?', (task['jobId'],)).fetchone() is not None
                 calls.append((event['phase'], claimed))
                 assert self.headers['Authorization'] == 'Bearer ' + task['token']
-                assert event['binding']['authorizationId'] == task['authorizationId']
-                if event['phase'] == reject or event['context']['sessionHash'] != 'd'*64:
+                if event['phase'] != 'CLAIM': assert event['binding']['authorizationId'] == task['authorizationId']
+                unknown = event['phase'] == 'CLAIM' and any(q['name'] not in task['answers'] for q in event['roleRequirements']['questions'])
+                if event['phase'] == reject or event['context']['sessionHash'] != 'd'*64 or unknown:
                     self.send_response(409); self.end_headers(); return
-                ack = {'id':task['taskId'], 'state':'UNKNOWN', 'validatedPermission':{
-                    'taskId':task['taskId'], 'attemptId':task['attemptId'], 'authorizationId':task['authorizationId'],
-                    'executionResourceId':task['executionResourceId'], 'action':'APPLY', 'phase':event['phase'], 'status':'CONFIRMED'}}
-                if wrong_ack: ack['validatedPermission']['attemptId'] = 'stale-attempt'
+                if event['phase'] == 'CLAIM':
+                    assert event['type']=='SUBMITTING' and event['roleRequirements']['complete']
+                    ack = {'id':task['taskId'], 'attemptId':task['attemptId'], 'state':'UNKNOWN', 'outboundClaim':'auth-1',
+                           'executionResourceId':task['executionResourceId'], 'jobsDbDispatch':dict(event['binding'], authorizationId='auth-1')}
+                    if wrong_ack: ack['attemptId'] = 'stale-attempt'
+                else:
+                    ack = {'id':task['taskId'], 'state':'UNKNOWN', 'validatedPermission':{
+                        'taskId':task['taskId'], 'attemptId':task['attemptId'], 'authorizationId':task['authorizationId'],
+                        'executionResourceId':task['executionResourceId'], 'action':'APPLY', 'phase':event['phase'], 'status':'CONFIRMED'}}
+                    if wrong_ack: ack['validatedPermission']['attemptId'] = 'stale-attempt'
                 self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(ack).encode())
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         task['callbackUrl'] = f'http://127.0.0.1:{server.server_port}/api/workbench/tasks/{task["attemptId"]}/agent-event'
@@ -265,7 +275,7 @@ class BrowserTests(unittest.TestCase):
             with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp) as calls:
                 self.assertEqual(0, jobsdb.run_single(task, self.single_browser(task), store, tmp))
                 self.assertEqual([('UNKNOWN',)], uploaded_with_claim, 'Actual fixture upload must observe the already-durable original ledger claim')
-                self.assertEqual(('LAUNCH', False), calls[0])
+                self.assertEqual([('CLAIM', False), ('LAUNCH', False)], calls[:2], 'Complete question check must precede task and native claims')
                 self.assertTrue(all(claimed for phase, claimed in calls if phase in ('UPLOAD', 'SUBMIT')), 'Permanent native claim must precede any disclosure')
                 self.assertEqual('SUBMIT', calls[-1][0])
                 payload = json.loads(result.read_text())
@@ -287,16 +297,16 @@ class BrowserTests(unittest.TestCase):
         import json
         self.review_document = '<p>English_abcd.docx</p>'
         self.detail = '<h1>Engineer</h1><a href="/job/12345678/apply/review">Quick apply</a>'
-        for phase in ('LAUNCH', 'UPLOAD', 'SUBMIT'):
+        for phase in ('CLAIM', 'LAUNCH', 'UPLOAD', 'SUBMIT'):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
                 data = Path(tmp); task = self.single_task(data)
                 with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data, reject=phase) as calls:
                     self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, data))
-                    self.assertEqual(phase != 'LAUNCH', store.contains('12345678'))
+                    self.assertEqual(phase in ('UPLOAD', 'SUBMIT'), store.contains('12345678'))
                     self.assertEqual(phase, calls[-1][0])
                     self.assertEqual(0, self.submissions)
                 payload = json.loads(Path(task['resultPath']).read_text())
-                self.assertEqual('STOPPED_BEFORE_EFFECT' if phase == 'LAUNCH' else 'UNKNOWN', payload['status'])
+                self.assertEqual('STOPPED_BEFORE_EFFECT' if phase == 'CLAIM' else 'UNKNOWN', payload['status'])
 
     def test_question_change_autosave_is_fenced_before_modifying_answers(self):
         import hashlib, json
@@ -326,19 +336,36 @@ class BrowserTests(unittest.TestCase):
                     self.assertFalse(store.contains('12345678'))
                     self.assertEqual(0 if missing_observer else 1, len(calls))
                     self.assertEqual(0, self.submissions)
-                self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads(Path(task['resultPath']).read_text())['status'])
+                self.assertEqual('STOPPED_BEFORE_EFFECT' if missing_observer else 'UNKNOWN', json.loads(Path(task['resultPath']).read_text())['status'])
 
-    def test_single_apply_unknown_question_keeps_pre_disclosure_claim_unknown(self):
+    def test_single_apply_unknown_question_is_rejected_before_any_claim_or_disclosure(self):
         import hashlib, json, tempfile
         self.start = """<select name="questionnaire.salary"><option value="">Choose</option><option value="20">$20K</option></select>
         <button onclick="location.href='/job/12345678/apply/review'">Continue</button>"""
+        self.questions = [{'name':'questionnaire.salary','label':'Expected salary?','type':'select','options':['$20K'],'required':True}]
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp); task = self.single_task(tmp); result = Path(task['resultPath'])
-            with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp):
+            with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp) as calls:
                 self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, tmp))
-                self.assertEqual('UNKNOWN', json.loads(result.read_text())['status'])
-                self.assertTrue(store.contains('12345678'))
+                self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads(result.read_text())['status'])
+                self.assertFalse(store.contains('12345678'))
+                self.assertEqual([('CLAIM', False)], calls, 'Rejected question validation never acknowledges a stage claim')
+                self.assertEqual(self.url, self.page.url, 'Question preflight must not enter Quick apply')
                 self.assertEqual(0, self.submissions)
+
+    def test_unavailable_or_incomplete_question_observation_never_requests_permission(self):
+        import json
+        for mutation in ('MISSING', 'INCOMPLETE', 'WRONG_JOB'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                data=Path(tmp); task=self.single_task(data); browser=self.single_browser(task)
+                if mutation=='MISSING': browser.observe_role_requirements=None
+                else: browser.observe_role_requirements=lambda page, task: {'complete':mutation!='INCOMPLETE','jobId':'other' if mutation=='WRONG_JOB' else task['jobId'],'questions':[]}
+                with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data) as calls:
+                    self.assertEqual(2, jobsdb.run_single(task, browser, store, data))
+                    self.assertEqual([], calls)
+                    self.assertFalse(store.contains(task['jobId']))
+                self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads(Path(task['resultPath']).read_text())['status'])
+                self.assertEqual(self.url, self.page.url)
 
     def test_automatic_unknown_question_never_submits(self):
         self.start='<input name="questionnaire.unknown"><button>Continue</button>'

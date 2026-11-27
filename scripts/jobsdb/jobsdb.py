@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from urllib.parse import urljoin, urlencode, urlsplit
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / '.jobsdb'
@@ -515,8 +516,8 @@ def load_single(source):
     task = source if isinstance(source, dict) else json.loads(Path(source).read_text())
     if task.get('kind') != 'JOBSDB_SINGLE_APPLY': raise ValueError('Expected a frozen JobsDB single-job task')
     attempt, authorization = task.get('attemptId'), task.get('authorizationId')
-    if not isinstance(attempt, str) or not attempt or not isinstance(authorization, str) or not authorization:
-        raise ValueError('Missing attempt or authorization identity')
+    if not isinstance(attempt, str) or not attempt or authorization is not None and (not isinstance(authorization, str) or not authorization):
+        raise ValueError('Missing attempt or invalid authorization identity')
     url = task.get('url'); job = job_id(url)
     resume = Path(task['resumePath']).expanduser().resolve()
     if not resume.is_file(): raise ValueError('Frozen resume file is missing')
@@ -540,7 +541,7 @@ def profile_fingerprint(data):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def single_permission(task, phase, context):
+def single_permission(task, phase, context, requirements=None):
     """Require a fresh, attributed acknowledgement; neither an ID nor an old HTTP 200 is permission."""
     import urllib.request
     endpoint = urlsplit(task.get('callbackUrl', ''))
@@ -554,11 +555,24 @@ def single_permission(task, phase, context):
     fields = ('attemptId', 'authorizationId', 'jobId', 'url', 'resumeSha256', 'answersSha256', 'profileHash', 'contactHash')
     payload = {'type':'VALIDATE', 'action':'APPLY', 'phase':phase, 'message':'JobsDB fresh ' + phase + ' fence',
                'binding':{key:task.get(key) for key in fields}, 'context':context}
+    if phase == 'CLAIM':
+        payload.update(type='SUBMITTING', roleRequirements=requirements)
+        payload['binding'].update({key:task.get(key) for key in ('taskId','stage','executionResourceId','answersSource')})
     request = urllib.request.Request(task['callbackUrl'], json.dumps(payload).encode(),
               headers={'Content-Type':'application/json', 'Authorization':'Bearer ' + task['token']})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(request, timeout=10) as response:
         acknowledged = json.load(response)
+    if phase == 'CLAIM':
+        claim = acknowledged.get('outboundClaim')
+        dispatch = acknowledged.get('jobsDbDispatch', {})
+        if (acknowledged.get('id') != task['taskId'] or acknowledged.get('attemptId') != task['attemptId']
+                or acknowledged.get('state') != 'UNKNOWN' or not isinstance(claim, str) or not claim
+                or acknowledged.get('executionResourceId') != task['executionResourceId']
+                or dispatch.get('authorizationId') != claim
+                or any(dispatch.get(key) != value for key, value in payload['binding'].items() if key != 'authorizationId')):
+            raise ValueError('Unconfirmed or misbound question-checked stage claim')
+        return claim
     expected = {'taskId':task['taskId'], 'attemptId':task['attemptId'], 'authorizationId':task['authorizationId'],
                 'executionResourceId':task.get('executionResourceId'), 'action':'APPLY', 'phase':phase, 'status':'CONFIRMED'}
     if (acknowledged.get('id') != task['taskId'] or acknowledged.get('state') != 'UNKNOWN'
@@ -570,7 +584,7 @@ def run_single(task, browser, store, data):
     """One frozen, workbench-approved JobsDB application. No batch, prompts, reruns or answer inference."""
     task, job, resume, answers, result = load_single(task)
     payload = {
-        'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': task['attemptId'], 'authorizationId': task['authorizationId'],
+        'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': task['attemptId'], 'authorizationId': task.get('authorizationId', ''),
         'jobId': job, 'url': task['url'], 'resumeSha256': task['resumeSha256'],
         'answersSha256': task['answersSha256'], 'profileHash': task.get('profileHash', ''),
         'contactHash': task.get('contactHash', ''), 'status': 'RUNNING', 'startedAt': time.time(),
@@ -589,30 +603,50 @@ def run_single(task, browser, store, data):
             or not task.get('callbackUrl') or not task.get('token') or not task.get('executionResourceId')):
         payload.update(status='STOPPED_BEFORE_EFFECT', reason='Missing confirmed task/stage permission'); save(); return 2
     def action(page):
-        flow = Flow(page, task['url'], browser.solve)
-        claimed = False
-        def validate(phase):
-            load_single(task)  # Frozen bytes/answers must still match, not merely at process startup.
-            if profile_fingerprint(data) != task.get('profileHash'):
-                raise ValueError('Profile/session association changed')
+        claimed = claim_requested = False
+        def observed_context():
             observer = getattr(browser, 'observe_execution_context', None)
             if observer is None:
                 raise ValueError('CAPABILITY_UNVERIFIED: no verified read-only JD/account/session observer')
             context = observer(page, task)
             if not isinstance(context, dict): raise ValueError('Missing observed JD/account/session binding')
-            single_permission(task, phase, context)
+            return context
+        def validate(phase):
+            load_single(task)  # Frozen bytes/answers must still match, not merely at process startup.
+            if profile_fingerprint(data) != task.get('profileHash'):
+                raise ValueError('Profile/session association changed')
+            single_permission(task, phase, observed_context())
         try:
+            # Never enter Quick apply or upload just to discover questions. A complete, same-job
+            # read-only observation is checked against the frozen approval by the existing claim owner.
+            observer = getattr(browser, 'observe_role_requirements', None)
+            if observer is None:
+                raise ValueError('CAPABILITY_UNVERIFIED: no verified read-only role-requirements observer')
+            requirements = observer(page, task)
+            if (not isinstance(requirements, dict) or requirements.get('complete') is not True
+                    or requirements.get('jobId') != job or not isinstance(requirements.get('questions'), list)):
+                raise ValueError('Incomplete or misbound role-requirements; no claim/effect')
+            load_single(task)
+            if profile_fingerprint(data) != task.get('profileHash'): raise ValueError('Profile/session association changed')
+            context = observed_context()
+            claim_requested = True
+            task['authorizationId'] = single_permission(task, 'CLAIM', context, requirements)
+            claimed = True
+            payload.update(authorizationId=task['authorizationId'], status='UNKNOWN', reason='task stage claimed; no receipt yet'); save()
             validate('LAUNCH')
             # Workbench claim is already durable. The independent permanent platform claim MUST
             # precede upload/profile disclosure; either crash window remains UNKNOWN, never replayable.
             if not store.claim(job):
                 payload.update(status='SKIPPED', reason='already claimed or previously attempted'); save(); return
-            claimed = True
             payload.update(status='UNKNOWN', claimedAt=time.time(), reason='platform claim before disclosure; no receipt yet'); save()
             validate('UPLOAD')
+            flow = Flow(page, task['url'], browser.solve)
             state = flow.prepare_automatic(resume, answers, before_disclosure=lambda: validate('UPLOAD'))
         except Exception as exc:
-            payload.update(status='UNKNOWN' if claimed else 'STOPPED_BEFORE_EFFECT', reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
+            # An explicit rejected claim is known unsent. Lost/misbound acknowledgements can hide
+            # a durable task claim, so neither this worker nor the workbench may grant a replay.
+            uncertain = claimed or claim_requested and not (isinstance(exc, HTTPError) and 400 <= exc.code < 500)
+            payload.update(status='UNKNOWN' if uncertain else 'STOPPED_BEFORE_EFFECT', reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
         payload['reason'] = flow.reason
         if state != 'REVIEW':
             login = not on_site(page.url) or re.search(r'/(?:login|sign-in|signin|auth)(?:/|\?|$)', page.url, re.I)

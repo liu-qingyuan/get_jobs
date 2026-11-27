@@ -58,7 +58,8 @@ class WorkbenchCycleContractHttpTest {
     void idle(WorkbenchRunner runner) {
         await().atMost(Duration.ofSeconds(20)).until(() -> !runner.runtime().path("busy").asBoolean());
     }
-    ObjectNode setup(MockMvc http, String channel) throws Exception {
+    ObjectNode setup(MockMvc http, String channel) throws Exception { return setup(http, channel, null); }
+    ObjectNode setup(MockMvc http, String channel, ObjectNode bank) throws Exception {
         boolean boss = channel.equals("BOSS");
         String region = boss ? "MAINLAND" : "HK";
         String host = boss ? "www.zhipin.com" : channel.equals("JOBSDB") ? "hk.jobsdb.com" : "www.offertoday.com";
@@ -90,6 +91,7 @@ class WorkbenchCycleContractHttpTest {
         scope.putArray("resumeIds").add(resume.path("id").asText()); scope.putArray("contactFactIds").add(contact.path("id").asText());
         scope.putArray("actions").add("DISCOVER").add("MATCH").add("PREPARE").add("APPLY").add("CONTACT").add("SEND_CV");
         scope.putObject("budgets").put("candidates", 20).put("seconds", 300).put("modelTokens", 10000).put("outbound", 10);
+        if (bank != null) scope.set("jobsDbAnswerBank", bank);
         post(http, "/scope", scope);
         var input = json.createObjectNode().put("scopeVersion", 1).put("maxPages", 1).put("jobsPerPage", 1)
                 .put("secondsPerPage", 3).put("secondsPerBatch", 3).put("modelTokensPerCandidate", 50).put("secondsPerJob", 10);
@@ -136,8 +138,42 @@ class WorkbenchCycleContractHttpTest {
                             ack=json.load(response)['validatedPermission']
                             assert ack['taskId']==b['taskId'] and ack['authorizationId']==b['authorizationId']
                             assert ack['executionResourceId']==b['executionResourceId'] and ack['phase']==phase
-                    validate('LAUNCH')
                     data=pathlib.Path(sys.argv[4]); data.mkdir(parents=True,exist_ok=True)
+                    if scenario.startswith('QUESTIONS_'):
+                        from jobsdb import run_single
+                        class Browser:
+                            def solve(self,page): pass
+                            def run(self,url,action): return action(None)
+                            def observe_execution_context(self,page,task):
+                                return {'jdSha256':task['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}
+                            def observe_role_requirements(self,page,task):
+                                question=dict(task['answerBank']['entries'][0],required=True)
+                                result={'jobId':task['jobId'],'complete':True,'questions':[question]}
+                                if scenario=='QUESTIONS_UNKNOWN': question['name']='questionnaire.unknown'
+                                elif scenario=='QUESTIONS_LABEL': question['label']='Different question'
+                                elif scenario=='QUESTIONS_TYPE': question['type']='radio'
+                                elif scenario=='QUESTIONS_OPTIONS': question['options']=['Changed option']
+                                elif scenario=='QUESTIONS_AMBIGUOUS': question['options']+=question['options']
+                                elif scenario=='QUESTIONS_INCOMPLETE': result['complete']=False
+                                elif scenario=='QUESTIONS_JOB': result['jobId']='99999999'
+                                return result
+                        browser=Browser()
+                        if scenario=='QUESTIONS_NO_OBSERVER': browser.observe_role_requirements=None
+                        with Store(data/'applications.db') as ledger: run_single(b,browser,ledger,data)
+                        sys.exit(0)
+                    if 'answerBank' in b:
+                        assert hashlib.sha256(json.dumps(b['answerBank']['entries'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()==b['answersSource']['sha256']
+                    questions=[dict(e,required=True) for e in b.get('answerBank',{}).get('entries',[])]
+                    if 'answerBank' not in b:
+                        questions=[{'name':name,'label':'Synthetic question','type':'checkbox' if isinstance(value,list) else 'select',
+                            'options':value if isinstance(value,list) else [value],'required':True} for name,value in b['answers'].items()]
+                    event={'type':'SUBMITTING','action':'APPLY','message':'Questions checked before stage claim','binding':b,
+                        'roleRequirements':{'jobId':b['jobId'],'complete':True,'questions':questions},
+                        'context':{'jdSha256':b['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}}
+                    req=urllib.request.Request(b['callbackUrl'],json.dumps(event).encode(),
+                        headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
+                    with opener.open(req,timeout=5) as response: b['authorizationId']=json.load(response)['outboundClaim']
+                    validate('LAUNCH')
                     with Store(data/'applications.db') as ledger:
                         assert ledger.claim(b['jobId']), 'Permanent native claim vetoes duplicate effects'
                         validate('UPLOAD'); validate('SUBMIT')
@@ -312,15 +348,150 @@ class WorkbenchCycleContractHttpTest {
         } finally { callback.stop(0); }
     }
 
+    ObjectNode answerBank() {
+        var bank = json.createObjectNode().put("confirmed", true);
+        var entry = bank.putArray("entries").addObject().put("name", "questionnaire.experience")
+                .put("label", "Which project have you completed?").put("type", "select").put("value", "Synthetic confirmed answer");
+        entry.putArray("options").add("Synthetic confirmed answer").add("None");
+        return bank;
+    }
+
+    @Test
+    void missingScopeBankRejectsFreshApplyCycleBeforeAnyModelOrWorkerAndIgnoresGlobalAnswers() throws Exception {
+        var service = service("JOBSDB", List.of("must-not-start-worker"));
+        try (var runner = new WorkbenchRunner(service, List.of("must-not-start-model", "{taskFile}"), List.of(),
+                List.of("must-not-start-reader"), null, "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); var input = setup(http, "JOBSDB");
+            Files.createDirectories(root.resolve("empty-ledger"));
+            Files.writeString(root.resolve("empty-ledger/answers.json"), "{\"questionnaire.experience\":\"legacy not approved\"}");
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/cycles")
+                    .contentType("application/json").content(input.toString())).andExpect(status().isConflict());
+            var state = state(http);
+            assertTrue(state.at("/candidates/runs").isEmpty());
+            assertTrue(state.at("/workflow/cycles").isEmpty());
+            assertTrue(state.path("tasks").isEmpty());
+            assertEquals(0, state.at("/scope/usage/modelTokens").asInt());
+            assertEquals(0, state.at("/scope/usage/outbound").asInt());
+            assertFalse(Files.exists(service.store.root.resolve("runs")));
+        }
+    }
+
+    @Test
+    void freshJobsDbCycleFreezesTheConfirmedScopeBankWithoutPerJobApproval() throws Exception {
+        var prefix = fake(); var service = service("JOBSDB", prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            post(http, "/cycles", setup(http, "JOBSDB", answerBank())); idle(runner);
+            var state = state(http);
+            assertEquals(1, state.path("tasks").size(), state::toPrettyString);
+            var task = state.at("/tasks/0");
+            assertEquals("SUBMITTED", task.path("state").asText(), task::toPrettyString);
+            assertEquals(task.path("id"), task.path("attemptId"));
+            assertEquals("Synthetic confirmed answer", task.at("/answers/questionnaire.experience").asText());
+            assertEquals("SCOPE_ANSWER_BANK", task.at("/answersSource/kind").asText());
+            assertEquals(1, task.at("/answersSource/scopeVersion").asInt());
+            assertEquals(state.at("/scope/current/jobsDbAnswerBank/sha256"), task.at("/answersSource/sha256"));
+            assertEquals(state.at("/scope/current/jobsDbAnswerBank/version"), task.at("/answersSource/version"));
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
+            assertTrue(state.path("jobsdbAttempts").isEmpty());
+        } finally { callback.stop(0); }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"UNKNOWN", "LABEL", "TYPE", "OPTIONS", "AMBIGUOUS", "INCOMPLETE", "JOB", "NO_OBSERVER"})
+    void unknownRequiredQuestionKeepsTheFrozenTaskButNoStageOrNativeClaimOrEffect(String mutation) throws Exception {
+        Files.writeString(root.resolve("scenario"), "QUESTIONS_" + mutation);
+        var prefix = fake(); var service = service("JOBSDB", prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            post(http, "/cycles", setup(http, "JOBSDB", answerBank())); idle(runner);
+            var state = state(http); var task = state.at("/tasks/0");
+            assertEquals(1, state.path("tasks").size(), state::toPrettyString);
+            assertEquals("NEEDS_INPUT", task.path("state").asText(), task::toPrettyString);
+            assertFalse(task.has("outboundClaim"));
+            assertEquals(0, state.at("/scope/usage/outbound").asInt());
+            assertEquals(0, state.at("/platforms/jobsdbHistory").size());
+            assertFalse(Files.exists(root.resolve("effects")));
+            assertEquals("SCOPE_ANSWER_BANK", task.at("/answersSource/kind").asText());
+        } finally { callback.stop(0); }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"UNCONFIRMED", "DUPLICATE_NAME", "AMBIGUOUS_OPTION", "UNAVAILABLE_VALUE", "UNSUPPORTED_TYPE"})
+    void unconfirmedOrConflictingScopeBanksAreRejectedWithoutReplacingTheScopeOrLaunchingWork(String mutation) throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, List.of("must-not-launch", "{taskFile}"), "http://127.0.0.1:1", 10)) {
+            var http = http(service, runner); setup(http, "JOBSDB");
+            var bank = answerBank(); var entry = (ObjectNode) bank.path("entries").get(0);
+            switch (mutation) {
+                case "UNCONFIRMED" -> bank.put("confirmed", false);
+                case "DUPLICATE_NAME" -> bank.withArray("entries").add(entry.deepCopy().put("value", "None"));
+                case "AMBIGUOUS_OPTION" -> entry.withArray("options").add("None");
+                case "UNAVAILABLE_VALUE" -> entry.put("value", "Not approved");
+                case "UNSUPPORTED_TYPE" -> entry.put("type", "text");
+            }
+            var scope = ((ObjectNode) state(http).at("/scope/current")).deepCopy().put("expectedVersion", 1);
+            scope.set("jobsDbAnswerBank", bank);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/scope")
+                    .contentType("application/json").content(scope.toString())).andExpect(status().is4xxClientError());
+            var state = state(http);
+            assertEquals(1, state.at("/scope/current/version").asInt());
+            assertFalse(state.at("/scope/current").has("jobsDbAnswerBank"));
+            assertTrue(state.path("tasks").isEmpty());
+            assertTrue(state.at("/workflow/cycles").isEmpty());
+            assertEquals(0, state.at("/scope/usage/modelTokens").asInt());
+            assertEquals(0, state.at("/scope/usage/outbound").asInt());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void restartPreservesTheSameTaskAndFrozenSourceRatherThanAdoptingNewAnswers(boolean changeScope) throws Exception {
+        Files.writeString(root.resolve("scenario"), "QUESTIONS_UNKNOWN");
+        var prefix = fake(); var service = service("JOBSDB", prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        JsonNode frozen; String cycleId;
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            cycleId = post(http, "/cycles", setup(http, "JOBSDB", answerBank())).path("id").asText(); idle(runner);
+            frozen = state(http).at("/tasks/0");
+            assertEquals("NEEDS_INPUT", frozen.path("state").asText());
+        } finally { callback.stop(0); }
+        Files.delete(root.resolve("scenario")); callback = callback(callbackHttp);
+        var recovered = service("JOBSDB", prefix);
+        try (var runner = runner(recovered, prefix, callback)) {
+            var http = http(recovered, runner); callbackHttp.set(http);
+            if (changeScope) {
+                var scope = ((ObjectNode) state(http).at("/scope/current")).deepCopy().put("expectedVersion", 1);
+                ((ObjectNode) scope.at("/jobsDbAnswerBank/entries/0")).put("value", "None");
+                post(http, "/scope", scope);
+            }
+            post(http, "/cycles/" + cycleId + "/resume", json.createObjectNode().put("scopeVersion", changeScope ? 2 : 1)); idle(runner);
+            var state = state(http); var task = state.at("/tasks/0");
+            assertEquals(1, state.path("tasks").size());
+            assertEquals(frozen.path("id"), task.path("id"));
+            for (String field : List.of("answersSource", "answersSha256", "answerBank", "answers")) assertEquals(frozen.path(field), task.path(field), field);
+            assertEquals(changeScope ? "NEEDS_INPUT" : "SUBMITTED", task.path("state").asText(), state::toPrettyString);
+            assertEquals(changeScope ? 0 : 1, state.at("/scope/usage/outbound").asInt());
+            assertEquals(!changeScope, Files.exists(root.resolve("effects")));
+        } finally { callback.stop(0); }
+    }
+
     @Test
     void injectedJobsDbEffectUsesConfirmedAnswersRealTaskAndOriginalLedger() throws Exception {
         var prefix = fake(); var service = service("JOBSDB", prefix);
         var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
         try (var runner = runner(service, prefix, callback)) {
             var http = http(service, runner); callbackHttp.set(http);
-            post(http, "/cycles", setup(http, "JOBSDB")); idle(runner);
+            var discovery = setup(http, "JOBSDB");
+            post(http, "/candidates/discover", discovery);
+            var batch = json.createObjectNode().put("scopeVersion", 1).put("secondsPerBatch", 3).put("modelTokensPerCandidate", 50);
+            post(http, "/candidates/match", batch); post(http, "/candidates/prepare", batch);
             var before = state(http);
-            assertTrue(before.path("tasks").isEmpty(), "The effect cannot invent confirmed answers for a fresh cycle");
+            assertTrue(before.path("tasks").isEmpty(), "Explicit preparation cannot create a task or invent confirmed answers");
             var pkg = before.at("/preparations/packages/0");
             var input = json.createObjectNode().put("scopeVersion", 1).put("preparationId", pkg.path("id").asText())
                     .put("candidateId", pkg.path("candidateId").asText()).put("answersConfirmed", true);
@@ -349,7 +520,7 @@ class WorkbenchCycleContractHttpTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"JOBSDB", "BOSS", "OFFERTODAY"})
+    @ValueSource(strings = {"BOSS", "OFFERTODAY"})
     void matchCyclesPreserveCapabilityStopsRatherThanInventingPlatformSupport(String channel) throws Exception {
         var service = service(); var prefix = fake(); var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
         try (var runner = runner(service, prefix, callback)) {
@@ -364,12 +535,12 @@ class WorkbenchCycleContractHttpTest {
                 assertOneAttemptAndClaimPerStage(state, "SUBMITTED");
                 assertEquals("COMPLETED", state.at("/workflow/cycles/0/status").asText());
             } else {
-                // These are visible blockers for #34, not substitutes for its three-platform success AC.
+                // A Boss production capability stop is not a substitute for three-platform success AC.
                 assertEquals("POLICY_APPROVED", state.at("/preparations/packages/0/status").asText(), state::toPrettyString);
                 assertTrue(state.path("tasks").isEmpty(), state::toPrettyString);
                 assertEquals("EXCEPTION", state.at("/workflow/cycles/0/status").asText());
                 assertTrue(state.at("/workflow/cycles/0/entries/0/reason").asText()
-                        .contains(channel.equals("JOBSDB") ? "冻结已确认答案" : "Boss 外发能力待核实"));
+                        .contains("Boss 外发能力待核实"));
                 assertEquals(0, state.at("/scope/usage/outbound").asInt());
                 assertFalse(Files.exists(root.resolve("effects")));
             }

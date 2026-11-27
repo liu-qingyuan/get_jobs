@@ -366,8 +366,9 @@ public final class WorkbenchRunner implements AutoCloseable {
                         .put("contactHash", WorkbenchService.hash(snapshot.path("contactFacts").toString().getBytes(StandardCharsets.UTF_8)))
                         .put("resultPath", resultFile.toString());
                 dispatch.set("answers", task.path("answers").deepCopy());
-                var claim = service.agentEvent(id, service.json.createObjectNode().put("type", "SUBMITTING").put("action", "APPLY").put("message", "JobsDB worker 启动前登记同一 task 的 APPLY claim"), token);
-                dispatch.put("authorizationId", claim.path("outboundClaim").asText());
+                dispatch.set("answersSource", task.path("answersSource").deepCopy());
+                if (task.has("answerBank")) dispatch.set("answerBank", task.path("answerBank").deepCopy());
+                // Launch reserves resources only. The worker must check all required questions before requesting APPLY claim.
                 service.store.write(c -> {
                     var current = service.store.get(c, "task", id);
                     current.set("jobsDbDispatch", dispatch.deepCopy());
