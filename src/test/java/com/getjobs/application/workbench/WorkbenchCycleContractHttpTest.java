@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.web.servlet.MockMvc;
@@ -102,7 +103,8 @@ class WorkbenchCycleContractHttpTest {
     WorkbenchCandidates.Reader bossReader() {
         return bundle -> {
             var result = json.createObjectNode();
-            result.putArray("jobs").addObject().put("url", "https://www.zhipin.com/job_detail/synthetic-python.html")
+            result.putArray("jobs").addObject().put("url", "https://www.zhipin.com/job_detail/synthetic-python.html"
+                            + (Files.exists(root.resolve("alias")) ? "?utm_source=alias" : ""))
                     .put("title", "Python engineer").put("company", "Synthetic Boss").put("description", JD).put("descriptionComplete", true);
             return result;
         };
@@ -139,6 +141,11 @@ class WorkbenchCycleContractHttpTest {
                             assert ack['taskId']==b['taskId'] and ack['authorizationId']==b['authorizationId']
                             assert ack['executionResourceId']==b['executionResourceId'] and ack['phase']==phase
                     data=pathlib.Path(sys.argv[4]); data.mkdir(parents=True,exist_ok=True)
+                    if scenario=='VERIFY':
+                        req=urllib.request.Request(b['callbackUrl'],json.dumps({'type':'NEEDS_INPUT','message':'Synthetic verification checkpoint'}).encode(),
+                            headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
+                        with opener.open(req,timeout=5) as response: assert json.load(response)['state']=='NEEDS_INPUT'
+                        sys.exit(0)
                     if scenario.startswith('QUESTIONS_'):
                         from jobsdb import run_single
                         class Browser:
@@ -182,8 +189,13 @@ class WorkbenchCycleContractHttpTest {
                         with (root/'effects').open('a') as log:
                             log.write(json.dumps({'taskId':b['taskId'],'attemptId':b['attemptId'],'action':'APPLY',
                                 'claimId':b['authorizationId'],'nativeClaimed':ledger.contains(b['jobId'])})+'\\n')
+                        if (root/'hold').exists():
+                            (root/'held').write_text(b['taskId'])
+                            while not (root/'release').exists(): time.sleep(0.02)
+                        if scenario=='UNKNOWN': sys.exit(0)
                         receipt={k:b[k] for k in ('attemptId','authorizationId','jobId','url','resumeSha256','answersSha256','profileHash','contactHash')}
                         receipt.update(status='SUBMITTED',receipt={'url':b['url']+'/apply/success','textSha256':'a'*64})
+                        if scenario=='MISBOUND_RECEIPT': receipt['attemptId']='another-attempt'
                         json.dump(receipt,open(b['resultPath'],'w')); ledger.finish(b['jobId'],'SUBMITTED')
                 elif b.get('task',{}).get('kind')=='RESUME':
                     assert sys.argv[1]!='run', 'Drafts retain the generic executor protocol'
@@ -211,6 +223,7 @@ class WorkbenchCycleContractHttpTest {
                     if scenario=='VERIFY':
                         report('NEEDS_INPUT'); sys.exit(0)
                     common={'jobId':t['platformJobId'],'attemptId':t['id'],'conversationId':context['conversationId'],'proof':'Synthetic fresh history only'}
+                    if scenario=='MISBOUND_RECEIPT': common['attemptId']='another-attempt'
                     for action in ('CONTACT','SEND_CV'):
                         ack=report('SUBMITTING',action)
                         claim=ack['outboundClaim' if action=='CONTACT' else 'cvClaim']
@@ -256,8 +269,27 @@ class WorkbenchCycleContractHttpTest {
         assertEquals(expectedState, task.path("state").asText(), task::toPrettyString);
         assertFalse(task.path("events").toString().contains("用户批准此岗位"));
         assertEquals(state.at("/resumes/0/sha256"), task.at("/snapshot/resume/sha256"));
-        assertEquals(2, state.at("/scope/usage/outbound").asInt());
+        assertTrue(state.path("jobsdbAttempts").isEmpty(), "No second attempt owner");
         var effects = Files.readAllLines(root.resolve("effects"));
+        if (task.path("channel").asText().equals("JOBSDB")) {
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
+            assertEquals(1, effects.size(), "Exactly one APPLY under the original native claim");
+            var effect = json.readTree(effects.getFirst());
+            assertEquals(task.path("id"), effect.path("taskId"));
+            assertEquals(task.path("attemptId"), effect.path("attemptId"));
+            assertEquals("APPLY", effect.path("action").asText());
+            assertFalse(effect.path("claimId").asText().isEmpty());
+            assertEquals(task.path("outboundClaim"), effect.path("claimId"));
+            assertTrue(effect.path("nativeClaimed").asBoolean(), "Original Store claims before any fake effect");
+            assertEquals(1, state.at("/platforms/jobsdbHistory").size());
+            assertEquals("12345678", state.at("/platforms/jobsdbHistory/0/id").asText());
+            assertEquals(expectedState, state.at("/platforms/jobsdbHistory/0/status").asText());
+            assertEquals(expectedState.equals("SUBMITTED"), task.has("receipt"));
+            assertEquals("SCOPE_ANSWER_BANK", task.at("/answersSource/kind").asText());
+            assertEquals(state.at("/scope/current/jobsDbAnswerBank/sha256"), task.at("/answersSource/sha256"));
+            return;
+        }
+        assertEquals(2, state.at("/scope/usage/outbound").asInt());
         assertEquals(2, effects.size(), "Exactly one CONTACT and one SEND_CV, never two application attempts");
         for (int i = 0; i < effects.size(); i++) {
             var effect = json.readTree(effects.get(i));
@@ -277,14 +309,14 @@ class WorkbenchCycleContractHttpTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"BOSS", "OFFERTODAY"})
-    void injectedChatEffectStillUsesRealPolicyTaskResourcesAndStageClaims(String channel) throws Exception {
+    @ValueSource(strings = {"JOBSDB", "BOSS", "OFFERTODAY"})
+    void injectedPlatformEffectStillUsesRealPolicyTaskResourcesAndStageClaims(String channel) throws Exception {
         var prefix = fake();
         var service = service(channel, prefix);
         var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
         try (var runner = runner(service, prefix, callback)) {
             var http = http(service, runner); callbackHttp.set(http);
-            post(http, "/cycles", setup(http, channel)); idle(runner);
+            post(http, "/cycles", setup(http, channel, channel.equals("JOBSDB") ? answerBank() : null)); idle(runner);
             var state = state(http);
             assertOneAttemptAndClaimPerStage(state, "SUBMITTED");
             assertEquals(channel, state.at("/tasks/0/channel").asText());
@@ -292,6 +324,7 @@ class WorkbenchCycleContractHttpTest {
             assertEquals(1, state.at("/scope/authorizations").findValues("executionResourceId").stream().distinct().count());
             assertTrue(state.at("/tasks/0/executionLimits/seconds").asLong() > 0);
             assertFalse(state.at("/runtime/bossOutboundSupported").asBoolean(), "A fake is not production support");
+            assertFalse(state.at("/runtime/jobsDbProductionVerified").asBoolean());
         } finally { callback.stop(0); }
         if (channel.equals("BOSS")) {
             var production = service();
@@ -548,15 +581,63 @@ class WorkbenchCycleContractHttpTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SUBMITTED", "UNKNOWN"})
-    void offerTodayConcurrentStartsAndAliasCyclesNeverReplayStagesEvenAfterRestart(String outcome) throws Exception {
-        Files.writeString(root.resolve("scenario"), outcome); Files.writeString(root.resolve("hold"), "hold after CONTACT");
-        var service = service(); var prefix = fake(); var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+    @ValueSource(strings = {"JOBSDB", "BOSS", "OFFERTODAY"})
+    void misboundReceiptCannotCompleteTheTaskOrAuthorizeAnotherStage(String channel) throws Exception {
+        Files.writeString(root.resolve("scenario"), "MISBOUND_RECEIPT");
+        var prefix = fake(); var service = service(channel, prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        ObjectNode input; String taskId;
+        try (var runner = runner(service, prefix, callback)) {
+            var http = http(service, runner); callbackHttp.set(http);
+            input = setup(http, channel, channel.equals("JOBSDB") ? answerBank() : null);
+            var cycle = post(http, "/cycles", input); idle(runner);
+            var before = state(http); var task = before.at("/tasks/0");
+            assertEquals(1, before.path("tasks").size(), before::toPrettyString);
+            assertEquals("UNKNOWN", task.path("state").asText(), task::toPrettyString);
+            taskId = task.path("id").asText();
+            assertEquals(task.path("id"), task.path("attemptId"));
+            assertFalse(task.has("receipt")); assertFalse(task.has("contactReceipt")); assertFalse(task.has("cvReceipt"));
+            assertFalse(task.has("cvClaim"), "A receipt for another attempt cannot authorize SEND_CV");
+            assertEquals(1, before.at("/scope/usage/outbound").asInt());
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size(), "Keep the first dispatch, never continue after a misbound receipt");
+            assertEquals("EXCEPTION", before.at("/workflow/cycles/0/status").asText());
+            post(http, "/cycles/" + cycle.path("id").asText() + "/resume", json.createObjectNode().put("scopeVersion", 1)); idle(runner);
+            var after = state(http);
+            assertEquals(task.path("id"), after.at("/tasks/0/id"));
+            assertEquals("UNKNOWN", after.at("/tasks/0/state").asText());
+            assertEquals(1, after.path("tasks").size());
+            assertEquals(1, after.at("/scope/usage/outbound").asInt());
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
+        } finally { callback.stop(0); }
+        callback = callback(callbackHttp);
+        var recovered = service(channel, prefix);
+        try (var runner = runner(recovered, prefix, callback)) {
+            var http = http(recovered, runner); callbackHttp.set(http);
+            Files.writeString(root.resolve("alias"), "rediscover the UNKNOWN task after restart");
+            post(http, "/cycles", input); idle(runner);
+            var state = state(http);
+            assertEquals(1, state.path("tasks").size());
+            assertEquals(taskId, state.at("/tasks/0/id").asText());
+            assertEquals(taskId, state.at("/workflow/cycles/1/entries/0/taskId").asText());
+            assertEquals("UNKNOWN", state.at("/tasks/0/state").asText());
+            assertFalse(state.at("/tasks/0").has("cvClaim"));
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
+        } finally { callback.stop(0); }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"JOBSDB,SUBMITTED", "BOSS,SUBMITTED", "OFFERTODAY,SUBMITTED", "JOBSDB,UNKNOWN", "BOSS,UNKNOWN", "OFFERTODAY,UNKNOWN"})
+    void concurrentStartsAndAliasCyclesNeverReplayStagesEvenAfterRestart(String channel, String outcome) throws Exception {
+        Files.writeString(root.resolve("scenario"), outcome); Files.writeString(root.resolve("hold"), "hold after first dispatch");
+        var prefix = fake(); var service = service(channel, prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
         ObjectNode input;
         String taskId;
         try (var runner = runner(service, prefix, callback);
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
-            var http = http(service, runner); callbackHttp.set(http); input = setup(http, "OFFERTODAY");
+            var http = http(service, runner); callbackHttp.set(http);
+            input = setup(http, channel, channel.equals("JOBSDB") ? answerBank() : null);
             post(http, "/cycles", input);
             await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("held")));
             taskId = Files.readString(root.resolve("held"));
@@ -576,9 +657,12 @@ class WorkbenchCycleContractHttpTest {
             assertEquals(1, state.at("/candidates/jobs").size());
         } finally { callback.stop(0); }
         callback = callback(callbackHttp);
-        var recovered = service();
+        var recovered = service(channel, prefix);
         try (var runner = runner(recovered, prefix, callback)) {
             var http = http(recovered, runner); callbackHttp.set(http);
+            assertOneAttemptAndClaimPerStage(state(http), outcome);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + taskId + "/start"))
+                    .andExpect(status().isConflict());
             post(http, "/cycles", input); idle(runner);
             var state = state(http); assertOneAttemptAndClaimPerStage(state, outcome);
             assertEquals(taskId, state.at("/workflow/cycles/2/entries/0/taskId").asText());
@@ -586,16 +670,18 @@ class WorkbenchCycleContractHttpTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"MISMATCH", "VERIFY"})
-    void mismatchAndVerificationCheckpointNeverObtainAnOutboundClaim(String scenario) throws Exception {
+    @CsvSource({"JOBSDB,MISMATCH", "BOSS,MISMATCH", "OFFERTODAY,MISMATCH", "JOBSDB,VERIFY", "BOSS,VERIFY", "OFFERTODAY,VERIFY"})
+    void mismatchAndVerificationCheckpointNeverObtainAnOutboundClaim(String channel, String scenario) throws Exception {
         Files.writeString(root.resolve("scenario"), scenario);
-        var service = service(); var prefix = fake(); var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
+        var prefix = fake(); var service = service(channel, prefix);
+        var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
         try (var runner = runner(service, prefix, callback)) {
             var http = http(service, runner); callbackHttp.set(http);
-            post(http, "/cycles", setup(http, "OFFERTODAY")); idle(runner);
+            post(http, "/cycles", setup(http, channel, channel.equals("JOBSDB") ? answerBank() : null)); idle(runner);
             var state = state(http);
-            assertFalse(Files.exists(root.resolve("effects")));
+            assertFalse(Files.exists(root.resolve("effects")), state::toPrettyString);
             assertEquals(0, state.at("/scope/usage/outbound").asInt());
+            assertEquals(0, state.at("/platforms/jobsdbHistory").size());
             assertEquals("EXCEPTION", state.at("/workflow/cycles/0/status").asText());
             if (scenario.equals("MISMATCH")) {
                 assertEquals("MISMATCH", state.at("/candidates/jobs/0/analysis/verdict").asText());

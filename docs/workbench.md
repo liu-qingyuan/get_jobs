@@ -126,7 +126,7 @@ bash gradlew --no-daemon workbench --console=plain
 - `GET /api/workbench/preparations` 与 `/state.preparations` 返回 `{packages:[...]}`。每包包含 `id/candidateId/analysisId/scopeVersion/source=SCOPE_POLICY/rulesVersion/target/status/reason/proposal?/snapshot?`；`snapshot` 包含独立 `resume/facts/initialMessage/initialMessageSha256` 及 OfferToday 的 `contactVerified/contactFacts`。`target.resumeId` 是范围所选基线 ID；`snapshot.resume.id` 是实际冻结文件的版本 ID，派生时不同。后续授权按范围基线核验，实际执行只能使用该包冻结文件，不偷偷换回原文件。
 - `POST /api/workbench/preparations/{id}/check`：`{action:PREPARE|APPLY|CONTACT|SEND_CV}`，返回 `allowed/source/packageId/reasons`。每个不可逆阶段必须重核范围版本/有效期/暂停撤销、动作与变换许可、动作预算、当前匹配/事实/文件、原申请和策略已消费外发目标的防重；文件或事实变化不能重新授权 UNKNOWN。此入口只读、不创建授权、不扣量、不 claim/启动/发送，也不代表渠道执行能力可用。后续消费者须另行消费单阶段授权、确认 claim 并收集相应真实回执；不能复用核验响应作重试或下一阶段许可。`INVALIDATED` 是当前读取视图，历史核准依据不覆盖。局部八图以 `liu-qingyuan/get_jobs#13` 发布合同为准。
 
-#27 已接入普通本地 CV 原字节复用、显式选择歧义阻断与 verdict；#32 将策略 task 的建立集中到现有 WorkbenchService，`attemptId=taskId`，`/jobsdb/apply` 也委托到同一个 task/start/events/claim 生命周期，不再新写 `jobsdb_attempt`。旧桥接记录只读保留并参与全部任务入口防重，不迁成新 task；原 CLI 账本仍单独展示。尚未核实的 Boss 外发及缺少当前已确认答案库的 JobsDB 自动整轮继续阻断，不因迁移或配置而开放；权限/证据 fence 强化与三平台 fake `/cycles` 验收分别由 #33/#34 收口，真实平台验收仍属 #28–#30。Phase 1 新三平台路径只用原 CV，不消费岗位改写；既有高级 REORDER 行为不是 Phase 1 送达证明。
+#27 已接入普通本地 CV 原字节复用、显式选择歧义阻断与 verdict；#32 将策略 task 的建立集中到现有 WorkbenchService，`attemptId=taskId`，`/jobsdb/apply` 也委托到同一个 task/start/events/claim 生命周期，不再新写 `jobsdb_attempt`。旧桥接记录只读保留并参与全部任务入口防重，不迁成新 task；原 CLI 账本仍单独展示。尚未核实的 Boss 外发及缺少当前已确认答案库的 JobsDB 自动整轮继续阻断，不因迁移或配置而开放；#33 的权限/证据 fence 和 #36/#37/#38 的三平台 fake `/cycles` 合同只证明开发链路，真实平台验收仍属 #28–#30。Phase 1 新三平台路径只用原 CV，不消费岗位改写；既有高级 REORDER 行为不是 Phase 1 送达证明。
 
 ## 连续求职周期 Interface（#14）
 
@@ -242,6 +242,8 @@ OfferToday 使用独立的 `CONTACTED` 和 `CV_DELIVERED` 回执事件，其 evi
 ## 验证
 
 `WorkbenchCycleContractHttpTest` 通过包内组合构造器注入平台 effect 命令，仅替换 JobsDB/Boss/OfferToday 的外部动作；真实 scope/policy、匹配备料、task/attempt、资源预留和 stage claim 不替换。JobsDB fake 调用原 Python `Store`，在临时 `applications.db` 永久 claim 后才记录合成 effect。JobsDB fresh `/cycles` 正例使用真实 HTTP scope 答案库，不走逐岗批准；还覆盖缺库/冲突/未确认时无模型或 worker、动态未知/错题干/控件/选项/不完整/错岗或无 observer 时 task 存在但 0 claim/effect、重启恢复保持原来源及不采用旧全局答案。`/jobsdb/apply` 单岗别名、两个 fence 崩溃窗口与 UNKNOWN 防重仍单独验证，不借 fake 猜答。
+
+三平台 `/cycles` 合同均验证一个 task/attempt、无逐岗人工批准、真实资源与阶段计量：JobsDB 恰好一次 APPLY effect，Boss/OfferToday 各一次 CONTACT 和一次 SEND_CV（同一次申请，不是两次申请）。并发 task-start/cycle 返回 409；推广参数别名与重启复用原 task，SUBMITTED/UNKNOWN 均不重投。MISMATCH、验证 NEEDS_INPUT 和 JobsDB 未知必答题在首次 effect 前为零 claim/effect；已 dispatch 后缺失或错绑回执则保留 UNKNOWN 和已有 effect，不继续未获许可的阶段，恢复/别名/重启也不产生新 effect。错绑的联系回执不能授权 CV；JobsDB 原账本成功也不能替代同一 task 的有效绑定回执。
 
 替身脚本只在测试临时目录生成，不存在生产配置项、HTTP 路由或打包资源。默认 `WorkbenchConfiguration` 不注入替身，Boss 仍为 `CAPABILITY_UNVERIFIED`；测试组合的 CONTACT/SEND_CV 和回执沿用现有 task 合同，不证明真实平台能力或送达。
 
