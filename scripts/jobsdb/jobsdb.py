@@ -30,8 +30,20 @@ class Store:
     def __exit__(self, *_): self.db.close()
     def contains(self, id):
         return self.db.execute('SELECT 1 FROM applications WHERE job_id=?', (id,)).fetchone() is not None
-    def claim(self, id):
-        return self.db.execute("INSERT OR IGNORE INTO applications(job_id,status) VALUES(?,'UNKNOWN')", (id,)).rowcount == 1
+    def attempt(self, job):
+        return prior_attempt(self.db, job)
+
+    def claim(self, id, attempt_id=None, source='cli'):
+        self.db.execute('BEGIN IMMEDIATE')
+        with self.db:
+            inserted = self.db.execute("INSERT OR IGNORE INTO applications(job_id,status) VALUES(?,'UNKNOWN')", (id,)).rowcount
+            if inserted and attempt_id is not None:
+                self.db.execute("""CREATE TABLE IF NOT EXISTS claim_provenance (
+                    job_id TEXT PRIMARY KEY REFERENCES applications(job_id), attempt_id TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, source TEXT NOT NULL)""")
+                self.db.execute('INSERT INTO claim_provenance(job_id,attempt_id,source) VALUES(?,?,?)',
+                                (id, attempt_id, source))
+            return inserted == 1
     def finish(self, id, state):
         if state not in ('SUBMITTED', 'UNKNOWN'):
             raise ValueError('Only SUBMITTED or UNKNOWN may finish a claim')
@@ -39,6 +51,45 @@ class Store:
             raise ValueError('Missing prior claim')
     def history(self):
         return ['\t'.join(row) for row in self.db.execute('SELECT job_id,status,updated_at FROM applications ORDER BY updated_at DESC')]
+
+def prior_attempt(db, job):
+    row = db.execute('SELECT status,updated_at FROM applications WHERE job_id=?', (job,)).fetchone()
+    if row is None:
+        return None
+    prior = dict(jobId=job, status=row[0], updatedAt=row[1])
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='claim_provenance'").fetchone():
+        claim = db.execute('SELECT attempt_id,claimed_at,source FROM claim_provenance WHERE job_id=?', (job,)).fetchone()
+        if claim:
+            prior.update(zip(('attemptId', 'claimedAt', 'source'), claim))
+    return prior
+
+
+def history_json(data, job=None):
+    """A bounded read-only view for the workbench, including while the profile is locked."""
+    ledger = Path(data) / 'applications.db'
+    rows = []
+    try:
+        ledger.stat()
+    except FileNotFoundError:
+        return {'schemaVersion': 1, 'attempts': rows}
+    with sqlite3.connect(ledger.resolve().as_uri() + '?mode=ro', uri=True) as db:
+        db.execute('BEGIN')
+        ids = db.execute('SELECT job_id FROM applications ORDER BY updated_at DESC LIMIT 100') if job is None else [(job,)]
+        for (job_id_,) in ids:
+            prior = prior_attempt(db, job_id_)
+            if prior is None:
+                continue
+            row = dict(id=job_id_, status=prior['status'], updated_at=prior['updatedAt'],
+                       provenance='ORIGINAL_LEDGER', provenanceNote='原账本未记录执行入口或匹配结论；不补造 task 或 claim')
+            if 'attemptId' in prior:
+                row.update(attemptId=prior['attemptId'], claimedAt=prior['claimedAt'],
+                           provenance=prior['source'], provenanceNote='原生提交占位')
+            elif (job_id_, prior['status'], prior['updatedAt']) == ('96118137', 'SUBMITTED', '2026-11-26 11:49:02'):
+                # Only this exact historical receipt has documented provenance (ADR 0003).
+                row.update(provenance='DIRECT_FROZEN_CLI', provenanceNote='SUBMITTED in original ledger — direct frozen CLI run; workbench bridge not exercised。材料 MATERIAL_EXCEPTION 不是匹配 verdict；不补造 scope、package、预算或 claim。')
+            rows.append(row)
+    return {'schemaVersion': 1, 'attempts': rows}
+
 
 def on_site(url):
     u = urlsplit(url)
@@ -255,6 +306,9 @@ class Browser:
         """Read the complete questionnaire schema from an already-reached same-job page."""
         if not on_site(page.url) or not re.fullmatch(r'/job/' + job + r'/apply/.*', urlsplit(page.url).path):
             raise ValueError('CAPABILITY_UNVERIFIED: page is not the exact job application')
+        if page.locator('input:not([type=hidden]), select, textarea').evaluate_all(
+                "(es)=>es.some(e=>e.getClientRects().length && !e.disabled && !e.name.startsWith('questionnaire.'))"):
+            raise ValueError('Unidentified questionnaire control')
         names = page.locator('[name^="questionnaire."]').evaluate_all('(es)=>[...new Set(es.map(e=>e.name))]')
         questions = []
         for name in names:
@@ -262,12 +316,14 @@ class Browser:
             first = group.first
             tag = first.evaluate('(e)=>e.tagName.toLowerCase()')
             input_type = (first.get_attribute('type') or '').lower()
-            if tag == 'select':
+            if tag == 'select' and group.count() == 1:
                 kind = 'select'
-                options = first.locator('option').evaluate_all('(os)=>os.filter(o=>o.value && o.textContent.trim()).map(o=>o.textContent.trim())')
+                options = first.locator('option').evaluate_all('(os)=>os.filter(o=>o.value).map(o=>o.textContent.trim())')
             elif input_type in ('radio', 'checkbox'):
                 kind = input_type
-                options = group.evaluate_all('(es)=>es.map(e=>e.labels && e.labels.length ? e.labels[0].innerText.trim() : "").filter(Boolean)')
+                if any(item.get_attribute('type') != kind for item in group.all()):
+                    raise ValueError('Mixed question controls')
+                options = group.evaluate_all('(es)=>es.map(e=>e.labels && e.labels.length ? e.labels[0].innerText.trim() : "")')
             else:
                 raise ValueError('CAPABILITY_UNVERIFIED: unsupported role-requirements control')
             label = first.evaluate("""(e) => {
@@ -279,18 +335,16 @@ class Browser:
               return '';
             }""")
             if not label and kind == 'select' and first.evaluate('(e)=>e.labels && e.labels.length'):
-                label = first.evaluate('(e)=>e.labels[0].innerText.trim()')
-            if not label and kind in ('radio', 'checkbox'):
-                label = first.evaluate("""(e) => {
-                  let p = e.parentElement;
-                  while (p && p !== document.body) { const t = p.innerText ? p.innerText.trim() : ''; if (t && t.length < 1000) return t.split(String.fromCharCode(10))[0].trim(); p = p.parentElement; }
-                  return '';
+                label = first.evaluate("""e => {
+                    const label = e.labels[0].cloneNode(true);
+                    label.querySelectorAll('select').forEach(control => control.remove());
+                    return label.textContent.trim();
                 }""")
-            if not label or not options:
+            if not label or not options or not all(options) or len(set(options)) != len(options):
                 raise ValueError('CAPABILITY_UNVERIFIED: role-requirements question identity/options incomplete')
             required = first.evaluate("(e)=>!!e.required || e.getAttribute('aria-required')==='true' || !!(e.closest('fieldset') && e.closest('fieldset').querySelector('[required]'))")
             questions.append({'name': name, 'label': label, 'type': kind, 'required': bool(required),
-                              'options': list(dict.fromkeys(options))})
+                              'options': options})
         if not questions:
             raise ValueError('CAPABILITY_UNVERIFIED: no role-requirements questions')
         return {'complete': True, 'jobId': job, 'questions': questions}
@@ -300,27 +354,29 @@ class Browser:
         job = job_id(task['url'])
         if not on_site(page.url) or not re.fullmatch(r'/job/' + job + r'(?:/.*)?', urlsplit(page.url).path):
             raise ValueError('CAPABILITY_UNVERIFIED: execution page is not the exact job')
-        account = self.observed_account or self._visible_account(page)
-        if not account:
-            # The isolated profile root is the account association when the page does not expose
-            # the nav identity. Account/session hashes remain stable and scope-bound; never read
-            # credentials or cookies. A different profile path produces a different hash.
-            data = getattr(self, 'data', None)
-            if data is None:
+        # The form has no full JD. Read the canonical detail in a separate tab so
+        # a new check neither reuses the task digest nor navigates the form away.
+        detail = page.context.new_page()
+        try:
+            response = detail.goto(SITE + '/job/' + job, wait_until='domcontentloaded')
+            if (response is None or not response.ok or job_id(detail.url) != job or challenge(detail)):
+                raise ValueError('Live job detail is unavailable')
+            body = detail.locator('[data-automation="jobAdDetails"]')
+            body.first.wait_for(state='visible', timeout=5000)
+            jd = body.inner_text().strip() if body.count() == 1 else ''
+            if not jd:
+                raise ValueError('Live job description missing or ambiguous')
+            account = self._visible_account(detail)
+            if not account:
                 raise ValueError('CAPABILITY_UNVERIFIED: account identity is not observable')
-            account = 'profile:' + profile_fingerprint(data)
-        account_hash = hashlib.sha256(account.encode()).hexdigest()
-        data = getattr(self, 'data', None)
-        session_key = account + '|' + job + '|' + (profile_fingerprint(data) if data is not None else page.url)
-        session_hash = hashlib.sha256(session_key.encode()).hexdigest()
-        frozen = task.get('jdSha256')
-        if isinstance(frozen, str) and re.fullmatch(r'[a-f0-9]{64}', frozen):
-            return {'jdSha256': frozen, 'accountHash': account_hash, 'sessionHash': session_hash}
-        jd = task.get('description')
-        if not isinstance(jd, str) or not jd.strip():
-            raise ValueError('CAPABILITY_UNVERIFIED: frozen JD missing')
-        return {'jdSha256': hashlib.sha256(jd.encode()).hexdigest(),
-                'accountHash': account_hash, 'sessionHash': session_hash}
+            data = getattr(self, 'data', None)
+            session_key = account + '|' + job + '|' + (profile_fingerprint(data) if data is not None else detail.url)
+            account_hash = hashlib.sha256(account.encode()).hexdigest()
+            session_hash = hashlib.sha256(session_key.encode()).hexdigest()
+            return {'jdSha256': hashlib.sha256(jd.encode()).hexdigest(),
+                    'accountHash': account_hash, 'sessionHash': session_hash}
+        finally:
+            detail.close()
 
     def run(self, url, action, *, setup=None):
         result, errors = [], []
@@ -372,6 +428,8 @@ class Flow:
     def __init__(self, page, url, solve):
         self.page, self.id, self.solve = page, job_id(url), solve
         self.selected_attachment = None
+        self.application_receipt = None
+        self.received_attachment = None
     def active(self):
         return on_site(self.page.url) and re.fullmatch('/job/' + self.id + r'(?:/.*)?', urlsplit(self.page.url).path) is not None
     def application(self):
@@ -419,7 +477,13 @@ class Flow:
                 self.page.wait_for_function("before => location.href + '\\n' + document.body.innerText !== before", arg=before)
             except Exception: return 'NEEDS_INPUT'
         return 'NEEDS_INPUT'
-    def prepare_automatic(self, resume, answers, *, before_disclosure=None, on_questions=None):
+    def review_resume_id(self):
+        if not self.application() or not self.page.url.rstrip('/').endswith('/review'):
+            return None
+        checked = self.page.locator('input[type="radio"][name="document-select"]:checked')
+        return checked.get_attribute('value') if checked.count() == 1 else None
+
+    def prepare_automatic(self, resume, answers, *, before_upload=None, before_disclosure=None, on_questions=None):
         """Reach review using an immutable hash-named resume and explicit questionnaire answers.
 
         No stdin and no submission. Missing/unknown controls return NEEDS_INPUT.
@@ -443,17 +507,31 @@ class Flow:
             except Exception: return self._needs('Form not ready or session expired')
             if self.page.url.endswith('/role-requirements') and on_questions is not None:
                 on_questions(self.page)
-                on_questions = None
+
             if self.button('Submit application') is not None:
                 if self.invalid(): return self._needs('Review contains validation errors')
-                if not self.page.get_by_text(resume.name, exact=True).count():
+                if self.page.get_by_text(resume.name, exact=True).count() != 1:
                     return self._needs('Expected resume absent from review')
                 return 'REVIEW'
             upload = self.page.locator('#resume-fileFile')
             if upload.count():
                 choice = self.page.get_by_role('radio',name=resume.name,exact=True)
-                if choice.count() == 0:
-                    if before_disclosure: before_disclosure()
+                if before_upload:
+                    # Previously uploaded files may have the same approved filename.
+                    # Identify only the new radio created by this upload of checked bytes.
+                    selector = 'input[type="radio"][name="document-select"][value]'
+                    previous = self.page.locator(selector).evaluate_all('(es) => es.map(e => e.value)')
+                    new_choices = self.page.locator(selector + ''.join(':not([value=' + json.dumps(v) + '])' for v in previous))
+                    contents = before_upload()
+                    upload.set_input_files(dict(name=resume.name, mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer=contents))
+                    new_choices.first.wait_for(state='attached', timeout=30000)
+                    if new_choices.count() != 1:
+                        return self._needs('Ambiguous uploaded resume identity')
+                    resume_id = new_choices.get_attribute('value')
+                    if not resume_id or resume_id == resume.name:
+                        return self._needs('Uploaded resume has no independent platform identity')
+                    choice = choice.and_(self.page.locator(selector + '[value=' + json.dumps(resume_id) + ']'))
+                elif choice.count() == 0:
                     upload.set_input_files(str(resume))
                     try: choice.wait_for(timeout=30000)
                     except Exception: return self._needs('Resume upload not confirmed')
@@ -464,7 +542,11 @@ class Flow:
                 self.page.get_by_role('radio',name="Don't include a cover letter",exact=True).check()
                 if not choice.is_checked(): return self._needs('Resume selection failed')
                 self.selected_attachment = {'name': resume.name, 'selected': True}
+                if before_upload:
+                    self.selected_attachment['resumeId'] = resume_id
             elif self.page.locator('[name^="questionnaire."]').count():
+                if on_questions and not self.page.url.endswith('/role-requirements'):
+                    return self._needs('Unexpected questionnaire outside the verified step')
                 controls = self.page.locator('[name^="questionnaire."]')
                 names = controls.evaluate_all('(es)=>[...new Set(es.map(e=>e.name))]')
                 for name in names:
@@ -483,14 +565,19 @@ class Flow:
                             return self._needs('Unavailable checkbox answer: '+name)
                         for item,options in zip(items,labels):
                             if before_disclosure: before_disclosure()
-                            item.set_checked(any(label in options for label in selected))
+                            checked = any(label in options for label in selected)
+                            item.set_checked(checked)
+                            if item.is_checked() != checked: return self._needs('Checkbox selection changed')
                         continue
                     if not isinstance(answers[name],str):
                         return self._needs('Single-choice question requires one exact label: '+name)
                     if first.evaluate('(e)=>e.tagName') == 'SELECT':
                         if group.count()!=1: return self._needs('Ambiguous select: '+name)
                         if before_disclosure: before_disclosure()
-                        try: first.select_option(label=answers[name])
+                        try:
+                            first.select_option(label=answers[name])
+                            if first.locator('option:checked').inner_text().strip() != answers[name]:
+                                return self._needs('Selected answer changed')
                         except Exception: return self._needs('Unavailable answer: '+name)
                     elif first.get_attribute('type') == 'radio':
                         # A radio's associated label is the answer, not the question.
@@ -498,7 +585,19 @@ class Flow:
                         if len(matches)!=1: return self._needs('Unavailable radio answer: '+name)
                         if before_disclosure: before_disclosure()
                         matches[0].check()
+                        if not matches[0].is_checked(): return self._needs('Radio answer selection changed')
                     else: return self._needs('Unsupported question control: '+name)
+                if on_questions:
+                    # An answer can reveal another question or change an earlier selection.
+                    on_questions(self.page)
+                    for name in names:
+                        group = self.page.locator('[name='+json.dumps(name)+']')
+                        selected = group.evaluate_all("""els => els.flatMap(e =>
+                            e.tagName === 'SELECT' ? Array.from(e.selectedOptions, o => o.textContent.trim()) :
+                            e.checked ? [e.labels[0].innerText.trim()] : [])""")
+                        expected = answers[name] if isinstance(answers[name], list) else [answers[name]]
+                        if sorted(selected) != sorted(expected):
+                            return self._needs('Live selected answers differ from approval')
             elif not self.page.url.endswith('/profile'):
                 return self._needs('Unrecognised application step')
             if self.invalid(): return self._needs('Validation errors after filling')
@@ -549,12 +648,16 @@ def prompt(message):
     line = sys.stdin.readline()
     return line.strip() if line else None
 
+class ProfileBusy(RuntimeError):
+    pass
+
+
 @contextmanager
 def profile_lock(data):
     data.mkdir(parents=True, exist_ok=True)
     with (data / 'run.lock').open('a') as lock:
         try: fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: raise RuntimeError('Another JobsDB command is using this profile')
+        except BlockingIOError: raise ProfileBusy('Another JobsDB command is using this profile')
         yield
 
 def collect_jobs(page):
@@ -625,10 +728,14 @@ def _valid_single_answer(value):
 def load_single(source):
     task = source if isinstance(source, dict) else json.loads(Path(source).read_text())
     if task.get('kind') != 'JOBSDB_SINGLE_APPLY': raise ValueError('Expected a frozen JobsDB single-job task')
+    if type(task.get('schemaVersion')) is not int or task['schemaVersion'] != 1:
+        raise ValueError('Unsupported JobsDB single-task schema version')
     attempt, authorization = task.get('attemptId'), task.get('authorizationId')
     if not isinstance(attempt, str) or not attempt or authorization is not None and (not isinstance(authorization, str) or not authorization):
         raise ValueError('Missing attempt or invalid authorization identity')
     url = task.get('url'); job = job_id(url)
+    if task.get('jobId') != job:
+        raise ValueError('Task job ID differs from its canonical URL')
     resume = Path(task['resumePath']).expanduser().resolve()
     if not resume.is_file(): raise ValueError('Frozen resume file is missing')
     digest = hashlib.sha256(resume.read_bytes()).hexdigest()
@@ -652,7 +759,7 @@ def profile_fingerprint(data):
     return hashlib.sha256(str(Path(data).resolve()).encode()).hexdigest()
 
 
-def single_permission(task, phase, context, requirements=None):
+def single_permission(task, phase, context, requirements=None, attachment=None):
     """Require a fresh, attributed acknowledgement; neither an ID nor an old HTTP 200 is permission."""
     import urllib.request
     endpoint = urlsplit(task.get('callbackUrl', ''))
@@ -666,15 +773,17 @@ def single_permission(task, phase, context, requirements=None):
     fields = ('attemptId', 'authorizationId', 'jobId', 'url', 'resumeSha256', 'answersSha256', 'profileHash', 'contactHash')
     payload = {'type':'VALIDATE', 'action':'APPLY', 'phase':phase, 'message':'JobsDB fresh ' + phase + ' fence',
                'binding':{key:task.get(key) for key in fields}, 'context':context}
-    if phase == 'CLAIM':
-        payload.update(type='SUBMITTING', roleRequirements=requirements)
+    if requirements is not None:
+        payload.update(roleRequirements=requirements, attachment=attachment)
+    if phase == 'UPLOAD':
+        payload.update(type='SUBMITTING')
         payload['binding'].update({key:task.get(key) for key in ('taskId','stage','executionResourceId','answersSource')})
     request = urllib.request.Request(task['callbackUrl'], json.dumps(payload).encode(),
               headers={'Content-Type':'application/json', 'Authorization':'Bearer ' + task['token']})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(request, timeout=10) as response:
         acknowledged = json.load(response)
-    if phase == 'CLAIM':
+    if phase == 'UPLOAD':
         claim = acknowledged.get('outboundClaim')
         dispatch = acknowledged.get('jobsDbDispatch', {})
         if (acknowledged.get('id') != task['taskId'] or acknowledged.get('attemptId') != task['attemptId']
@@ -682,7 +791,7 @@ def single_permission(task, phase, context, requirements=None):
                 or acknowledged.get('executionResourceId') != task['executionResourceId']
                 or dispatch.get('authorizationId') != claim
                 or any(dispatch.get(key) != value for key, value in payload['binding'].items() if key != 'authorizationId')):
-            raise ValueError('Unconfirmed or misbound question-checked stage claim')
+            raise ValueError('Unconfirmed or misbound disclosure grant')
         return claim
     expected = {'taskId':task['taskId'], 'attemptId':task['attemptId'], 'authorizationId':task['authorizationId'],
                 'executionResourceId':task.get('executionResourceId'), 'action':'APPLY', 'phase':phase, 'status':'CONFIRMED'}
@@ -691,120 +800,184 @@ def single_permission(task, phase, context, requirements=None):
         raise ValueError('Unconfirmed or misbound task/stage permission')
 
 
+def record_received_attachment(result, application, received):
+    """Join the current native submit receipt to the application's received document.
+    Trusted platform readers supply these independent observations. The current
+    success-page reader has neither a native application ID nor a received-file record.
+    """
+    if not isinstance(application, dict) or not isinstance(received, dict):
+        return
+    if (result['status'] != 'SUBMITTED' or result['deliveryOutcome']['attemptDisposition'] != 'claimed'
+            or application.get('jobId') != result['jobId'] or application.get('attemptId') != result['attemptId']
+            or not isinstance(application.get('applicationId'), str) or not application['applicationId'].strip()
+            or not isinstance(received.get('receiptId'), str) or not received['receiptId'].strip()
+            or received.get('attemptId', result['attemptId']) != result['attemptId']
+            or received.get('applicationId') != application['applicationId']
+            or received.get('jobId') != result['jobId'] or received.get('sha256') != result['resumeSha256']):
+        return
+    result['receipt']['application'] = application
+    result['receipt']['receivedAttachment'] = received
+    result['deliveryOutcome']['cvActuallyReceived'] = 'confirmed with evidence'
+
+
 def run_single(task, browser, store, data):
     """One frozen, workbench-approved JobsDB application. No batch, prompts, reruns or answer inference."""
     task, job, resume, answers, result = load_single(task)
     payload = {
-        'kind': 'JOBSDB_SINGLE_APPLY', 'attemptId': task['attemptId'], 'authorizationId': task.get('authorizationId', ''),
+        'schemaVersion': 1, 'kind': 'JOBSDB_SINGLE_APPLY', 'taskId': task.get('taskId'), 'attemptId': task['attemptId'], 'authorizationId': task.get('authorizationId', ''),
         'jobId': job, 'url': task['url'], 'resumeSha256': task['resumeSha256'],
         'answersSha256': task['answersSha256'], 'profileHash': task.get('profileHash', ''),
         'contactHash': task.get('contactHash', ''), 'status': 'RUNNING', 'startedAt': time.time(),
     }
     def save():
         temporary = result.with_suffix(result.suffix + '.tmp')
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-        try: os.chmod(temporary, 0o600)
-        except OSError: pass
+        with temporary.open('w', encoding='utf-8') as output:
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
         temporary.replace(result)
+        directory = os.open(result.parent, os.O_RDONLY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    def step(name):
+        payload.setdefault('formSteps', []).append(name)
+        save()
+
+    outcome = payload['deliveryOutcome'] = {
+        'messageSent': 'not applicable', 'cvActuallyReceived': 'not attempted', 'attemptDisposition': 'blocked'}
+    prior = store.attempt(job)
+    if prior:
+        outcome['attemptDisposition'] = 'duplicate'
+        payload.update(status='SKIPPED', previousAttempt=prior, reason='previous submitted/unknown attempt')
+        # Reopening the same frozen file must not overwrite the original receipt.
+        if result.exists():
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            save()
+        return 0
+    if result.is_file():
+        previous = json.loads(result.read_text())
+        if (previous.get('attemptId') == task['attemptId'] and previous.get('jobId') == job
+                and previous.get('status') == 'UNKNOWN'):
+            payload.update(status='SKIPPED', reason='Possible disclosure on original attempt',
+                           previousAttempt={'attemptId': task['attemptId'], 'deliveryOutcome': previous.get('deliveryOutcome')})
+            outcome['attemptDisposition'] = 'duplicate'
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
     save()
-    if store.contains(job):
-        payload.update(status='SKIPPED', reason='previous submitted/unknown attempt'); save(); return 0
-    # Old direct frozen files are historical provenance, not renewable worker credentials.
     if (task.get('taskId') != task['attemptId'] or task.get('stage') != 'APPLY'
             or not task.get('callbackUrl') or not task.get('token') or not task.get('executionResourceId')):
-        payload.update(status='STOPPED_BEFORE_EFFECT', reason='Missing confirmed task/stage permission'); save(); return 2
+        payload.update(status='STOPPED_BEFORE_EFFECT', reason='Missing current task/stage permission')
+        save()
+        return 2
+
     def action(page):
-        claimed = claim_requested = False
-        attachment_context = {}
-        def observed_context():
-            observer = getattr(browser, 'observe_execution_context', None)
-            if observer is None:
-                raise ValueError('CAPABILITY_UNVERIFIED: no verified read-only JD/account/session observer')
-            context = observer(page, task)
-            if not isinstance(context, dict): raise ValueError('Missing observed JD/account/session binding')
-            if attachment_context: context['attachment'] = dict(attachment_context)
-            return context
-        def validate(phase):
-            load_single(task)  # Frozen bytes/answers must still match, not merely at process startup.
+        requirements = None
+        def context():
+            load_single(task)
             if profile_fingerprint(data) != task.get('profileHash'):
-                raise ValueError('Profile/session association changed')
-            single_permission(task, phase, observed_context())
+                raise ValueError('Profile association changed')
+            observed = browser.observe_execution_context(page, task)
+            if not observed.get('jdSha256') or observed['jdSha256'] != task.get('jdSha256'):
+                raise ValueError('Live job description differs from approval')
+            return observed
+
+        def before_upload():
+            if outcome['cvActuallyReceived'] != 'not attempted':
+                raise ValueError('Disclosure already reserved')
+            step('quick apply entered')
+            contents = resume.read_bytes()
+            if hashlib.sha256(contents).hexdigest() != task['resumeSha256']:
+                raise ValueError('Approved attachment changed')
+            observed = context()
+            # A lost acknowledgement can hide a committed disclosure reservation.
+            try:
+                task['authorizationId'] = single_permission(task, 'UPLOAD', observed)
+            except HTTPError as exc:
+                if 400 <= exc.code < 500:
+                    raise
+                outcome['cvActuallyReceived'] = 'unknown'
+                raise
+            except Exception:
+                outcome['cvActuallyReceived'] = 'unknown'
+                raise
+            outcome['cvActuallyReceived'] = 'unknown'
+            payload.update(status='UNKNOWN', authorizationId=task['authorizationId'], reason='Possible resume disclosure')
+            save()
+            return contents
+
+        def recheck():
+            if not task.get('authorizationId') or outcome['cvActuallyReceived'] != 'unknown':
+                raise ValueError('No disclosure reservation for this form')
+            single_permission(task, 'CHECK', context())
+
+        def on_questions(qpage):
+            nonlocal requirements
+            if not flow.selected_attachment:
+                raise ValueError('Missing selected attachment')
+            if requirements is None:
+                step('approved resume selected')
+            live = browser.read_role_requirements(qpage, job)
+            if requirements is not None:
+                if requirements != live:
+                    raise ValueError('Questionnaire changed after selecting answers')
+                recheck()
+                return
+            requirements = live
+            attachment = dict(flow.selected_attachment, sha256=task['resumeSha256'])
+            payload.update(observedRequirements=requirements, attachment=attachment)
+            step('questionnaire read')
+            single_permission(task, 'QUESTIONS', context(), requirements, attachment)
+
         try:
-            # B1 pre-submit observation: enter Quick Apply, select/upload the frozen CV and read
-            # the complete questionnaire. No final submit or native ledger claim happens before
-            # the workbench CLAIM accepts the observed questions and exact attachment binding.
-            visible = getattr(browser, '_visible_account', None)
-            if visible is not None:
-                browser.observed_account = getattr(browser, 'observed_account', None) or visible(page)
+            context()
             flow = Flow(page, task['url'], browser.solve)
-
-            def on_questions(qpage):
-                nonlocal claimed, claim_requested
-                reader = getattr(browser, 'read_role_requirements', None)
-                requirements = reader(qpage, job) if reader is not None else browser.observe_role_requirements(qpage, task)
-                if (not isinstance(requirements, dict) or requirements.get('complete') is not True
-                        or requirements.get('jobId') != job or not isinstance(requirements.get('questions'), list)):
-                    raise ValueError('Incomplete or misbound role-requirements; no claim/effect')
-                load_single(task)
-                if profile_fingerprint(data) != task.get('profileHash'):
-                    raise ValueError('Profile/session association changed')
-                if flow.selected_attachment:
-                    attachment_context.update(flow.selected_attachment)
-                    attachment_context['sha256'] = task['resumeSha256']
-                context = observed_context()
-                payload['observedRequirements'] = requirements
-                if attachment_context: payload['attachment'] = dict(attachment_context)
+            state = flow.prepare_automatic(resume, answers, before_upload=before_upload,
+                                           before_disclosure=recheck, on_questions=on_questions)
+            if state != 'REVIEW' or not requirements or not payload.get('attachment'):
+                raise ValueError(flow.reason or 'Missing complete questionnaire or approved attachment at review')
+            payload['reviewTextSha256'] = hashlib.sha256(page.locator('body').inner_text().encode()).hexdigest()
+            attachment = payload['attachment']
+            def verify_review_attachment():
+                observed = flow.review_resume_id()
+                if not observed or observed != attachment.get('resumeId'):
+                    raise ValueError('Review does not identify the uploaded approved resume')
+                attachment['reviewResumeId'] = observed
+            observed = context()
+            verify_review_attachment()
+            single_permission(task, 'CLAIM', observed, requirements, attachment)
+            verify_review_attachment()
+            step('questions and attachment approved at review')
+            if not store.claim(job, task['attemptId'], task.get('entry', 'cli')):
+                outcome['attemptDisposition'] = 'duplicate'
+                payload.update(status='SKIPPED', previousAttempt=store.attempt(job), reason='Concurrent native claim')
                 save()
-                claim_requested = True
-                task['authorizationId'] = single_permission(task, 'CLAIM', context, requirements)
-                claimed = True
-                payload.update(authorizationId=task['authorizationId'], status='UNKNOWN',
-                               reason='task stage claimed after pre-submit question/attachment check; no receipt yet'); save()
-                # Record the existing launch/disclosure fences before the native claim; the workbench
-                # still requires both before it accepts the final SUBMIT fence.
-                validate('LAUNCH')
-                # The original platform ledger is claimed only after the workbench accepted the
-                # observed questions/attachment and before the final submit. A crash stays UNKNOWN.
-                if not store.claim(job):
-                    payload.update(reason='already claimed or previously attempted'); save()
-                    raise ValueError('Original JobsDB ledger claim failed after workbench claim')
-                payload.update(status='UNKNOWN', claimedAt=time.time(),
-                               reason='platform claim after pre-submit check; no receipt yet'); save()
-                validate('UPLOAD')
-
-            state = flow.prepare_automatic(resume, answers, on_questions=on_questions)
+                return
+            outcome['attemptDisposition'] = 'claimed'
+            payload.update(claimedAt=store.attempt(job)['claimedAt'], reason='Native claim committed')
+            step('native claim committed')
+            single_permission(task, 'SUBMIT', context())
+            verify_review_attachment()
+            submitted = 'SUBMITTED' if flow.submit() == 'SUBMITTED' else 'UNKNOWN'
+            payload.update(status=submitted, finishedAt=time.time(), reason='')
+            payload['receipt'] = {'url': page.url, 'at': time.time(),
+                                  'textSha256': hashlib.sha256(page.locator('body').inner_text().encode()).hexdigest()}
+            record_received_attachment(payload, flow.application_receipt, flow.received_attachment)
+            # Keep the native claim UNKNOWN until the bound receipt survives a restart.
+            save()
+            store.finish(job, submitted)
+            return
         except Exception as exc:
-            # An explicit rejected claim is known unsent. Lost/misbound acknowledgements can hide
-            # a durable task claim, so neither this worker nor the workbench may grant a replay.
-            uncertain = claimed or claim_requested and not (isinstance(exc, HTTPError) and 400 <= exc.code < 500)
-            import traceback
-            traceback.print_exc()
-            payload.update(status='UNKNOWN' if uncertain else 'STOPPED_BEFORE_EFFECT',
-                           reason=(str(exc).splitlines() or ['form preparation failed'])[0]); save(); return
-        if not claimed:
-            payload.update(status='STOPPED_BEFORE_EFFECT', reason='No pre-submit question/attachment claim was performed'); save(); return
-        payload['reason'] = flow.reason
-        if state != 'REVIEW':
-            login = not on_site(page.url) or re.search(r'/(?:login|sign-in|signin|auth)(?:/|\?|$)', page.url, re.I)
-            payload.update(status='UNKNOWN',
-                           reason=flow.reason or ('Saved session requires login' if login else 'Form requires user input'))
-            save(); return
-        payload['reviewTextSha256'] = hashlib.sha256(page.locator('body').inner_text().encode()).hexdigest()
-        try:
-            validate('SUBMIT')
-            submitted = flow.submit()
-        except Exception as exc:
-            payload.update(status='UNKNOWN', reason=(str(exc).splitlines() or ['submit fence failed'])[0]); save(); return
-        submitted = 'SUBMITTED' if submitted == 'SUBMITTED' else 'UNKNOWN'
-        store.finish(job, submitted)
-        payload.update(status=submitted, finishedAt=time.time(), reason='')
-        try:
-            payload['receipt'] = {'url': page.url, 'textSha256': hashlib.sha256(page.locator('body').inner_text().encode()).hexdigest(), 'at': time.time()}
-        except Exception:
-            payload['receipt'] = {'url': page.url, 'at': time.time()}
+            payload.update(status='STOPPED_BEFORE_EFFECT' if outcome['cvActuallyReceived'] == 'not attempted' else 'UNKNOWN',
+                           reason=(str(exc).splitlines() or ['Form verification failed'])[0])
         save()
     try:
-        browser.run(task['url'], action)
+        if browser is None:
+            with Browser(data) as browser:
+                browser.run(task['url'], action)
+        else:
+            browser.run(task['url'], action)
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -819,15 +992,35 @@ def run_single(task, browser, store, data):
 def execute_single(task_file, data):
     data = Path(data)
     task = json.loads(Path(task_file).read_text())
-    with profile_lock(data), Store(data / 'applications.db') as store:
-        with Browser(data) as browser:
-            return run_single(task, browser, store, data)
+    source_file = os.environ.get('WORKBENCH_TASK_FILE')
+    task['entry'] = 'workbench' if source_file and Path(source_file).resolve() == Path(task_file).resolve() else 'cli'
+    try:
+        with profile_lock(data), Store(data / 'applications.db') as store:
+            return run_single(task, None, store, data)
+    except ProfileBusy:
+        # The lock holder owns the result file. A competing CLI only reports its
+        # observation on stdout and never opens the profile or overwrites evidence.
+        job = job_id(task['url'])
+        prior = None
+        ledger = data / 'applications.db'
+        if ledger.exists():
+            with sqlite3.connect(ledger.resolve().as_uri() + '?mode=ro', uri=True) as db:
+                prior = prior_attempt(db, job)
+        print(json.dumps({'schemaVersion': 1, 'kind': 'JOBSDB_SINGLE_APPLY', 'taskId': task.get('taskId'),
+                          'attemptId': task.get('attemptId'), 'status': 'SKIPPED' if prior else 'STOPPED_BEFORE_EFFECT', 'jobId': job,
+                          'previousAttempt': prior, 'deliveryOutcome': {'messageSent': 'not applicable',
+                          'cvActuallyReceived': 'not attempted', 'attemptDisposition': 'duplicate' if prior else 'blocked'}}))
+        return 0 if prior else 2
 
 
 def main(argv=None, *, supervise_resume_process=False):
     parser = argparse.ArgumentParser(description='JobsDB HK — isolated Scrapling + Chrome CLI; no Boss runtime')
     subs = parser.add_subparsers(dest='command', required=True)
-    for name in ('login','history','help'): subs.add_parser(name)
+    for name in ('login','help'): subs.add_parser(name)
+    history = subs.add_parser('history')
+    history.add_argument('--json', action='store_true')
+    history.add_argument('--data-dir', type=Path, default=DATA)
+    history.add_argument('--job-id')
     find = subs.add_parser('search')
     find.add_argument('keywords'); find.add_argument('pages', type=int, choices=range(1,6), nargs='?', default=1)
     for name in ('prepare','apply'):
@@ -844,6 +1037,9 @@ def main(argv=None, *, supervise_resume_process=False):
     resume_read.add_argument('task_file')
     resume_read.add_argument('--data-dir', required=True, type=Path)
     args = parser.parse_args(argv or ['help'])
+    if args.command == 'history' and args.json:
+        print(json.dumps(history_json(args.data_dir, args.job_id), ensure_ascii=False))
+        return 0
     if args.command == 'read-candidates':
         from workbench_read import execute
         return execute(args.task_file, args.data_dir)

@@ -52,7 +52,14 @@ export interface TaskEvent {
   at: string
 }
 
+export interface JobsDbOutcome {
+  messageSent: 'not applicable'
+  cvActuallyReceived: 'not attempted' | 'unknown' | 'confirmed with evidence'
+  attemptDisposition: 'blocked' | 'claimed' | 'duplicate'
+}
+
 export interface Task {
+  deliveryOutcome?: JobsDbOutcome
   id: string
   kind: TaskKind
   channel: Channel
@@ -260,7 +267,7 @@ export interface WorkbenchState {
   platforms: {
     bossUrl: string
     offerTodayUrl: string
-    jobsdbHistory: Array<{ id: string; status: string; updated_at: string; provenance: 'ORIGINAL_LEDGER' | 'DIRECT_FROZEN_CLI'; provenanceNote: string }>
+    jobsdbHistory: Array<{ id: string; status: string; updated_at: string; attemptId?: string; provenance: 'ORIGINAL_LEDGER' | 'DIRECT_FROZEN_CLI' | 'workbench' | 'cli'; provenanceNote: string }>
     jobsdbAvailable: boolean
     jobsdbError?: string
   }

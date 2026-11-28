@@ -24,6 +24,42 @@ class StoreTests(unittest.TestCase):
                 self.assertFalse(store.claim('456'))
                 self.assertIn('456\tUNKNOWN', '\n'.join(store.history()))
 
+    def test_controlled_claim_preserves_first_attempt_on_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'applications.db'
+            with jobsdb.Store(path) as store:
+                self.assertTrue(store.claim('123', 'attempt-1', 'workbench'))
+            with jobsdb.Store(path) as store:
+                self.assertFalse(store.claim('123', 'attempt-2', 'cli'))
+                prior = store.attempt('123')
+                self.assertEqual(('UNKNOWN', 'attempt-1', 'workbench'),
+                                 (prior['status'], prior['attemptId'], prior['source']))
+                self.assertTrue(prior['claimedAt'])
+
+    def test_provenance_failure_rolls_back_the_native_claim(self):
+        with tempfile.TemporaryDirectory() as tmp, jobsdb.Store(Path(tmp)/'applications.db') as store:
+            store.claim('100', 'first', 'cli')
+            store.db.execute("""CREATE TRIGGER reject_provenance BEFORE INSERT ON claim_provenance
+                                BEGIN SELECT RAISE(ABORT, 'fixture storage failure'); END""")
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.claim('101', 'second', 'workbench')
+            self.assertFalse(store.contains('101'))
+            self.assertEqual('first', store.attempt('100')['attemptId'])
+
+    def test_versioned_history_exact_lookup_includes_rows_outside_display_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            self.assertEqual({'schemaVersion': 1, 'attempts': []}, jobsdb.history_json(data))
+            self.assertFalse((data/'applications.db').exists())
+            with jobsdb.Store(data/'applications.db') as store:
+                store.claim('1', 'first', 'cli')
+                store.db.execute("UPDATE applications SET updated_at='2000-01-01' WHERE job_id='1'")
+                for job in range(2, 102):
+                    store.claim(str(job))
+            self.assertEqual(100, len(jobsdb.history_json(data)['attempts']))
+            prior, = jobsdb.history_json(data, '1')['attempts']
+            self.assertEqual(('UNKNOWN', 'cli', 'first'), (prior['status'], prior['provenance'], prior['attemptId']))
+
     def test_competing_claim_and_invalid_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'db'
@@ -38,7 +74,7 @@ class StoreTests(unittest.TestCase):
         import hashlib, json
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp); resume = data/'cv.docx'; resume.write_bytes(b'fixture')
-            task = {'kind':'JOBSDB_SINGLE_APPLY', 'attemptId':'unconfirmed', 'authorizationId':'not-empty',
+            task = {'schemaVersion':1, 'kind':'JOBSDB_SINGLE_APPLY', 'attemptId':'unconfirmed', 'jobId':'123', 'authorizationId':'not-empty',
                     'url':'https://hk.jobsdb.com/job/123', 'resumePath':str(resume),
                     'resumeSha256':hashlib.sha256(resume.read_bytes()).hexdigest(), 'answers':{},
                     'answersSha256':hashlib.sha256(b'{}').hexdigest(), 'resultPath':str(data/'result.json')}
@@ -109,7 +145,7 @@ class BrowserTests(unittest.TestCase):
         self.page.set_default_timeout(1500)
         self.page.set_default_navigation_timeout(3000)
         self.url = 'https://hk.jobsdb.com/job/12345678'
-        self.detail = '<li class="nav-figure">Qingyuan Liu</li><h1>Engineer</h1><a href="/job/12345678/apply/start">Quick apply</a>'
+        self.detail = '<li class="nav-figure">Qingyuan Liu</li><h1>Engineer</h1><div data-automation="jobAdDetails">Engineer JD</div><a href="/job/12345678/apply/start">Quick apply</a>'
         self.requirements = '''<fieldset><legend>Which right to work?</legend>
         <label><input type="radio" name="questionnaire.HK_Q_3217_V_4" value="a" required> IANG</label>
         <label><input type="radio" name="questionnaire.HK_Q_3217_V_4" value="b"> Citizen</label></fieldset>
@@ -118,8 +154,7 @@ class BrowserTests(unittest.TestCase):
         self.start = '<button onclick="location.href=\'/job/12345678/apply/review\'">Continue</button>'
         self.success = '<h1>Your application has been submitted</h1>'
         self.review_document = ''
-        self.submissions = self.external = 0
-        self.questions = []
+        self.uploads = self.submissions = self.external = 0
     def tearDown(self): self.context.close()
     def route(self, route):
         from urllib.parse import urlsplit
@@ -127,6 +162,10 @@ class BrowserTests(unittest.TestCase):
         path = urlsplit(url).path
         if not url.startswith('https://hk.jobsdb.com/'):
             self.external += 1; route.fulfill(body='External'); return
+        if path == '/fixture-upload':
+            self.uploads += 1
+            route.fulfill(body='fixture upload only')
+            return
         if path.endswith('/success'):
             self.submissions += 1; body = self.success
         elif path.endswith('/apply/role-requirements'):
@@ -155,7 +194,11 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(['IANG', 'Citizen'], by_name['questionnaire.HK_Q_3217_V_4']['options'])
         self.assertEqual('select', by_name['questionnaire.HK_Q_D3FEB']['type'])
         self.assertEqual(['No experience', '1 year'], by_name['questionnaire.HK_Q_D3FEB']['options'])
+        self.assertEqual('How many years?', by_name['questionnaire.HK_Q_D3FEB']['label'])
+        task['jdSha256'] = 'e'*64
         context = reader.observe_execution_context(self.page, task)
+        import hashlib
+        self.assertEqual(hashlib.sha256(b'Engineer JD').hexdigest(), context['jdSha256'])
         self.assertRegex(context['jdSha256'], r'^[a-f0-9]{64}$')
         self.assertRegex(context['accountHash'], r'^[a-f0-9]{64}$')
         self.assertRegex(context['sessionHash'], r'^[a-f0-9]{64}$')
@@ -241,35 +284,28 @@ class BrowserTests(unittest.TestCase):
     def single_task(self, data):
         import hashlib
         resume = data/'English_abcd.docx'; resume.write_bytes(b'frozen resume bytes')
-        return {'kind':'JOBSDB_SINGLE_APPLY', 'taskId':'attempt-1', 'attemptId':'attempt-1',
+        return {'schemaVersion':1, 'kind':'JOBSDB_SINGLE_APPLY', 'taskId':'attempt-1', 'attemptId':'attempt-1',
                 'executionResourceId':'resource-1', 'stage':'APPLY', 'token':'current-credential', 'jobId':'12345678',
                 'url':self.url, 'resumePath':str(resume), 'resumeSha256':hashlib.sha256(resume.read_bytes()).hexdigest(),
                 'answers':{}, 'answersSha256':hashlib.sha256(b'{}').hexdigest(), 'profileHash':jobsdb.profile_fingerprint(data),
-                'contactHash':'b'*64, 'jdSha256':'e'*64, 'resultPath':str(data/'result.json')}
+                'contactHash':'b'*64, 'jdSha256':hashlib.sha256(b'Engineer JD').hexdigest(), 'resultPath':str(data/'result.json')}
 
     def b1_upload_start(self):
         return """<input id="resume-fileFile" type="file" onchange="fetch('/fixture-upload',{method:'POST'}).then(()=>document.body.insertAdjacentHTML('afterbegin','<label><input type=radio name=document-select value=new>English_abcd.docx</label>'))">
         <label><input type="radio" name="coverLetter-method" value="none">Don't include a cover letter</label>
         <button onclick="if(document.querySelector('[value=new]').checked) location.href='/job/12345678/apply/role-requirements'">Continue</button>"""
 
-    def b1_questions(self):
-        return [
-            {'name':'questionnaire.HK_Q_3217_V_4','label':'Which right to work?','type':'radio','options':['IANG','Citizen'],'required':True},
-            {'name':'questionnaire.HK_Q_D3FEB','label':'How many years?','type':'select','options':['No experience','1 year'],'required':True}]
-
     def b1_answers(self):
         return {'questionnaire.HK_Q_3217_V_4':'IANG','questionnaire.HK_Q_D3FEB':'No experience'}
 
     def single_browser(self, task, *, observer=True):
-        page, questions = self.page, self.questions
-        class FixtureBrowser:
+        page = self.page
+        class FixtureBrowser(jobsdb.Browser):
             def solve(self, _): return None
             def run(self, url, action): page.goto(url); return action(page)
-            def observe_role_requirements(self, page, task):
-                return {'jobId':task['jobId'], 'complete':True, 'questions':questions}
-        browser = FixtureBrowser()
-        if observer:
-            browser.observe_execution_context = lambda page, task: {'jdSha256':task['jdSha256'], 'accountHash':'c'*64, 'sessionHash':'d'*64}
+        browser = FixtureBrowser(Path(task['resumePath']).parent)
+        if not observer:
+            browser.observe_execution_context = None
         return browser
 
     @contextmanager
@@ -285,12 +321,12 @@ class BrowserTests(unittest.TestCase):
                     claimed = db.execute('SELECT 1 FROM applications WHERE job_id=?', (task['jobId'],)).fetchone() is not None
                 calls.append((event['phase'], claimed))
                 assert self.headers['Authorization'] == 'Bearer ' + task['token']
-                if event['phase'] != 'CLAIM': assert event['binding']['authorizationId'] == task['authorizationId']
-                unknown = event['phase'] == 'CLAIM' and any(q['name'] not in task['answers'] for q in event['roleRequirements']['questions'])
-                if event['phase'] == reject or event['context']['sessionHash'] != 'd'*64 or unknown:
+                if event['phase'] != 'UPLOAD': assert event['binding']['authorizationId'] == task['authorizationId']
+                unknown = event['phase'] == 'QUESTIONS' and any(q['name'] not in task['answers'] for q in event['roleRequirements']['questions'])
+                if event['phase'] == reject or unknown:
                     self.send_response(409); self.end_headers(); return
-                if event['phase'] == 'CLAIM':
-                    assert event['type']=='SUBMITTING' and event['roleRequirements']['complete']
+                if event['phase'] == 'UPLOAD':
+                    assert event['type']=='SUBMITTING'
                     ack = {'id':task['taskId'], 'attemptId':task['attemptId'], 'state':'UNKNOWN', 'outboundClaim':'auth-1',
                            'executionResourceId':task['executionResourceId'], 'jobsDbDispatch':dict(event['binding'], authorizationId='auth-1')}
                     if wrong_ack: ack['attemptId'] = 'stale-attempt'
@@ -308,18 +344,12 @@ class BrowserTests(unittest.TestCase):
 
     def test_single_apply_freezes_bindings_claims_once_and_never_retries(self):
         import hashlib, json, tempfile
-        self.review_document = '<p>English_abcd.docx</p>'
-        self.start = """<input id="resume-fileFile" type="file" onchange="fetch('/fixture-upload',{method:'POST'}).then(()=>document.body.insertAdjacentHTML('afterbegin','<label><input type=radio name=document-select value=new>English_abcd.docx</label>'))">
-        <label><input type="radio" name="coverLetter-method" value="none">Don't include a cover letter</label>
-        <button onclick="if(document.querySelector('[value=new]').checked) location.href='/job/12345678/apply/role-requirements'">Continue</button>"""
+        self.review_document = '<label><input type="radio" name="document-select" value="new" checked>English_abcd.docx</label>'
+        self.start = self.b1_upload_start()
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp); task = self.single_task(tmp); result = Path(task['resultPath'])
-            task['answers'] = {'questionnaire.HK_Q_3217_V_4':'IANG','questionnaire.HK_Q_D3FEB':'No experience'}
-            import hashlib as _h, json as _j
-            task['answersSha256'] = _h.sha256(_j.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-            self.questions = [
-                {'name':'questionnaire.HK_Q_3217_V_4','label':'Which right to work?','type':'radio','options':['IANG','Citizen'],'required':True},
-                {'name':'questionnaire.HK_Q_D3FEB','label':'How many years?','type':'select','options':['No experience','1 year'],'required':True}]
+            task['answers'] = self.b1_answers()
+            task['answersSha256'] = hashlib.sha256(json.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             uploaded_with_claim = []
             def upload_route(route):
                 if route.request.url.endswith('/fixture-upload'):
@@ -331,10 +361,16 @@ class BrowserTests(unittest.TestCase):
             with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp) as calls:
                 self.assertEqual(0, jobsdb.run_single(task, self.single_browser(task), store, tmp))
                 self.assertEqual([None], uploaded_with_claim, 'B1 allows pre-submit upload before the native ledger claim')
-                self.assertEqual([('CLAIM', False)], calls[:1], 'Complete question check must precede the workbench claim')
+                self.assertEqual(('UPLOAD', False), calls[0])
+                self.assertLess(calls.index(('QUESTIONS', False)), calls.index(('CLAIM', False)))
+                self.assertEqual('unknown', json.loads(result.read_text())['deliveryOutcome']['cvActuallyReceived'])
                 self.assertTrue(all(claimed for phase, claimed in calls if phase == 'SUBMIT'), 'Native claim must precede final submit')
                 self.assertEqual('SUBMIT', calls[-1][0])
                 payload = json.loads(result.read_text())
+                self.assertEqual(['quick apply entered', 'approved resume selected', 'questionnaire read',
+                                  'questions and attachment approved at review', 'native claim committed'], payload['formSteps'])
+                self.assertEqual(1, payload['schemaVersion'])
+                self.assertEqual('new', payload['attachment']['reviewResumeId'])
                 self.assertEqual('SUBMITTED', payload['status'])
                 self.assertEqual('12345678', payload['jobId'])
                 self.assertEqual(task['resumeSha256'], payload['resumeSha256'])
@@ -349,12 +385,29 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual('SKIPPED', json.loads((tmp/'second.json').read_text())['status'])
                 self.assertEqual(1, self.submissions)
 
+    def test_new_job_uploads_approved_bytes_even_when_old_job_used_the_same_filename(self):
+        import hashlib, json
+        self.review_document = '<label><input type="radio" name="document-select" value="new" checked>English_abcd.docx</label>'
+        self.start = '<label><input type="radio" name="document-select" value="prior-job" checked>English_abcd.docx</label>' + self.b1_upload_start()
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            task = self.single_task(data)
+            task['answers'] = self.b1_answers()
+            task['answersSha256'] = hashlib.sha256(json.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data):
+                store.claim('12345677', 'old-job', 'cli')
+                store.finish('12345677', 'SUBMITTED')
+                self.assertEqual(0, jobsdb.run_single(task, self.single_browser(task), store, data))
+                self.assertEqual('SUBMITTED', store.attempt(task['jobId'])['status'])
+            receipt = json.loads(Path(task['resultPath']).read_text())
+            self.assertEqual('new', receipt['attachment']['reviewResumeId'])
+            self.assertEqual((1, 1), (self.uploads, self.submissions))
+
     def test_single_fences_reject_stale_permission_before_upload_or_final_click(self):
         import hashlib, json
-        self.review_document = '<p>English_abcd.docx</p>'
+        self.review_document = '<label><input type="radio" name="document-select" value="new" checked>English_abcd.docx</label>'
         self.start = self.b1_upload_start()
-        self.questions = self.b1_questions()
-        for phase in ('CLAIM', 'SUBMIT'):
+        for phase in ('UPLOAD', 'QUESTIONS', 'CLAIM', 'SUBMIT'):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
                 data = Path(tmp); task = self.single_task(data)
                 task['answers'] = self.b1_answers()
@@ -365,13 +418,12 @@ class BrowserTests(unittest.TestCase):
                     self.assertEqual(phase, calls[-1][0])
                     self.assertEqual(0, self.submissions)
                 payload = json.loads(Path(task['resultPath']).read_text())
-                self.assertEqual('STOPPED_BEFORE_EFFECT' if phase == 'CLAIM' else 'UNKNOWN', payload['status'])
+                self.assertEqual('STOPPED_BEFORE_EFFECT' if phase == 'UPLOAD' else 'UNKNOWN', payload['status'])
 
     def test_question_change_autosave_is_fenced_before_modifying_answers(self):
         import hashlib, json
         self.review_document = '<p>English_abcd.docx</p>'
         self.detail = '<a href="/job/12345678/apply/role-requirements">Quick apply</a>'
-        self.questions = self.b1_questions()
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp); task = self.single_task(data); task['answers'] = self.b1_answers()
             task['answersSha256'] = hashlib.sha256(json.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -385,50 +437,93 @@ class BrowserTests(unittest.TestCase):
                 self.assertIsNone(self.page.locator('body').get_attribute('data-answer-disclosed'), 'An onchange autosave must not disclose answers before a valid claim')
                 self.assertEqual(0, self.submissions)
 
-    def test_single_permission_requires_attributed_ack_and_verified_context_not_profile_metadata(self):
-        import hashlib, json
-        self.detail = '<a href="/job/12345678/apply/role-requirements">Quick apply</a>'
-        self.questions = self.b1_questions()
-        for missing_observer in (False, True):
-            with self.subTest(missing_observer=missing_observer), tempfile.TemporaryDirectory() as tmp:
-                data = Path(tmp); task = self.single_task(data); task['answers'] = self.b1_answers()
-                task['answersSha256'] = hashlib.sha256(json.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-                with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data, wrong_ack=True) as calls:
-                    self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task, observer=not missing_observer), store, data))
-                    self.assertFalse(store.contains('12345678'))
-                    self.assertEqual(0 if missing_observer else 1, len(calls))
-                    self.assertEqual(0, self.submissions)
-                self.assertEqual('STOPPED_BEFORE_EFFECT' if missing_observer else 'UNKNOWN', json.loads(Path(task['resultPath']).read_text())['status'])
-
-    def test_single_apply_unknown_question_is_rejected_before_any_claim_or_disclosure(self):
-        import json, tempfile
-        self.detail = '<a href="/job/12345678/apply/role-requirements">Quick apply</a>'
-        self.questions = self.b1_questions()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp); task = self.single_task(tmp); result = Path(task['resultPath'])
-            with jobsdb.Store(tmp/'applications.db') as store, self.permission_server(task, tmp) as calls:
-                self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, tmp))
-                self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads(result.read_text())['status'])
-                self.assertFalse(store.contains('12345678'))
-                self.assertEqual([('CLAIM', False)], calls, 'Rejected question validation never acknowledges a stage claim')
-                self.assertIn('/apply/role-requirements', self.page.url)
-                self.assertEqual(0, self.submissions)
-
-    def test_unavailable_or_incomplete_question_observation_never_requests_permission(self):
+    def test_same_job_changed_or_unreadable_jd_blocks_before_upload(self):
         import json
-        self.detail = '<a href="/job/12345678/apply/role-requirements">Quick apply</a>'
-        self.questions = self.b1_questions()
-        for mutation in ('MISSING', 'INCOMPLETE', 'WRONG_JOB'):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
-                data=Path(tmp); task=self.single_task(data); browser=self.single_browser(task)
-                if mutation=='MISSING': browser.observe_role_requirements=None
-                else: browser.observe_role_requirements=lambda page, task: {'complete':mutation!='INCOMPLETE','jobId':'other' if mutation=='WRONG_JOB' else task['jobId'],'questions':[]}
+        self.start = self.b1_upload_start()
+        original = self.detail
+        for replacement in ('Revised requirements', ''):
+            self.detail = original.replace('Engineer JD', replacement)
+            with self.subTest(jd=replacement), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp)
+                task = self.single_task(data)
                 with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data) as calls:
-                    self.assertEqual(2, jobsdb.run_single(task, browser, store, data))
+                    self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, data))
                     self.assertEqual([], calls)
                     self.assertFalse(store.contains(task['jobId']))
-                self.assertEqual('STOPPED_BEFORE_EFFECT', json.loads(Path(task['resultPath']).read_text())['status'])
-                self.assertIn('/apply/role-requirements', self.page.url)
+                result = json.loads(Path(task['resultPath']).read_text())
+                self.assertEqual(0, self.uploads)
+                self.assertEqual('not attempted', result['deliveryOutcome']['cvActuallyReceived'])
+                self.assertEqual(0, self.submissions)
+
+    def test_live_jd_changes_after_upload_before_claim(self):
+        import json
+        self.start = self.b1_upload_start()
+        def change_description(route):
+            self.detail = self.detail.replace('Engineer JD', 'Changed role')
+            self.route(route)
+        self.context.route('**/fixture-upload', change_description)
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            task = self.single_task(data)
+            with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data) as calls:
+                self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, data))
+                self.assertEqual([('UPLOAD', False)], calls)
+                self.assertFalse(store.contains(task['jobId']))
+            result = json.loads(Path(task['resultPath']).read_text())
+            self.assertEqual(('blocked', 'unknown'), (result['deliveryOutcome']['attemptDisposition'],
+                                                     result['deliveryOutcome']['cvActuallyReceived']))
+            self.assertEqual((1, 0), (self.uploads, self.submissions))
+
+    def test_unknown_question_after_upload_retains_disclosure(self):
+        import json
+        self.start = self.b1_upload_start()
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            task = self.single_task(data)
+            with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data) as calls:
+                self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, data))
+                self.assertIn(('QUESTIONS', False), calls)
+                self.assertNotIn(('CLAIM', False), calls)
+                self.assertFalse(store.contains(task['jobId']))
+            result = json.loads(Path(task['resultPath']).read_text())
+            self.assertEqual('UNKNOWN', result['status'])
+            self.assertEqual({'cvActuallyReceived':'unknown', 'messageSent':'not applicable', 'attemptDisposition':'blocked'},
+                             result['deliveryOutcome'])
+            self.assertEqual(0, self.submissions)
+
+    def test_changed_attachment_at_review_preserves_upload_without_native_claim(self):
+        import hashlib, json
+        self.start = self.b1_upload_start()
+        self.review_document = '<p>English_abcd.docx</p>'
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            task = self.single_task(data)
+            task['answers'] = self.b1_answers()
+            task['answersSha256'] = hashlib.sha256(json.dumps(task['answers'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data) as calls:
+                self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task), store, data))
+                self.assertIn(('QUESTIONS', False), calls)
+                self.assertFalse(store.contains(task['jobId']))
+                self.assertEqual(0, self.submissions)
+            result = json.loads(Path(task['resultPath']).read_text())
+            self.assertEqual(1, self.uploads)
+            self.assertEqual(('UNKNOWN', 'unknown', 'blocked'), (result['status'], result['deliveryOutcome']['cvActuallyReceived'],
+                                                               result['deliveryOutcome']['attemptDisposition']))
+
+    def test_unknown_or_misbound_upload_ack_never_authorizes_disclosure(self):
+        import json
+        self.start = self.b1_upload_start()
+        for missing in (False, True):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp)
+                task = self.single_task(data)
+                with jobsdb.Store(data/'applications.db') as store, self.permission_server(task, data, wrong_ack=True) as calls:
+                    self.assertEqual(2, jobsdb.run_single(task, self.single_browser(task, observer=not missing), store, data))
+                    self.assertEqual([] if missing else [('UPLOAD', False)], calls)
+                    self.assertFalse(store.contains(task['jobId']))
+                result = json.loads(Path(task['resultPath']).read_text())
+                self.assertEqual('STOPPED_BEFORE_EFFECT' if missing else 'UNKNOWN', result['status'])
+                self.assertEqual(0, self.submissions)
 
     def test_automatic_unknown_question_never_submits(self):
         self.start='<input name="questionnaire.unknown"><button>Continue</button>'

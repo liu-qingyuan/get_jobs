@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.*;
-import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.net.URI;
 import java.util.Set;
 
@@ -68,35 +71,52 @@ final class WorkbenchLegacy {
     ObjectNode platforms() {
         var result = json.createObjectNode().put("bossUrl", "/boss")
                 .put("jobsdbAvailable", Files.isExecutable(jobsdb.resolve("venv/bin/python")));
-        var history = json.createArrayNode();
-        if (Files.isRegularFile(jobsdb.resolve("applications.db"))) {
-            try (var c = openLedger(); var q = c.prepareStatement("SELECT job_id,status,updated_at FROM applications ORDER BY updated_at DESC LIMIT 100"); var rows = q.executeQuery()) {
-                while (rows.next()) {
-                    var row = json.createObjectNode().put("id", rows.getString(1)).put("status", rows.getString(2)).put("updated_at", rows.getString(3))
-                            .put("provenance", "ORIGINAL_LEDGER").put("provenanceNote", "原账本未记录执行入口或匹配结论；不补造 task 或 claim");
-                    // This exact historical row is documented in ADR 0003; a job ID alone is not provenance.
-                    if (row.path("id").asText().equals("96118137") && row.path("status").asText().equals("SUBMITTED")
-                            && row.path("updated_at").asText().equals("2026-11-26 11:49:02"))
-                        row.put("provenance", "DIRECT_FROZEN_CLI").put("provenanceNote", "SUBMITTED in original ledger — direct frozen CLI run; workbench bridge not exercised。材料 MATERIAL_EXCEPTION 不是匹配 verdict；不补造 scope、package、预算或 claim。");
-                    history.add(row);
-                }
-            } catch (Exception e) { result.put("jobsdbError", "JobsDB 历史不可读取，请检查原 CLI；未修改原账本"); }
+        try {
+            result.set("jobsdbHistory", history(null));
+        } catch (WorkbenchException e) {
+            result.putArray("jobsdbHistory");
+            result.put("jobsdbError", e.getMessage());
         }
-        result.set("jobsdbHistory", history);
         return result;
+    }
+
+    ObjectNode attempt(String jobId) {
+        var rows = history(jobId);
+        return rows.isEmpty() ? null : (ObjectNode) rows.get(0);
     }
 
     boolean attempted(String url) {
         URI uri = URI.create(url);
-        if (!"hk.jobsdb.com".equalsIgnoreCase(uri.getHost()) || !uri.getPath().matches("/job/[0-9]+/?") || !Files.exists(jobsdb.resolve("applications.db"))) return false;
-        String id = uri.getPath().replaceAll("^/job/|/$", "");
-        try (var c = openLedger(); var q = c.prepareStatement("SELECT 1 FROM applications WHERE job_id=?")) {
-            q.setString(1, id);
-            try (var rows = q.executeQuery()) { return rows.next(); }
-        } catch (Exception e) { throw new WorkbenchException(409, "无法核对 JobsDB 原账本，暂停此岗位以免重复投递"); }
+        if (!"hk.jobsdb.com".equalsIgnoreCase(uri.getHost()) || !uri.getPath().matches("/job/[0-9]+/?")) return false;
+        return attempt(JobsDbTarget.parse(url).id()) != null;
     }
 
-    private Connection openLedger() throws SQLException {
-        return DriverManager.getConnection("jdbc:sqlite:" + jobsdb.resolve("applications.db").toUri() + "?mode=ro");
+    private ArrayNode history(String jobId) {
+        if (Files.notExists(directory())) return json.createArrayNode();
+        // The history command uses only the Python standard library. It can read
+        // historical installations even when the browser runtime is unavailable.
+        var args = new ArrayList<>(List.of("python3", "scripts/jobsdb/jobsdb.py", "history",
+                "--json", "--data-dir", directory().toString()));
+        if (jobId != null) args.addAll(List.of("--job-id", jobId));
+        try (var reader = Executors.newVirtualThreadPerTaskExecutor()) {
+            var child = new ProcessBuilder(args).redirectError(ProcessBuilder.Redirect.DISCARD).start();
+            try {
+                var output = reader.submit(() -> json.readTree(child.getInputStream()));
+                if (!child.waitFor(5, TimeUnit.SECONDS) || child.exitValue() != 0) throw new IllegalStateException();
+                var envelope = output.get();
+                if (envelope == null || !envelope.path("schemaVersion").isInt() || envelope.path("schemaVersion").intValue() != 1
+                        || !(envelope.path("attempts") instanceof ArrayNode rows)) throw new IllegalStateException();
+                for (var row : rows) {
+                    if (!row.isObject() || !row.path("id").isTextual() || !row.path("status").isTextual()
+                            || (jobId != null && !jobId.equals(row.path("id").asText()))) throw new IllegalStateException();
+                }
+                return rows;
+            } finally {
+                if (child.isAlive()) child.destroyForcibly();
+            }
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            throw new WorkbenchException(409, "JobsDB 历史不可读取，暂停此岗位以免重复投递");
+        }
     }
 }

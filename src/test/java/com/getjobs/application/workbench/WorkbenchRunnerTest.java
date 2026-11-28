@@ -85,10 +85,17 @@ class WorkbenchRunnerTest {
     @Test void secondManagerCannotRecoverOrInvalidateALiveTask() {
         var service = new WorkbenchService(root, root.resolve("jobsdb"), json);
         String task = task(service);
-        try (var runner = new WorkbenchRunner(service, List.of("python3", "-c", "import time;time.sleep(30)", "{taskFile}"), "http://127.0.0.1:1/callback", 40)) {
+        var started = root.resolve("fixture-running");
+        String worker = "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(30)";
+        try (var runner = new WorkbenchRunner(service, List.of("python3", "-c", worker, started.toString(), "{taskFile}"), "http://127.0.0.1:1/callback", 40)) {
             runner.start(task);
+            await().atMost(Duration.ofSeconds(5)).until(() -> java.nio.file.Files.exists(started));
             assertThrows(IllegalStateException.class, () -> new WorkbenchRunner(service, List.of(), "http://127.0.0.1:1/callback", 5));
             assertEquals("RUNNING", service.task(task).path("state").asText());
+        }
+        try (var recovered = new WorkbenchRunner(service, List.of(), "http://127.0.0.1:1/callback", 5)) {
+            assertFalse(recovered.runtime().path("busy").asBoolean());
+            assertEquals("UNKNOWN", service.task(task).path("state").asText());
         }
     }
 

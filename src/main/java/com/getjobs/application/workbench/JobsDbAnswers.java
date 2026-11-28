@@ -85,6 +85,8 @@ final class JobsDbAnswers {
                         && approvedOptions.equals(options), "实际问题与已确认答案库不匹配：" + name);
             }
         }
+        if (task.at("/answersSource/kind").asText().equals("SINGLE_JOB_CONFIRMATION"))
+            require(names.size() == task.path("answers").size(), "实际问卷缺少已确认的问题");
     }
 
     String hash(JsonNode value) throws Exception {

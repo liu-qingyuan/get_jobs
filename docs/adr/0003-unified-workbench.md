@@ -1,5 +1,7 @@
 # ADR 0003：统一管理，不合并简历文案或浏览器会话
 
+> 2026-11-28 · partially superseded by ADR 0004。JobsDB 单岗外部动作、防重及披露顺序见 [ADR 0004](0004-platform-owned-delivery.md)。
+
 ## 决策
 
 用户已授权统一工作台 V1（issue #4）。接续 ADR 0001/0002：在 JobsDB 副本加入 Spring/Next.js 管理入口，允许明确启动管理进程，但默认禁用招聘浏览器自动启动。原 `get_jobs/` 的文件、进程、数据库和浏览器不修改；现有国内安全修复仅复制源代码。旧 JobsDB CLI、数据目录、锁、审核和 UNKNOWN 防重合同保留。
@@ -76,6 +78,8 @@ OfferToday 在一次范围确认中显式选定已确认的邮箱/电话字段�
 
 ## 连续求职周期与阶段 claim（issue #14，父 spec #7）
 
+> 2026-11-28 · 本节 JobsDB 的工作台职责、披露与原生 claim 顺序已由 [ADR 0004](0004-platform-owned-delivery.md) 更新。
+
 更新 V1 默认逐岗人工推进决策：用户一次启动有界求职周期，编排 Module 在同一独占槽内自动完成发现、匹配、备料与官网/OfferToday 逐岗执行。独立阶段入口只作高级兜底，旧人工任务、人审事件、UNKNOWN 和平台账本语义不改写；策略任务不能转经旧 approve 冒充人审。沿用本票发布八图的逻辑职责，具体编排由 WorkbenchWorkflow 拥有，不另造调度/浏览器框架。
 
 同库存储事务把每阶段的范围/材料/目标重核、预算消费和 task claim 绑定。已预扣完整执行秒数及官网模型上限（可信 CLI 执行 token 限额，非沙箱），CONTACT/APPLY/SEND_CV 分别扣一次外发；失败不退款。OfferToday 联系回执先入库，附件前再次 claim；暂停、变更、到期、材料变化和预算耗尽后不开始新阶段，已有联系与 UNKNOWN 不回滚。对应 CV 回执仍须新消息、同会话及冻结输入到平台附件的 A 归属链，不要求平台转换副本字节相同。
@@ -100,9 +104,13 @@ OfferToday 在一次范围确认中显式选定已确认的邮箱/电话字段�
 
 `resume-read` 调用 pinned Scrapling private solver 自动完成 CF/CAPTCHA，无需用户确认；登录凭证不读取、不填写、不复制，会话失效时保留断点。CLI 监护进程留在 Playwright greenlet 之外，在独立会话中启动读取 worker；SIGTERM/Ctrl+C 先通知 worker，宽限期后回收整个 worker 进程组并以 130 退出，因此 Java 硬截止或用户关闭不会只杀短命主 PID 而遗留 Chrome/Node。交互阶段的单独守卫允许 JobsDB、必要验证和静态来源的正常流量，只对白名单中的明确 HTTPS 认证/挑战端点以及挑战完成后回到同一获准列表/详情的 POST 允许必要写请求；通用或嵌套 `/graphql` 与账号设置路径不作为认证白名单，其他写请求、未知主机和 apply/contact/upload/message 路径拒绝。不截图、不读取或输出凭证、验证码或验证页正文。严格 Reader 把验证发生的获准列表或本轮数字岗位详情作为 `userActionUrl`，与 attempt 和剩余严格读取秒数一起持久化；交互窗口直接呈现该精确目标。验证清除后移除交互 route，在同一持久 BrowserContext 上从原列表/游标继续严格读取；不重开浏览器、不删除持久 Service Worker 状态，而是组合浏览器 `service_workers=block`/禁用特性、`ServiceWorker.stopAllWorkers`、CDP `Network.setBypassServiceWorker` 与原严格 route，使页面请求继续经过只读守卫。该组合用持久 worker fixture 证明，单独的 Playwright block 则明确作为反例保留。Java 在启动交接前把私有续读目录身份绑定断点，Python 在真正开始严格尝试时写入开始时间；当前进程异常或 Java 重启均先据此扣减剩余秒数；Java 按该开始时间实施硬截止，终止超时子进程并拒绝迟到结果；最终 jobs 输出还必须原子落盘，以 `readAttemptCompleted` 绑定 interaction、目标、开始／完成时间和本次预算，结果名完成 `fsync` 后再创建并 `fsync` 绑定结果 SHA256 的发布标记，由 Java 核验标记哈希和创建时间也在同一截止内；JVM 重启仍拒绝声明早完成、实际迟到发布的文件。每次可见交接后只做一次严格尝试并重核 task/readAttempt/source/limits/scope 身份；再次验证时返回同一 attempt、精确目标和扣减后的剩余秒数，由 Java 写回断点后再自动求解，不在子进程内循环或重置页面授权。严格秒数耗尽即结束该笔读取而不自动重试；自动求解时间不计入。自动求解失败、关闭窗口或身份变化保留断点，不创建会话。现有原申请 CLI 的 Profile、页面清理、锁、逐岗确认与 UNKNOWN 合同不变。只遍历有界的当前已加载列表，续读绑定其身份指纹，不猜测远端翻页；缺标题/公司 schema、错岗、缺全文或预算不足都不伪装完整覆盖。真实 DOM/schema、来源代表性、跨重开和读取质量仍须用户授权实站核对。
 
+> JobsDB 单岗 task 的当前顺序见 [ADR 0004](0004-platform-owned-delivery.md)。
+
 不把裸 `Flow.prepare_automatic()` 当作受控申请：原流程的 Profile 会随申请发送，需由工作台冻结包补足绑定。受控单岗 APPLY 只从当前范围 `POLICY_APPROVED` 包发起：策略重核 `JOBSDB`/APPLY/HK/`hk.jobsdb.com`、已核对联系方式、冻结 DOCX 附件 SHA256、显式确认答案及其规范哈希，并原子消费一次 outbound；Runner 复制附件、复核字节、写绑定 attempt/authorization/岗位/Profile 指纹/联系方式/附件/答案的任务，调用独立 `apply-single`。该 CLI 只填冻结简历与答案，未知问题停止；review 后先 claim 再提交一次；缺失、模糊或身份/绑定不匹配的回执记 UNKNOWN，不自动重投；工作台只记录绑定的 `jobsdb_attempt`。批次 APPLY/CONTACT/SEND_CV 仍 `CAPABILITY_UNVERIFIED`，不调用旧 batch、不借用其他渠道。该路径证明冻结包与回执绑定，不证明线上 Profile 只含本任务资料。
 
 ### #32：统一受控 task/attempt owner
+
+> 2026-11-28 · 本节 JobsDB 的工作台职责、披露与原生 claim 顺序已由 [ADR 0004](0004-platform-owned-delivery.md) 更新。
 
 上述 #16 的独立桥接 owner 由 #25/#32 取代：新 `/jobsdb/apply` 冻结已确认答案后，复用 WorkbenchService 的策略 task、beginTask、events 和 stage claim；task 引用即 attempt 身份，Runner 仍只拥有独占进程槽与具体 worker dispatch。周期和任务启动按规范岗位复用该身份，不另建执行存储或路由；未核实能力仍拒绝，缺冻结答案的 JobsDB 整轮不自动发送。OfferToday 新策略 task 同样使用 taskId 作 attemptId，旧人工任务保持原 attempt 语义。
 
@@ -110,11 +118,15 @@ OfferToday 在一次范围确认中显式选定已确认的邮箱/电话字段�
 
 ### #33：收紧现有 permission/fence Contract
 
+> 2026-11-28 · 本节 JobsDB 的工作台职责、披露与原生 claim 顺序已由 [ADR 0004](0004-platform-owned-delivery.md) 更新。
+
 本节取代上述受控 worker「review 后才取得原 ledger claim」的顺序：launch 前持久确认 task/attempt/首阶段权限和完整执行资源；SUBMITTING 仍在同一库事务消费独立 stage 预算并绑定 reservation。JobsDB worker 先以当前 credential 确认已有 task/stage claim，再取得原 `applications.db` 永久 UNKNOWN claim，之后才允许上传/表单披露；最终 submit 前再做 fresh validation。现有 agent-event 增加只校验、不创建 dispatch 的 VALIDATE，必须收到精确 task/attempt/stage/resource/phase 确认。两库不是原子事务，中间任一崩溃窗口均保守 UNKNOWN，不以缺一边记录推断可 replay。重启废止凭据；迟到证据可追加原 UNKNOWN 的 resolution，但不复活权限。
 
 scope/JD/材料/答案及只读观察的账号/会话关联均须有效；聊天 CONTACT/SEND_CV 分别核对同一岗位/会话。profile 配置指纹只是关联元数据，不能证明账号身份。当前内置 JobsDB Browser 尚无经核实的 JD/account/session observer，OfferToday 策略脚本尚不交付该观察合同，因此在新 fence 下安全停止；#33 的 fake/HTTP/全路由浏览器测试不是生产能力声明。真实 Adapter 观察与外发验收仍归 #28–#30，不通过配置、旧 frozen CLI 凭据或合成 context 绕过。旧交互式人工 CLI 与已保存 direct CLI 历史不改写。
 
 ### #37：范围答案库与 before-claim 问题核对
+
+> 2026-11-28 · 本节 JobsDB 的工作台职责、披露与原生 claim 顺序已由 [ADR 0004](0004-platform-owned-delivery.md) 更新。
 
 #25 的 B 方案取代「fresh JobsDB 周期必须逐岗确认答案」：范围保存用户明确确认的问题身份/题干、现有控件类型、全部精确选项标签和批准值，来源绑定本范围版本、确认时间和规范 JSON SHA256。不能把普通事实或旧全局 answers 默认为跨岗问卷批准。新 task 冻结同一来源和答案；恢复不覆盖来源，范围或材料快照变化则停止，历史记录不补造确认。暂停/恢复生成的新范围版本不自动续签答案库，须重新保存并确认；仅准备范围不因缺库而被授予外发。
 

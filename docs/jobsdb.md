@@ -81,7 +81,9 @@ bash gradlew --no-daemon jobsdbTest --console=plain
 
 完整候选可统一匹配及另存可核验材料；需在一次范围中选定核对的适用港区联系方式。**材料策略核准不是渠道可执行能力**：工作台受控单岗 APPLY 复用现有 task/claim 与原 `applications.db`，不调用旧批次、不回退官网。fresh `/cycles` 另须当前 scope 的用户确认答案库，冻结问题 identity/题干、控件、精确选项与批准值及来源/version/hash；缺库时模型/worker 不启动，不读旧全局 answers。`/jobsdb/apply` 仍是逐岗显式答案的兼容别名，不把单岗确认转成跨岗批准。字段、范围页和 HTTP 合同见 `docs/workbench.md`。
 
-受控 `apply-single` 先取得 launch permission 和完整资源 reservation；可信只读 observer 在任何 apply/上传前提供全部 role-requirements，随现有 SUBMITTING 回调核对同岗完整问题与冻结批准，通过后才取得 task stage claim，再经 LAUNCH validation → 原账本永久 claim → UPLOAD/最终 SUBMIT fences 执行一次。未知/缺失/歧义或无 observer 时 task 可存在但 0 stage/native claim/effect；已 claim 后缺回执保留 UNKNOWN，两个数据库的崩溃窗口均不 replay。生产 Browser 仍缺经核实的问题及 JD/account/session observer，因此安全停止；fixture 与配置不证明真实外发能力，实站验收另归 #28。原交互式 apply、私有 batch 与历史 direct frozen CLI provenance 不变。
+工作台与 Python CLI 的单岗任务、结果和只读历史 JSON 使用整数 `schemaVersion: 1`。原 `history` 仍输出制表符分隔的记录。`history --json --data-dir DIR` 读取最近 100 条，附加 `--job-id ID` 可精确读取任意历史岗位。历史查询全程只读，可在 profile 正被占用时执行。
+
+受控 `apply-single` 使用当前 task 的凭据与有界资源。在首次披露前读现场 JD，核对范围及核准文件原字节，工作台原子消费一个 outbound 并记录可能已披露。选中该附件后读取完整问卷，使用范围答案库或本岗显式确认的同结构 `entries`（name、label、type、options、value）。旧名称与答案映射须重新确认。复核问卷并从审核页独立读到本次上传产生的简历 ID 后由 Python 原子写入岗位 UNKNOWN 及 attempt 来源，最终核验后最多提交一次。上传后中断或拒绝保留已耗量，禁止重投。申请成功页只确认申请；缺少本次申请实收附件证据时 CV 为 unknown。见 [ADR 0004](adr/0004-platform-owned-delivery.md)。
 
 ## 全自动批次
 

@@ -78,8 +78,8 @@ public class WorkbenchController {
         String token = authorization != null && authorization.startsWith("Bearer ") ? authorization.substring(7) : null;
         return service.agentEvent(id, input, token);
     }
-    @ExceptionHandler(WorkbenchException.class) public ResponseEntity<Map<String,String>> known(WorkbenchException e) {
-        return ResponseEntity.status(e.status).body(Map.of("error", e.getMessage()));
+    @ExceptionHandler(WorkbenchException.class) public ResponseEntity<?> known(WorkbenchException e) {
+        return ResponseEntity.status(e.status).body(e.detail == null ? Map.of("error", e.getMessage()) : e.detail.deepCopy().put("error", e.getMessage()));
     }
     @ExceptionHandler({HttpMessageNotReadableException.class, IllegalArgumentException.class, MaxUploadSizeExceededException.class,
             org.springframework.web.bind.MissingServletRequestParameterException.class})

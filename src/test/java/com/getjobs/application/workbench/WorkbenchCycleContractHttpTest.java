@@ -128,75 +128,11 @@ class WorkbenchCycleContractHttpTest {
                 elif kind=='MATERIAL_PREPARE':
                     json.dump({'results':[{'candidateId':j['candidateId'],'resumeId':j['target']['resumeId'],'transformation':'ORIGINAL'} for j in b['candidates']]},open(b['resultPath'],'w'))
                 elif kind=='JOBSDB_SINGLE_APPLY':
+                    sys.dont_write_bytecode=True
                     sys.path.insert(0,%s)
-                    from jobsdb import Store
-                    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                    def validate(phase):
-                        event={'type':'VALIDATE','action':'APPLY','phase':phase,'message':'Synthetic fence',
-                               'binding':b,'context':{'jdSha256':b['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}}
-                        req=urllib.request.Request(b['callbackUrl'],json.dumps(event).encode(),
-                            headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
-                        with opener.open(req,timeout=5) as response:
-                            ack=json.load(response)['validatedPermission']
-                            assert ack['taskId']==b['taskId'] and ack['authorizationId']==b['authorizationId']
-                            assert ack['executionResourceId']==b['executionResourceId'] and ack['phase']==phase
-                    data=pathlib.Path(sys.argv[4]); data.mkdir(parents=True,exist_ok=True)
-                    if scenario=='VERIFY':
-                        req=urllib.request.Request(b['callbackUrl'],json.dumps({'type':'NEEDS_INPUT','message':'Synthetic verification checkpoint'}).encode(),
-                            headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
-                        with opener.open(req,timeout=5) as response: assert json.load(response)['state']=='NEEDS_INPUT'
-                        sys.exit(0)
-                    if scenario.startswith('QUESTIONS_'):
-                        from jobsdb import run_single
-                        class Browser:
-                            def solve(self,page): pass
-                            def run(self,url,action): return action(None)
-                            def observe_execution_context(self,page,task):
-                                return {'jdSha256':task['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}
-                            def observe_role_requirements(self,page,task):
-                                question=dict(task['answerBank']['entries'][0],required=True)
-                                result={'jobId':task['jobId'],'complete':True,'questions':[question]}
-                                if scenario=='QUESTIONS_UNKNOWN': question['name']='questionnaire.unknown'
-                                elif scenario=='QUESTIONS_LABEL': question['label']='Different question'
-                                elif scenario=='QUESTIONS_TYPE': question['type']='radio'
-                                elif scenario=='QUESTIONS_OPTIONS': question['options']=['Changed option']
-                                elif scenario=='QUESTIONS_AMBIGUOUS': question['options']+=question['options']
-                                elif scenario=='QUESTIONS_INCOMPLETE': result['complete']=False
-                                elif scenario=='QUESTIONS_JOB': result['jobId']='99999999'
-                                return result
-                        browser=Browser()
-                        if scenario=='QUESTIONS_NO_OBSERVER': browser.observe_role_requirements=None
-                        with Store(data/'applications.db') as ledger: run_single(b,browser,ledger,data)
-                        sys.exit(0)
-                    if 'answerBank' in b:
-                        assert hashlib.sha256(json.dumps(b['answerBank']['entries'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()==b['answersSource']['sha256']
-                    questions=[dict(e,required=True) for e in b.get('answerBank',{}).get('entries',[])]
-                    if 'answerBank' not in b:
-                        questions=[{'name':name,'label':'Synthetic question','type':'checkbox' if isinstance(value,list) else 'select',
-                            'options':value if isinstance(value,list) else [value],'required':True} for name,value in b['answers'].items()]
-                    event={'type':'SUBMITTING','action':'APPLY','message':'Questions checked before stage claim','binding':b,
-                        'roleRequirements':{'jobId':b['jobId'],'complete':True,'questions':questions},
-                        'context':{'jdSha256':b['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}}
-                    req=urllib.request.Request(b['callbackUrl'],json.dumps(event).encode(),
-                        headers={'Content-Type':'application/json','Authorization':'Bearer '+b['token']})
-                    with opener.open(req,timeout=5) as response: b['authorizationId']=json.load(response)['outboundClaim']
-                    validate('LAUNCH')
-                    with Store(data/'applications.db') as ledger:
-                        assert ledger.claim(b['jobId']), 'Permanent native claim vetoes duplicate effects'
-                        validate('UPLOAD'); validate('SUBMIT')
-                        assert hashlib.sha256(pathlib.Path(b['resumePath']).read_bytes()).hexdigest()==b['resumeSha256']
-                        assert hashlib.sha256(json.dumps(b['answers'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()==b['answersSha256']
-                        with (root/'effects').open('a') as log:
-                            log.write(json.dumps({'taskId':b['taskId'],'attemptId':b['attemptId'],'action':'APPLY',
-                                'claimId':b['authorizationId'],'nativeClaimed':ledger.contains(b['jobId'])})+'\\n')
-                        if (root/'hold').exists():
-                            (root/'held').write_text(b['taskId'])
-                            while not (root/'release').exists(): time.sleep(0.02)
-                        if scenario=='UNKNOWN': sys.exit(0)
-                        receipt={k:b[k] for k in ('attemptId','authorizationId','jobId','url','resumeSha256','answersSha256','profileHash','contactHash')}
-                        receipt.update(status='SUBMITTED',receipt={'url':b['url']+'/apply/success','textSha256':'a'*64})
-                        if scenario=='MISBOUND_RECEIPT': receipt['attemptId']='another-attempt'
-                        json.dump(receipt,open(b['resultPath'],'w')); ledger.finish(b['jobId'],'SUBMITTED')
+                    from controlled_apply import apply
+                    if scenario=='VERIFY': sys.exit(2)
+                    sys.exit(apply(root,%s,scenario))
                 elif b.get('task',{}).get('kind')=='RESUME':
                     assert sys.argv[1]!='run', 'Drafts retain the generic executor protocol'
                     event={'type':'DRAFT','message':'Synthetic draft','content':'Synthetic unapproved draft'}
@@ -238,7 +174,7 @@ class WorkbenchCycleContractHttpTest {
                         elif scenario=='UNKNOWN': sys.exit(0)
                         else: report('CV_DELIVERED',proof=dict(common,messageId='cv',resumeSha256=s['resume']['sha256']))
                 """.formatted(json.writeValueAsString(OFFER_URL), json.writeValueAsString(JD),
-                        json.writeValueAsString(Path.of("scripts/jobsdb").toAbsolutePath().toString())));
+                        json.writeValueAsString(Path.of("src/test/resources/jobsdb").toAbsolutePath().toString()), json.writeValueAsString(JD)));
         return List.of("python3", script.toString());
     }
     HttpServer callback(AtomicReference<MockMvc> http) throws Exception {
@@ -434,7 +370,7 @@ class WorkbenchCycleContractHttpTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"UNKNOWN", "LABEL", "TYPE", "OPTIONS", "AMBIGUOUS", "INCOMPLETE", "JOB", "NO_OBSERVER"})
-    void unknownRequiredQuestionKeepsTheFrozenTaskButNoStageOrNativeClaimOrEffect(String mutation) throws Exception {
+    void unknownRequiredQuestionRetainsDisclosureWithoutNativeClaimOrSubmit(String mutation) throws Exception {
         Files.writeString(root.resolve("scenario"), "QUESTIONS_" + mutation);
         var prefix = fake(); var service = service("JOBSDB", prefix);
         var callbackHttp = new AtomicReference<MockMvc>(); var callback = callback(callbackHttp);
@@ -443,9 +379,10 @@ class WorkbenchCycleContractHttpTest {
             post(http, "/cycles", setup(http, "JOBSDB", answerBank())); idle(runner);
             var state = state(http); var task = state.at("/tasks/0");
             assertEquals(1, state.path("tasks").size(), state::toPrettyString);
-            assertEquals("NEEDS_INPUT", task.path("state").asText(), task::toPrettyString);
-            assertFalse(task.has("outboundClaim"));
-            assertEquals(0, state.at("/scope/usage/outbound").asInt());
+            assertEquals("UNKNOWN", task.path("state").asText(), task::toPrettyString);
+            assertTrue(task.has("outboundClaim"));
+            assertTrue(Files.exists(root.resolve("uploaded")));
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
             assertEquals(0, state.at("/platforms/jobsdbHistory").size());
             assertFalse(Files.exists(root.resolve("effects")));
             assertEquals("SCOPE_ANSWER_BANK", task.at("/answersSource/kind").asText());
@@ -491,7 +428,7 @@ class WorkbenchCycleContractHttpTest {
             var http = http(service, runner); callbackHttp.set(http);
             cycleId = post(http, "/cycles", setup(http, "JOBSDB", answerBank())).path("id").asText(); idle(runner);
             frozen = state(http).at("/tasks/0");
-            assertEquals("NEEDS_INPUT", frozen.path("state").asText());
+            assertEquals("UNKNOWN", frozen.path("state").asText());
         } finally { callback.stop(0); }
         Files.delete(root.resolve("scenario")); callback = callback(callbackHttp);
         var recovered = service("JOBSDB", prefix);
@@ -507,9 +444,9 @@ class WorkbenchCycleContractHttpTest {
             assertEquals(1, state.path("tasks").size());
             assertEquals(frozen.path("id"), task.path("id"));
             for (String field : List.of("answersSource", "answersSha256", "answerBank", "answers")) assertEquals(frozen.path(field), task.path(field), field);
-            assertEquals(changeScope ? "NEEDS_INPUT" : "SUBMITTED", task.path("state").asText(), state::toPrettyString);
-            assertEquals(changeScope ? 0 : 1, state.at("/scope/usage/outbound").asInt());
-            assertEquals(!changeScope, Files.exists(root.resolve("effects")));
+            assertEquals("UNKNOWN", task.path("state").asText(), state::toPrettyString);
+            assertEquals(1, state.at("/scope/usage/outbound").asInt());
+            assertEquals(false, Files.exists(root.resolve("effects")));
         } finally { callback.stop(0); }
     }
 
@@ -528,7 +465,7 @@ class WorkbenchCycleContractHttpTest {
             var pkg = before.at("/preparations/packages/0");
             var input = json.createObjectNode().put("scopeVersion", 1).put("preparationId", pkg.path("id").asText())
                     .put("candidateId", pkg.path("candidateId").asText()).put("answersConfirmed", true);
-            input.putObject("answers").put("questionnaire.experience", "Synthetic confirmed answer");
+            input.set("entries", answerBank().path("entries"));
             var task = post(http, "/jobsdb/apply", input);
             assertEquals("SUBMITTED", task.path("state").asText(), task::toPrettyString);
             var state = state(http);

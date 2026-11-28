@@ -139,42 +139,18 @@ class WorkbenchJobsDbHttpTest {
                 """);
         return List.of("python3", path.toString(), "{taskFile}");
     }
-    List<String> reader() throws Exception { return reader(false); }
-    List<String> reader(boolean corruptApply) throws Exception {
+    List<String> reader() throws Exception {
         var path = root.resolve("channel-reader.py");
         String script = """
                 import json,sys
                 if sys.argv[1]=='apply-single':
-                    import hashlib,urllib.request,sqlite3,pathlib
-                    t=json.load(open(sys.argv[2]))
-                    context={'jdSha256':t['jdSha256'],'accountHash':'c'*64,'sessionHash':'d'*64}
-                    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                    questions=[{'name':name,'label':'Synthetic question','type':'checkbox' if isinstance(value,list) else 'select',
-                        'options':value if isinstance(value,list) else [value],'required':True} for name,value in t['answers'].items()]
-                    event={'type':'SUBMITTING','action':'APPLY','message':'Complete question check before claim','binding':t,'context':context,
-                        'roleRequirements':{'jobId':t['jobId'],'complete':True,'questions':questions}}
-                    req=urllib.request.Request(t['callbackUrl'],json.dumps(event).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+t['token']})
-                    with opener.open(req,timeout=5) as response: t['authorizationId']=json.load(response)['outboundClaim']
-                    for phase in ('LAUNCH','UPLOAD','SUBMIT'):
-                        if phase=='UPLOAD':
-                            data=pathlib.Path(sys.argv[4]); data.mkdir(exist_ok=True)
-                            with sqlite3.connect(data/'applications.db') as db:
-                                db.execute('CREATE TABLE IF NOT EXISTS applications(job_id TEXT PRIMARY KEY,status TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)')
-                                db.execute('INSERT INTO applications(job_id,status) VALUES(?,?)',(t['jobId'],'UNKNOWN'))
-                        event={'type':'VALIDATE','action':'APPLY','phase':phase,'message':'fixture fence','binding':t,'context':context}
-                        req=urllib.request.Request(t['callbackUrl'],json.dumps(event).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+t['token']})
-                        with opener.open(req,timeout=5) as response:
-                            ack=json.load(response)
-                            assert ack['validatedPermission']['authorizationId']==t['authorizationId']
-                    # fixture_effect
-                    sha=hashlib.sha256(json.dumps(t['answers'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
-                    assert sha==t['answersSha256'], (sha,t['answersSha256'])
-                    r={k:t[k] for k in ('attemptId','authorizationId','url','answersSha256','profileHash','contactHash')}
-                    r['resumeSha256']=__SHA__
-                    r['jobId']=t['url'].rsplit('/',1)[-1]
-                    r['status']='SUBMITTED'
-                    r['receipt']={'url':t['url'],'textSha256':'a'*64}
-                    json.dump(r,open(t['resultPath'],'w')); sys.exit(0)
+                    import pathlib
+                    sys.dont_write_bytecode=True
+                    sys.path.insert(0,__FIXTURE__)
+                    from controlled_apply import apply
+                    root=pathlib.Path(__file__).parent
+                    scenario=(root/'scenario').read_text() if (root/'scenario').exists() else ''
+                    sys.exit(apply(root,__JD__,scenario))
                 b=json.load(open(sys.argv[2])); assert sys.argv[1]=='read-candidates'
                 channel=b['source']['channel']
                 assert channel in ('JOBSDB','OFFERTODAY') and 'token' not in b and 'resumePath' not in b
@@ -182,7 +158,7 @@ class WorkbenchJobsDbHttpTest {
                 url='https://hk.jobsdb.com/job/12345678?ref=search' if channel=='JOBSDB' else 'https://www.offertoday.com/hk/job/AbCdEfGhIjKlMnOpQrStUv=='
                 json.dump({'jobs':[{'url':url,'title':'Python engineer','company':'Synthetic Corp','description':__JD__,'descriptionComplete':True}]},open(b['resultPath'],'w'))
                 """;
-        script = script.replace("__SHA__", corruptApply ? "'0'*64" : "t['resumeSha256']");
+        script = script.replace("__FIXTURE__", json.writeValueAsString(Path.of("src/test/resources/jobsdb").toAbsolutePath().toString()));
         Files.writeString(path, script.replace("__JD__", json.writeValueAsString(JD)));
         return List.of("python3", path.toString());
     }
@@ -624,17 +600,17 @@ class WorkbenchJobsDbHttpTest {
         setup(http, true); prepareForAlias(http);
         var pkg = state(http).at("/preparations/packages/0");
         var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
-                .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
         String id = service.jobsDbTask(request).path("id").asText();
         service.beginTask(id, "current-worker", "http://127.0.0.1:1/api/workbench", 30);
         var task = service.task(id);
         var dispatch = json.createObjectNode().put("taskId", id).put("attemptId", id).put("stage", "APPLY")
                 .put("executionResourceId", task.path("executionResourceId").asText()).put("jobId", "12345678").put("url", task.path("url").asText())
                 .put("resumeSha256", task.at("/snapshot/resume/sha256").asText()).put("answersSha256", task.path("answersSha256").asText())
-                .put("profileHash", "a".repeat(64)).put("contactHash", "b".repeat(64));
+                .put("resumePath", "/fixture/approved.docx").put("profileHash", "a".repeat(64)).put("contactHash", "b".repeat(64));
         dispatch.set("answersSource", task.path("answersSource"));
         service.store.write(c -> { var stored = service.store.get(c, "task", id); stored.set("jobsDbDispatch", dispatch); service.store.save(c, "task", stored); return null; });
-        var event = fenceEvent(service.task(id), "CLAIM").put("type", "SUBMITTING");
+        var event = fenceEvent(service.task(id), "UPLOAD").put("type", "SUBMITTING");
         event.putObject("roleRequirements").put("jobId", "12345678").put("complete", true).putArray("questions");
         return service.agentEvent(id, event, "current-worker");
     }
@@ -643,6 +619,10 @@ class WorkbenchJobsDbHttpTest {
         event.set("binding", task.path("jobsDbDispatch").deepCopy());
         event.putObject("context").put("jdSha256", WorkbenchService.hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8)))
                 .put("accountHash", "c".repeat(64)).put("sessionHash", "d".repeat(64));
+        if (phase.equals("CLAIM") || phase.equals("QUESTIONS")) {
+            event.putObject("roleRequirements").put("jobId", "12345678").put("complete", true).putArray("questions");
+            event.putObject("attachment").put("name", "approved.docx").put("selected", true).put("resumeId", "doc-1").put("reviewResumeId", "doc-1").set("sha256", task.at("/jobsDbDispatch/resumeSha256"));
+        }
         return event;
     }
     JsonNode agentPost(MockMvc http, String id, ObjectNode event, String token, int expected) throws Exception {
@@ -656,22 +636,23 @@ class WorkbenchJobsDbHttpTest {
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); var task = claimedFenceTask(http, service); String id = task.path("id").asText();
             var before = state(http).at("/scope/usage");
-            var ack = agentPost(http, id, fenceEvent(task, "LAUNCH"), "current-worker", 200);
+            var ack = agentPost(http, id, fenceEvent(task, "CHECK"), "current-worker", 200);
             assertEquals(task.path("outboundClaim"), ack.at("/validatedPermission/authorizationId"));
             assertEquals("APPLY", ack.at("/validatedPermission/action").asText());
             assertEquals(id, ack.at("/validatedPermission/attemptId").asText());
             assertEquals(before, state(http).at("/scope/usage"));
             assertEquals("UNKNOWN", service.task(id).path("state").asText());
-            agentPost(http, id, fenceEvent(task, "LAUNCH").put("action", "SEND_CV"), "current-worker", 409);
+            agentPost(http, id, fenceEvent(task, "CHECK").put("action", "SEND_CV"), "current-worker", 409);
         }
     }
 
-    void nativeClaim() throws Exception {
-        Files.createDirectories(root.resolve("legacy"));
-        try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db")); var statement = c.createStatement()) {
-            statement.execute("CREATE TABLE IF NOT EXISTS applications(job_id TEXT PRIMARY KEY,status TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
-            statement.execute("INSERT INTO applications(job_id,status) VALUES('12345678','UNKNOWN')");
-        }
+    void nativeClaim(JsonNode task) throws Exception {
+        var directory = Files.createDirectories(root.resolve("legacy"));
+        String claim = "import sys; from jobsdb import Store; " +
+                "store=Store(sys.argv[1]); assert store.claim('12345678',sys.argv[2],'workbench')";
+        var builder = new ProcessBuilder("python3", "-c", claim, directory.resolve("applications.db").toString(), task.path("id").asText());
+        builder.environment().put("PYTHONPATH", Path.of("scripts/jobsdb").toAbsolutePath().toString());
+        assertEquals(0, builder.start().waitFor());
     }
     @ParameterizedTest
     @ValueSource(strings = {"SCOPE", "JD", "FILE", "FACT", "ANSWERS", "ACCOUNT", "SESSION", "MISSING_CONTEXT", "BINDING", "GRANT", "RESOURCE"})
@@ -679,10 +660,11 @@ class WorkbenchJobsDbHttpTest {
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); var task = claimedFenceTask(http, service); String id = task.path("id").asText();
-            agentPost(http, id, fenceEvent(task, "LAUNCH"), "current-worker", 200);
-            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 409); // no original claim yet
-            nativeClaim();
-            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "CHECK"), "current-worker", 200);
+            assertTrue(task.at("/fences/APPLY").has("UPLOAD"));
+            agentPost(http, id, fenceEvent(task, "QUESTIONS"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "CLAIM"), "current-worker", 200);
+            nativeClaim(task);
             var event = fenceEvent(task, "SUBMIT");
             switch (mutation) {
                 case "SCOPE" -> post(http, "/scope/1/pause", json.createObjectNode());
@@ -717,8 +699,8 @@ class WorkbenchJobsDbHttpTest {
         var service = service(); ObjectNode task;
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); task = claimedFenceTask(http, service);
-            agentPost(http, task.path("id").asText(), fenceEvent(task, "LAUNCH"), "current-worker", 200);
-            if (platformClaimed) { nativeClaim(); agentPost(http, task.path("id").asText(), fenceEvent(task, "UPLOAD"), "current-worker", 200); }
+            agentPost(http, task.path("id").asText(), fenceEvent(task, "CHECK"), "current-worker", 200);
+            if (platformClaimed) { agentPost(http, task.path("id").asText(), fenceEvent(task, "QUESTIONS"), "current-worker", 200); agentPost(http, task.path("id").asText(), fenceEvent(task, "CLAIM"), "current-worker", 200); nativeClaim(task); }
         }
         var recovered = service();
         try (var runner = new WorkbenchRunner(recovered, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
@@ -726,7 +708,7 @@ class WorkbenchJobsDbHttpTest {
             agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 403);
             agentPost(http, id, json.createObjectNode().put("type", "SUBMITTING").put("action", "APPLY").put("message", "no replay"), "current-worker", 403);
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + id + "/start")).andExpect(status().isConflict());
-            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", task.path("candidateId").asText()).put("preparationId", task.path("packageId").asText()).put("answersConfirmed", true); request.putObject("answers");
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", task.path("candidateId").asText()).put("preparationId", task.path("packageId").asText()).put("answersConfirmed", true); request.putArray("entries");
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
             assertEquals("UNKNOWN", recovered.task(id).path("state").asText());
             assertEquals(1, state(http).path("tasks").size());
@@ -738,8 +720,8 @@ class WorkbenchJobsDbHttpTest {
         var service = service(); ObjectNode task; JsonNode usage;
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner); task = claimedFenceTask(http, service); String id = task.path("id").asText();
-            agentPost(http, id, fenceEvent(task, "LAUNCH"), "current-worker", 200); nativeClaim();
-            agentPost(http, id, fenceEvent(task, "UPLOAD"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "QUESTIONS"), "current-worker", 200);
+            agentPost(http, id, fenceEvent(task, "CLAIM"), "current-worker", 200); nativeClaim(task);
             agentPost(http, id, fenceEvent(task, "SUBMIT"), "current-worker", 200);
             agentPost(http, id, fenceEvent(task, "SUBMIT"), "current-worker", 409); // not a second click permission
             service.processEnded(id); usage = state(http).at("/scope/usage");
@@ -767,7 +749,7 @@ class WorkbenchJobsDbHttpTest {
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var pkg = state(http).at("/preparations/packages/0");
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
-                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
             String id = service.jobsDbTask(request).path("id").asText();
             long before = state(http).at("/scope/usage/seconds").asLong();
             var bundle = service.beginTask(id, "current-worker", "http://127.0.0.1:1/api/workbench");
@@ -783,7 +765,10 @@ class WorkbenchJobsDbHttpTest {
         }
     }
 
-    @Test void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"CV_BOUND", "CV_MISSING", "CV_WRONG", "CV_WRONG_BYTES", "CV_WRONG_ATTEMPT"})
+    void singleApprovedJobsDbApplyBindsPackageAndReceiptAndNeverRetries(String evidence) throws Exception {
+        Files.writeString(root.resolve("scenario"), evidence);
         ledgerRow("96118137", "SUBMITTED", "2026-11-26 11:49:02");
         var service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
@@ -794,10 +779,13 @@ class WorkbenchJobsDbHttpTest {
             var pkg = state.path("preparations").path("packages").get(0);
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
                     .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
-            request.putObject("answers");
+            request.putArray("entries");
             var applied = post(http, "/jobsdb/apply", request);
             assertEquals("SUBMITTED", applied.path("status").asText(), applied.toPrettyString());
             assertEquals("12345678", applied.path("jobId").asText());
+            assertEquals("not applicable", applied.at("/deliveryOutcome/messageSent").asText());
+            assertEquals("claimed", applied.at("/deliveryOutcome/attemptDisposition").asText());
+            assertEquals(evidence.equals("CV_BOUND") ? "confirmed with evidence" : "unknown", applied.at("/deliveryOutcome/cvActuallyReceived").asText());
             assertEquals(pkg.path("snapshot").path("resume").path("sha256").asText(), applied.path("resumeSha256").asText());
             assertTrue(applied.path("receipt").path("textSha256").asText().matches("[a-f0-9]{64}"));
             var after = state(http);
@@ -814,7 +802,7 @@ class WorkbenchJobsDbHttpTest {
             assertEquals(2, after.at("/platforms/jobsdbHistory").size(), "Original ledger and actual controlled task remain separate histories");
             for (var row : after.at("/platforms/jobsdbHistory")) {
                 boolean direct = row.path("id").asText().equals("96118137");
-                assertEquals(direct ? "DIRECT_FROZEN_CLI" : "ORIGINAL_LEDGER", row.path("provenance").asText());
+                assertEquals(direct ? "DIRECT_FROZEN_CLI" : "workbench", row.path("provenance").asText());
                 assertFalse(row.has("taskId"), "Ledger provenance must not synthesize a task association");
                 if (direct) assertEquals("2026-11-26 11:49:02", row.path("updated_at").asText());
             }
@@ -827,16 +815,122 @@ class WorkbenchJobsDbHttpTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"DIRECT_FIRST", "WORKBENCH_FIRST", "CONCURRENT"})
+    void cliAndWorkbenchShareTheNativeClaim(String order) throws Exception {
+        var service = service();
+        var command = reader();
+        boolean directFirst = order.equals("DIRECT_FIRST");
+        if (directFirst) Files.createFile(root.resolve("direct-first"));
+        if (order.equals("WORKBENCH_FIRST")) Files.createFile(root.resolve("hold-receipt"));
+        if (order.equals("CONCURRENT")) Files.createFile(root.resolve("hold"));
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, callbackUrl(service), 20);
+             var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
+            var pkg = state(http).at("/preparations/packages/0");
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
+            request.putArray("entries");
+            var workbench = workers.submit(() -> post(http, "/jobsdb/apply", request));
+            await().atMost(Duration.ofSeconds(8)).until(() -> Files.exists(root.resolve("dispatch-file")));
+            String frozen = Files.readString(root.resolve("dispatch-file"));
+            if (order.equals("WORKBENCH_FIRST")) await().atMost(Duration.ofSeconds(8)).until(() -> Files.exists(root.resolve("accepted")));
+            if (order.equals("CONCURRENT")) await().atMost(Duration.ofSeconds(8)).until(() -> Files.exists(root.resolve("held")));
+            var args = new java.util.ArrayList<>(command);
+            args.addAll(List.of("apply-single", frozen, "--data-dir", root.resolve("legacy").toString()));
+            var cli = new ProcessBuilder(args).redirectErrorStream(true).start();
+            try {
+                assertTrue(cli.waitFor(5, TimeUnit.SECONDS));
+                String output = new String(cli.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                assertEquals(0, cli.exitValue(), output);
+                if (!directFirst) {
+                    var duplicate = json.readTree(output);
+                    assertEquals("duplicate", duplicate.at("/deliveryOutcome/attemptDisposition").asText());
+                    assertEquals(state(http).at("/tasks/0/id"), duplicate.at("/previousAttempt/attemptId"));
+                }
+            } finally {
+                Files.writeString(root.resolve("release"), "release");
+                Files.writeString(root.resolve("direct-finished"), "finished");
+            }
+            var task = workbench.get(10, TimeUnit.SECONDS);
+            var history = state(http).at("/platforms/jobsdbHistory");
+            assertEquals(1, history.size());
+            assertEquals(task.path("id"), history.at("/0/attemptId"));
+            assertEquals(directFirst ? "cli" : "workbench", history.at("/0/provenance").asText());
+            assertEquals("SUBMITTED", task.path("state").asText());
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
+            var response = http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
+                    .contentType("application/json").content(request.toString())).andExpect(status().isConflict()).andReturn().getResponse();
+            var duplicate = json.readTree(response.getContentAsByteArray());
+            assertEquals("duplicate", duplicate.at("/deliveryOutcome/attemptDisposition").asText());
+            assertEquals(task.path("id"), duplicate.at("/previousAttempt/attemptId"));
+            assertEquals(task.path("receipt"), duplicate.at("/previousAttempt/receipt"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CRASH_AFTER_UPLOAD", "CRASH_AFTER_CLAIM"})
+    void actualCliCrashRetainsDisclosureBudgetAndFencesRestart(String crash) throws Exception {
+        var service = service();
+        Files.writeString(root.resolve("scenario"), crash);
+        ObjectNode request;
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 15)) {
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
+            var pkg = state(http).at("/preparations/packages/0");
+            request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
+            request.putArray("entries");
+            var task = post(http, "/jobsdb/apply", request);
+            assertTrue(Files.exists(root.resolve("uploaded")));
+            assertEquals("UNKNOWN", task.path("state").asText());
+            assertEquals("unknown", task.at("/deliveryOutcome/cvActuallyReceived").asText());
+            assertEquals(crash.equals("CRASH_AFTER_UPLOAD") ? "blocked" : "claimed", task.at("/deliveryOutcome/attemptDisposition").asText());
+        }
+        var recovered = service();
+        try (var runner = new WorkbenchRunner(recovered, model(), List.of(), reader(), null, callbackUrl(recovered), 15)) {
+            var http = http(recovered, runner);
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
+                    .contentType("application/json").content(request.toString())).andExpect(status().isConflict());
+            assertEquals(1, state(http).at("/scope/usage/outbound").asInt());
+            assertEquals(crash.equals("CRASH_AFTER_CLAIM") ? 1 : 0, state(http).at("/platforms/jobsdbHistory").size());
+            var cli = new java.util.ArrayList<>(reader());
+            cli.addAll(List.of("apply-single", Files.readString(root.resolve("dispatch-file")), "--data-dir", root.resolve("legacy").toString()));
+            var retry = new ProcessBuilder(cli).redirectErrorStream(true).start();
+            assertTrue(retry.waitFor(5, TimeUnit.SECONDS));
+            var duplicate = json.readTree(retry.getInputStream());
+            assertEquals("duplicate", duplicate.at("/deliveryOutcome/attemptDisposition").asText());
+            assertEquals(state(http).at("/tasks/0/id"), duplicate.at("/previousAttempt/attemptId"));
+            assertFalse(Files.exists(root.resolve("effects")));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"QUESTIONS_UNKNOWN", "QUESTIONS_LABEL", "QUESTIONS_TYPE", "QUESTIONS_OPTIONS", "REVIEW_MISSING", "REVIEW_WRONG"})
+    void singleJobApprovalBlocksChangedQuestionsOrReviewAttachmentAfterUpload(String scenario) throws Exception {
+        Files.writeString(root.resolve("scenario"), scenario);
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 15)) {
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
+            var pkg = state(http).at("/preparations/packages/0");
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
+            request.putArray("entries").addObject().put("name", "questionnaire.why").put("label", "Qualified?")
+                    .put("type", "select").put("value", "Yes").putArray("options").add("Yes").add("No");
+            var task = post(http, "/jobsdb/apply", request);
+            assertEquals("UNKNOWN", task.path("state").asText());
+            assertEquals("blocked", task.at("/deliveryOutcome/attemptDisposition").asText());
+            assertEquals("unknown", task.at("/deliveryOutcome/cvActuallyReceived").asText());
+            var current = state(http);
+            assertTrue(Files.exists(root.resolve("uploaded")));
+            assertEquals(1, current.at("/scope/usage/outbound").asInt());
+            assertTrue(current.at("/platforms/jobsdbHistory").isEmpty());
+            assertFalse(Files.exists(root.resolve("effects")));
+        }
+    }
+
     @Test void aliasAndTaskStartRaceKeepsOneTaskAndEffectAcrossCyclesAndRestart() throws Exception {
         var service = service(); var command = reader();
-        Path script = Path.of(command.get(1));
-        Files.writeString(script, Files.readString(script).replace("# fixture_effect", """
-                import hashlib,pathlib,time
-                root=pathlib.Path(__file__).parent
-                with (root/'effects').open('a') as effect: effect.write('APPLY\\n')
-                (root/'held').write_text('started')
-                while not (root/'release').exists(): time.sleep(0.02)
-                """.stripIndent().replace("\n", "\n    ")));
+        Files.writeString(root.resolve("hold"), "hold submit");
         ObjectNode request;
         String taskId;
         try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, callbackUrl(service), 10);
@@ -845,7 +939,7 @@ class WorkbenchJobsDbHttpTest {
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var pkg = state(http).at("/preparations/packages/0");
             request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
-                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
             var firstRequest = request.deepCopy();
             var first = workers.submit(() -> post(http, "/jobsdb/apply", firstRequest));
             await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(root.resolve("held")));
@@ -864,14 +958,14 @@ class WorkbenchJobsDbHttpTest {
             assertEquals(1, state(http).path("tasks").size());
             assertEquals(taskId, state(http).at("/workflow/cycles/0/entries/0/taskId").asText(), "A cycle must reference the existing alias task, not a parallel lifecycle");
             assertEquals(1, state(http).at("/scope/usage/outbound").asInt());
-            assertEquals(List.of("APPLY"), Files.readAllLines(root.resolve("effects")));
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
         }
         service = service();
         try (var runner = new WorkbenchRunner(service, model(), List.of(), command, null, "http://127.0.0.1:1", 10)) {
             var http = http(service, runner);
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
             assertEquals(taskId, state(http).at("/tasks/0/id").asText());
-            assertEquals(List.of("APPLY"), Files.readAllLines(root.resolve("effects")));
+            assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
         }
     }
 
@@ -887,7 +981,7 @@ class WorkbenchJobsDbHttpTest {
                     .put("url", "https://hk.jobsdb.com/job/12345678?ref=old-entry").put("status", status).put("at", "2026-11-25T12:00:00Z");
             service.store.write(c -> { service.store.save(c, "jobsdb_attempt", old); return null; });
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
-                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
             var taskInput = ((ObjectNode) pkg.path("target")).deepCopy().put("kind", "APPLICATION");
             taskInput.put("resumeId", state(http).path("resumes").get(0).path("id").asText());
@@ -914,7 +1008,7 @@ class WorkbenchJobsDbHttpTest {
             try (var c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + root.resolve("legacy/applications.db"));
                  var q = c.prepareStatement("INSERT INTO applications(job_id,status,updated_at) VALUES('12345678','UNKNOWN','now')")) { q.execute(); }
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
-                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
             var after = state(http);
             assertEquals(0, after.path("jobsdbAttempts").size());
@@ -931,11 +1025,39 @@ class WorkbenchJobsDbHttpTest {
             Path resume = service.file((ObjectNode) pkg.path("snapshot").path("resume"));
             byte[] bytes = Files.readAllBytes(resume); bytes[0] ^= 1; Files.write(resume, bytes);
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
-                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
             http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply").contentType("application/json").content(request.toString())).andExpect(status().isConflict());
             var after = state(http);
             assertEquals(0, after.path("jobsdbAttempts").size());
             assertEquals(0, after.path("scope").path("usage").path("outbound").asInt());
+        }
+    }
+
+    @Test void historicalNameValueApprovalRequiresFreshCompleteSingleJobConfirmation() throws Exception {
+        var service = service();
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 15)) {
+            var http = http(service, runner); setup(http, true); prepareForAlias(http);
+            var pkg = state(http).at("/preparations/packages/0");
+            var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", pkg.path("candidateId").asText())
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
+            request.putObject("answers").put("questionnaire.why", "Yes");
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/jobsdb/apply")
+                    .contentType("application/json").content(request.toString())).andExpect(status().is4xxClientError());
+            request.putArray("entries").addObject().put("name", "questionnaire.why").put("label", "Qualified?")
+                    .put("type", "select").put("value", "Yes").putArray("options").add("Yes").add("No");
+            var id = service.jobsDbTask(request).path("id").asText();
+            service.store.write(c -> {
+                var old = service.store.get(c, "task", id);
+                old.remove("answerBank");
+                ((ObjectNode) old.path("answersSource")).set("sha256", old.path("answersSha256"));
+                service.store.save(c, "task", old);
+                return null;
+            });
+            http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/workbench/tasks/" + id + "/start"))
+                    .andExpect(status().isConflict());
+            assertEquals(0, state(http).at("/scope/usage/outbound").asInt());
+            assertFalse(Files.exists(root.resolve("uploaded")));
+            assertEquals("SUBMITTED", post(http, "/jobsdb/apply", request).path("status").asText());
         }
     }
 
@@ -947,7 +1069,7 @@ class WorkbenchJobsDbHttpTest {
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
                     .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true);
-            request.putObject("answers").put("questionnaire.why", "我熟悉 Python");
+            request.putArray("entries").addObject().put("name", "questionnaire.why").put("label", "为什么？").put("type", "select").put("value", "我熟悉 Python").putArray("options").add("我熟悉 Python");
             var applied = post(http, "/jobsdb/apply", request);
             assertEquals("SUBMITTED", applied.path("status").asText(), applied.toPrettyString());
             assertEquals(0, state(http).path("jobsdbAttempts").size());
@@ -955,17 +1077,30 @@ class WorkbenchJobsDbHttpTest {
         }
     }
 
-    @Test void mismatchedReceiptIsUnknownAndCannotBeRetriedAsSuccess() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"MISBOUND_RECEIPT", "BAD_VERSION", "CRASH_WITH_RESULT", "LOST_RECEIPT"})
+    void invalidProcessResultIsUnknownAndCannotBeRetriedAsSuccess(String scenario) throws Exception {
+        Files.writeString(root.resolve("scenario"), scenario);
         var service = service();
-        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(true), null, callbackUrl(service), 10)) {
+        try (var runner = new WorkbenchRunner(service, model(), List.of(), reader(), null, callbackUrl(service), 10)) {
             var http = http(service, runner); setup(http, true); prepareForAlias(http);
             await().atMost(Duration.ofSeconds(10)).until(() -> !runner.runtime().path("busy").asBoolean());
             var state = state(http); var candidate = state.path("candidates").path("jobs").get(0); var pkg = state.path("preparations").path("packages").get(0);
             var request = json.createObjectNode().put("scopeVersion", 1).put("candidateId", candidate.path("id").asText())
-                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putObject("answers");
+                    .put("preparationId", pkg.path("id").asText()).put("answersConfirmed", true); request.putArray("entries");
             var applied = post(http, "/jobsdb/apply", request);
             assertEquals("UNKNOWN", applied.path("status").asText(), applied.toPrettyString());
-            assertTrue(applied.path("reason").asText().contains("绑定不匹配"), applied.toPrettyString());
+            if (scenario.equals("LOST_RECEIPT")) {
+                assertEquals("UNKNOWN", state(http).at("/platforms/jobsdbHistory/0/status").asText());
+                var args = new java.util.ArrayList<>(reader());
+                args.addAll(List.of("apply-single", Files.readString(root.resolve("dispatch-file")), "--data-dir", root.resolve("legacy").toString()));
+                var retry = new ProcessBuilder(args).redirectErrorStream(true).start();
+                assertTrue(retry.waitFor(5, TimeUnit.SECONDS));
+                assertEquals("UNKNOWN", json.readTree(retry.getInputStream()).at("/previousAttempt/status").asText());
+                assertEquals(1, Files.readAllLines(root.resolve("effects")).size());
+            }
+            if (scenario.equals("MISBOUND_RECEIPT"))
+                assertTrue(applied.path("reason").asText().contains("绑定不匹配"), applied.toPrettyString());
             var after = state(http);
             assertTrue(after.path("jobsdbAttempts").isEmpty());
             assertEquals(1, after.path("tasks").size());

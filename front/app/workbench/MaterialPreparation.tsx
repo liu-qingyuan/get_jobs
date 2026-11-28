@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { type PreparationPackage, type Resume, type ScopeAction, type ScopeDecision, type WorkbenchState, workbenchFile, workbenchJson } from '@/lib/workbench'
+import { type JobsDbOutcome, type PreparationPackage, type Resume, type ScopeAction, type ScopeDecision, type WorkbenchState, workbenchFile, workbenchJson } from '@/lib/workbench'
 
 const small = 'text-sm text-slate-600 dark:text-slate-300'
 const control = 'mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800'
@@ -13,10 +13,10 @@ export default function MaterialPreparation({ state, selectedIds, working, act }
   const [limits, setLimits] = useState({ secondsPerBatch: 30, modelTokensPerCandidate: 1000 })
   const [check, setCheck] = useState<{ id: string; action: ScopeAction; decision: ScopeDecision } | null>(null)
   const [applyFor, setApplyFor] = useState<PreparationPackage | null>(null)
-  const [answers, setAnswers] = useState('{}')
+  const [answers, setAnswers] = useState('[]')
   const [answersConfirmed, setAnswersConfirmed] = useState(false)
   const [answerError, setAnswerError] = useState('')
-  const [applied, setApplied] = useState<{ packageId: string; status: string; jobId?: string; reason?: string; receipt?: { textSha256?: string } } | null>(null)
+  const [applied, setApplied] = useState<{ packageId: string; status: string; jobId?: string; reason?: string; deliveryOutcome?: JobsDbOutcome; receipt?: { textSha256?: string } } | null>(null)
   const current = state.scope.current
   const disabled = working || state.runtime.busy
   function inspect(id: string, action: ScopeAction) {
@@ -25,10 +25,10 @@ export default function MaterialPreparation({ state, selectedIds, working, act }
   function apply(pkg: PreparationPackage) {
     setAnswerError('')
     let parsed: unknown
-    try { parsed = JSON.parse(answers || '{}') } catch { setAnswerError('答案须为 JSON 对象'); return }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { setAnswerError('答案须为 questionnaire 名称到字符串/唯一标签数组的对象'); return }
+    try { parsed = JSON.parse(answers) } catch { setAnswerError('请填入已确认题目的 JSON 数组'); return }
+    if (!Array.isArray(parsed)) { setAnswerError('每题须包含 name、label、type、options 和 value'); return }
     void act('受控单岗申请', async () => {
-      const result = await workbenchJson<{ status: string; jobId?: string; reason?: string; receipt?: { textSha256?: string } }>('/jobsdb/apply', 'POST', { scopeVersion: pkg.scopeVersion, candidateId: pkg.candidateId, preparationId: pkg.id, answers: parsed, answersConfirmed })
+      const result = await workbenchJson<{ status: string; jobId?: string; reason?: string; deliveryOutcome?: JobsDbOutcome; receipt?: { textSha256?: string } }>('/jobsdb/apply', 'POST', { scopeVersion: pkg.scopeVersion, candidateId: pkg.candidateId, preparationId: pkg.id, entries: parsed, answersConfirmed })
       setApplied({ packageId: pkg.id, ...result }); setApplyFor(null)
     })
   }
@@ -42,7 +42,7 @@ export default function MaterialPreparation({ state, selectedIds, working, act }
   return <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-900" aria-label="自动备料与单岗核准包">
     <h2 className="text-lg font-semibold">自动备料与单岗核准包</h2>
     <p className={`${small} mt-2`}>复用核准基线的可核验原字节，或选择 / 排序适用已确认事实的完整原值，另存独立 DOCX。开放式改写、新数字、商业经历、年限和无依据结论只保留草稿；AI 自述审核通过无效。任意 PDF/DOCX 不能仅凭配套正文自动核准，无法核验时明确例外。原四类基线不覆盖。</p>
-    <p className={`${small} mt-2`}>一次准备所选候选，不要求逐岗人审。仅当前有效匹配且无必要核实 / 经验缺口的候选可进入核验。OfferToday / JobsDB 还须在范围中固定并核对实际联系方式，附件必须为可核验 PDF/DOCX（本路径生成 DOCX），消息为下方冻结原文。本入口不会创建申请、claim、发送或把核准当作送达。</p>
+    <p className={`${small} mt-2`}>一次准备所选候选，不要求逐岗人审。仅当前有效匹配且无必要核实 / 经验缺口的候选可进入核验。OfferToday / JobsDB 还须在范围中固定并核对实际联系方式，附件必须为可核验 PDF/DOCX（本路径生成 DOCX），OfferToday 使用冻结消息，JobsDB 只提交单岗申请。本入口不会创建申请、claim、发送或把核准当作送达。</p>
     <form className="mt-3 flex flex-wrap items-end gap-3" aria-label="批量准备材料" onSubmit={event => { event.preventDefault(); setCheck(null); void act('批量准备材料', () => workbenchJson('/candidates/prepare', 'POST', { scopeVersion: current?.version, candidateIds: selectedIds, ...limits })) }}>
       <label className={small}>备料批次秒数上限<input className={control} type="number" min="1" max="120" required value={limits.secondsPerBatch} onChange={e => setLimits({ ...limits, secondsPerBatch: Number(e.target.value) })} /></label>
       <label className={small}>每岗备料 token 上限<input className={control} type="number" min="1" max="100000" required value={limits.modelTokensPerCandidate} onChange={e => setLimits({ ...limits, modelTokensPerCandidate: Number(e.target.value) })} /></label>
@@ -65,19 +65,19 @@ export default function MaterialPreparation({ state, selectedIds, working, act }
           <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words">{pkg.snapshot.resume.content}</pre>
           {pkg.snapshot.facts.map(fact => <p key={fact.id} className={`${small} mt-2 whitespace-pre-wrap break-words`}>[{fact.id} · v{fact.version ?? 1} · {fact.scope} · {fact.source}] {fact.value}{fact.sourceSha256 && ` · 来源 SHA256 ${fact.sourceSha256}`}</p>)}
         </details>
-        <p className="mt-3 font-semibold">冻结精确消息（未发送）</p><pre className="mt-1 whitespace-pre-wrap break-words">{pkg.snapshot.initialMessage}</pre>
-        <p className={`${small} break-all`}>消息 SHA256 {pkg.snapshot.initialMessageSha256}</p>
+        {pkg.target.channel !== 'JOBSDB' && <><p className="mt-3 font-semibold">冻结精确消息（未发送）</p><pre className="mt-1 whitespace-pre-wrap break-words">{pkg.snapshot.initialMessage}</pre>
+        <p className={`${small} break-all`}>消息 SHA256 {pkg.snapshot.initialMessageSha256}</p></>}
         {['OFFERTODAY', 'JOBSDB'].includes(pkg.target.channel) && <p className={`${small} mt-2 whitespace-pre-wrap break-words`}>范围内联系方式核对：{pkg.snapshot.contactVerified ? '已核对' : '未核对'} · {pkg.snapshot.contactFacts?.map(fact => `${fact.label} v${fact.version ?? 1}：${fact.value}`).join('；')}</p>}
-        <div className="mt-3 flex flex-wrap gap-2"><Button type="button" variant="outline" disabled={disabled} onClick={() => download(pkg.snapshot!.resume)}>下载此独立版本</Button>{(pkg.target.channel === 'OFFERTODAY' ? ['CONTACT', 'SEND_CV'] as const : pkg.target.channel === 'BOSS' ? ['CONTACT'] as const : ['APPLY'] as const).map(action => <Button key={action} type="button" variant="outline" disabled={disabled} onClick={() => inspect(pkg.id, action)}>只核验 {action}（不执行）</Button>)}{pkg.target.channel === 'JOBSDB' && pkg.status === 'POLICY_APPROVED' && <Button type="button" disabled={disabled || !state.runtime.jobsDbSingleJobSupported} onClick={() => { setApplyFor(pkg); setAnswers('{}'); setAnswersConfirmed(false); setAnswerError('') }}>受控单岗申请</Button>}</div>
+        <div className="mt-3 flex flex-wrap gap-2"><Button type="button" variant="outline" disabled={disabled} onClick={() => download(pkg.snapshot!.resume)}>下载此独立版本</Button>{(pkg.target.channel === 'OFFERTODAY' ? ['CONTACT', 'SEND_CV'] as const : pkg.target.channel === 'BOSS' ? ['CONTACT'] as const : ['APPLY'] as const).map(action => <Button key={action} type="button" variant="outline" disabled={disabled} onClick={() => inspect(pkg.id, action)}>只核验 {action}（不执行）</Button>)}{pkg.target.channel === 'JOBSDB' && pkg.status === 'POLICY_APPROVED' && <Button type="button" disabled={disabled || !state.runtime.jobsDbSingleJobSupported} onClick={() => { setApplyFor(pkg); setAnswers('[]'); setAnswersConfirmed(false); setAnswerError('') }}>受控单岗申请</Button>}</div>
         {applyFor?.id === pkg.id && <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-700 dark:bg-amber-950" aria-label="受控单岗申请确认">
           <p className="font-semibold">只为本岗提交一次，不自动重投</p>
-          <p className={`${small} mt-1`}>使用此冻结 DOCX、本范围已核对联系方式与下方答案；遇到未列出的表单问题会停止，不猜答。提交后无论回执是否明确都保留原账本，不自动重试。</p>
-          <label className={`${small} mt-3 block`}>已确认答案 JSON（questionnaire 名称 → 精确标签或唯一标签数组）<textarea className={control} rows={4} value={answers} onChange={e => setAnswers(e.target.value)} spellCheck={false} /></label>
+          <p className={`${small} mt-1`}>使用此冻结 DOCX、本范围已核对联系方式与下方答案；遇到未列出的表单问题会停止，不猜答。上传前消耗一次外发额度。上传后问卷不符会停止提交，保留可能已披露的记录。</p>
+          <label className={`${small} mt-3 block`}>单岗问卷 JSON 数组（每题填写 name、原题干 label、控件 type、完整 options 与批准答案 value）<textarea className={control} rows={4} value={answers} onChange={e => { setAnswers(e.target.value); setAnswersConfirmed(false) }} spellCheck={false} /></label>
           <label className={`${small} mt-2 flex gap-2`}><input type="checkbox" checked={answersConfirmed} onChange={e => setAnswersConfirmed(e.target.checked)} />我确认这些答案、冻结附件与范围内联系方式仅用于本岗，且我理解未知问题会停止</label>
           {answerError && <p className="mt-2 text-sm text-rose-700 dark:text-rose-300" role="alert">{answerError}</p>}
           <div className="mt-3 flex gap-2"><Button type="button" disabled={disabled || !answersConfirmed} onClick={() => apply(pkg)}>提交一次</Button><Button type="button" variant="outline" disabled={disabled} onClick={() => setApplyFor(null)}>取消</Button></div>
         </div>}
-        {applied?.packageId === pkg.id && <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800" role="status"><p className="font-semibold">单岗结果：{applied.status}</p>{applied.jobId && <p className={`${small} break-all`}>岗位 {applied.jobId}{applied.receipt?.textSha256 && ` · 回执 SHA256 ${applied.receipt.textSha256}`}</p>}{applied.reason && <p className={`${small} break-words`}>{applied.reason}</p>}</div>}
+        {applied?.packageId === pkg.id && <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800" role="status"><p className="font-semibold">单岗结果：{applied.status}</p>{applied.deliveryOutcome && <p>消息 {applied.deliveryOutcome.messageSent} · CV 实收 {applied.deliveryOutcome.cvActuallyReceived} · 原生占位 {applied.deliveryOutcome.attemptDisposition}</p>}{applied.jobId && <p className={`${small} break-all`}>岗位 {applied.jobId}{applied.receipt?.textSha256 && ` · 回执 SHA256 ${applied.receipt.textSha256}`}</p>}{applied.reason && <p className={`${small} break-words`}>{applied.reason}</p>}</div>}
       </div>}
       {check?.id === pkg.id && <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800" role="status"><p>{check.action}：{check.decision.allowed ? '此刻符合条件，仍未授权 / 执行' : '拒绝执行资格'}</p><p>结果不持久有效；实际动作前必须重核。</p><ul>{check.decision.reasons.map((reason, i) => <li key={i} className="whitespace-pre-wrap break-words">{reason}</li>)}</ul></div>}
     </article>)}</div>

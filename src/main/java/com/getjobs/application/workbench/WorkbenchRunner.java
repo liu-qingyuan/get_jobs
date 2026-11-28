@@ -322,15 +322,13 @@ public final class WorkbenchRunner implements AutoCloseable {
         if (running.child() == null && running.bundle() != null) { runBossSingleJob(id, running); return; }
         Process child = running.child();
         try {
-            if (!child.waitFor(service.task(id).path("executionSeconds").asLong(timeoutSeconds), TimeUnit.SECONDS)) stopProcess(child);
+            if (!child.waitFor(service.task(id).path("executionSeconds").asLong(timeoutSeconds), TimeUnit.SECONDS)) {
+                stopProcess(child);
+                return;
+            }
             if (running.resultFile() != null) {
-                var payload = readSingleResult(running.resultFile());
-                var event = service.json.createObjectNode().put("message", "JobsDB 单岗执行结束；缺少有效绑定回执时保持 UNKNOWN");
-                if (payload != null && payload.path("status").asText().equals("SUBMITTED")) {
-                    event.put("type", "SUBMITTED").put("evidence", payload.toString());
-                    try { service.agentEvent(id, event, running.token()); }
-                    catch (WorkbenchException e) { service.agentEvent(id, event.put("type", "PROGRESS").put("message", e.getMessage()).put("evidence", ""), running.token()); }
-                } else service.agentEvent(id, event.put("type", "PROGRESS").put("message", payload == null ? "执行器未返回回执；不会自动重投" : payload.path("reason").asText("未返回成功回执；不会自动重投")), running.token());
+                var payload = readSingleResult(running.resultFile(), id);
+                service.jobsDbResult(id, payload, child.exitValue(), running.token());
             }
         }
         catch (InterruptedException e) { stopProcess(child); Thread.currentThread().interrupt(); }
@@ -379,8 +377,9 @@ public final class WorkbenchRunner implements AutoCloseable {
                 var task = (ObjectNode) bundle.path("task");
                 var snapshot = task.path("snapshot");
                 Files.createDirectories(directory.resolve("resume"));
-                String resumePath = copyFrozenResume(directory.resolve("resume"), (ObjectNode) snapshot.path("resume"));
-                var dispatch = service.json.createObjectNode().put("kind", "JOBSDB_SINGLE_APPLY").put("taskId", id).put("attemptId", id)
+                var material = service.preparation.approvedMaterial(task);
+                String resumePath = copyFrozenResume(directory.resolve("resume"), material);
+                var dispatch = service.json.createObjectNode().put("kind", "JOBSDB_SINGLE_APPLY").put("schemaVersion", 1).put("taskId", id).put("attemptId", id)
                         .put("stage", "APPLY").put("executionResourceId", task.path("executionResourceId").asText())
                         .put("jdSha256", WorkbenchService.hash(task.path("description").asText().getBytes(StandardCharsets.UTF_8)))
                         .put("jobId", task.path("jobId").asText()).put("url", task.path("url").asText())
@@ -388,10 +387,11 @@ public final class WorkbenchRunner implements AutoCloseable {
                         .put("answersSha256", task.path("answersSha256").asText()).put("profileHash", jobsDbProfileHash())
                         .put("contactHash", WorkbenchService.hash(snapshot.path("contactFacts").toString().getBytes(StandardCharsets.UTF_8)))
                         .put("resultPath", resultFile.toString());
+                dispatch.set("approvedFacts", material.facts());
                 dispatch.set("answers", task.path("answers").deepCopy());
                 dispatch.set("answersSource", task.path("answersSource").deepCopy());
                 if (task.has("answerBank")) dispatch.set("answerBank", task.path("answerBank").deepCopy());
-                // Launch reserves resources only. The worker must check all required questions before requesting APPLY claim.
+                // Launch reserves execution resources. UPLOAD consumes outbound budget before any file disclosure.
                 service.store.write(c -> {
                     var current = service.store.get(c, "task", id);
                     current.set("jobsDbDispatch", dispatch.deepCopy());
@@ -440,32 +440,31 @@ public final class WorkbenchRunner implements AutoCloseable {
         finally { busy.set(false); }
     }
 
-    private String copyFrozenResume(Path directory, ObjectNode resume) throws Exception {
-        Path source = service.file(resume);
-        byte[] bytes = Files.readAllBytes(source);
-        String sha = WorkbenchService.hash(bytes);
-        if (!sha.equals(resume.path("sha256").asText())) throw new WorkbenchException(409, "冻结附件字节已变化；不能提交");
-        String name = Path.of(resume.path("filename").asText()).getFileName().toString();
+    private String copyFrozenResume(Path directory, WorkbenchPreparation.ApprovedMaterial material) throws Exception {
+        String sha = material.resumeSha256();
+        String name = Path.of(material.filename()).getFileName().toString();
         if (!name.toLowerCase(Locale.ROOT).endsWith(".docx")) throw new WorkbenchException(409, "JobsDB 单岗附件须为可核验 DOCX");
         Path target = directory.resolve(name);
-        Files.write(target, bytes);
+        Files.write(target, material.resumeBytes());
         try { Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rw-------")); } catch (UnsupportedOperationException ignored) { }
         if (!sha.equals(WorkbenchService.hash(Files.readAllBytes(target)))) throw new WorkbenchException(409, "冻结附件复制后哈希不一致");
         return target.toString();
     }
 
-    private String jobsDbProfileHash() {
+    private String jobsDbProfileHash() throws java.io.IOException {
         // Chrome rewrites Local State/Preferences during a run. Hash only the resolved isolated
         // profile root; account/session association is independently observed before every claim.
         Path root = service.jobsDbDirectory().toAbsolutePath().normalize();
-        return WorkbenchService.hash(root.toString().getBytes(StandardCharsets.UTF_8));
+        return WorkbenchService.hash(root.toFile().getCanonicalPath().getBytes(StandardCharsets.UTF_8));
     }
 
-    private ObjectNode readSingleResult(Path path) {
+    private ObjectNode readSingleResult(Path path, String taskId) {
         try {
             if (!Files.isRegularFile(path)) return null;
             var node = service.json.readTree(Files.readString(path));
-            return node != null && node.isObject() ? (ObjectNode) node : null;
+            return node instanceof ObjectNode result && result.path("schemaVersion").isInt() && result.path("schemaVersion").intValue() == 1
+                    && result.path("kind").asText().equals("JOBSDB_SINGLE_APPLY") && taskId.equals(result.path("taskId").asText())
+                    && taskId.equals(result.path("attemptId").asText()) ? result : null;
         } catch (Exception e) {
             return null;
         }
