@@ -46,6 +46,25 @@ final class WorkbenchStore {
         catch (Exception e) { throw new IllegalStateException("工作台存储暂不可用", e); }
     }
 
+    /** Consistent read transaction; never opens a write transaction or changes records. */
+    <T> T read(Operation<T> operation) {
+        try (var c = DriverManager.getConnection(url)) {
+            c.createStatement().execute("PRAGMA busy_timeout=5000");
+            c.createStatement().execute("PRAGMA query_only=ON");
+            c.createStatement().execute("BEGIN");
+            try {
+                T result = operation.run(c);
+                c.createStatement().execute("COMMIT");
+                return result;
+            } catch (Exception e) {
+                c.createStatement().execute("ROLLBACK");
+                if (e instanceof RuntimeException runtime) throw runtime;
+                throw new IllegalStateException("工作台只读操作失败", e);
+            }
+        } catch (RuntimeException e) { throw e; }
+        catch (Exception e) { throw new IllegalStateException("工作台存储暂不可用", e); }
+    }
+
     ObjectNode get(Connection c, String kind, String id) throws Exception {
         try (var q = c.prepareStatement("SELECT data FROM workbench_record WHERE kind=? AND id=?")) {
             q.setString(1, kind); q.setString(2, id);
@@ -62,6 +81,26 @@ final class WorkbenchStore {
             q.setString(1, kind);
             try (var rows = q.executeQuery()) {
                 while (rows.next()) output.add(json.readTree(rows.getString(1)));
+            }
+        }
+        return output;
+    }
+
+    /** Association metadata only; large record bodies stay in SQLite and never enter the review response. */
+    ArrayNode index(Connection c, String kind, String... fields) throws Exception {
+        var columns = new StringBuilder("id");
+        for (String field : fields) columns.append(", json_extract(data, '$.").append(field).append("')");
+        var output = json.createArrayNode();
+        try (var q = c.prepareStatement("SELECT " + columns + " FROM workbench_record WHERE kind=? ORDER BY rowid")) {
+            q.setString(1, kind);
+            try (var rows = q.executeQuery()) {
+                while (rows.next()) {
+                    var item = output.addObject().put("id", rows.getString(1));
+                    for (int i = 0; i < fields.length; i++) {
+                        String value = rows.getString(i + 2);
+                        item.put(fields[i], value == null ? "" : value);
+                    }
+                }
             }
         }
         return output;

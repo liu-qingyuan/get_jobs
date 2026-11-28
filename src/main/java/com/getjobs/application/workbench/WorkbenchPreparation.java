@@ -281,6 +281,10 @@ final class WorkbenchPreparation {
     private ObjectNode check(Connection c, ObjectNode record, String action) throws Exception {
         return check(c, record, action, "preparation");
     }
+    /** Read-only derived validity for a review summary; never writes, reserves or re-approves the package. */
+    ObjectNode review(Connection c, ObjectNode record) throws Exception {
+        return check(c, record, "PREPARE", "preparation");
+    }
     ObjectNode checkClaim(Connection c, ObjectNode record, String taskId) throws Exception {
         // Only the credential/claim owner calls this: its native ledger UNKNOWN is the fence, not a retry veto.
         return check(c, record, "PREPARE", taskId, true);

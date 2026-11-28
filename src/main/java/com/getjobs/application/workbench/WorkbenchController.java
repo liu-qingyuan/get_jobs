@@ -25,6 +25,10 @@ public class WorkbenchController {
     @PostMapping("/cycles") public ObjectNode startCycle(@RequestBody ObjectNode input) { return runner.startCycle(input, null); }
     @PostMapping("/cycles/{id}/resume") public ObjectNode resumeCycle(@PathVariable String id, @RequestBody ObjectNode input) { return runner.startCycle(input, id); }
     @GetMapping("/candidates") public ObjectNode candidates() { runner.refreshMatching(); return service.candidates.workspace(); }
+    /** Read-only review cards; unlike /state it never refreshes matching or starts an executor. */
+    @GetMapping("/review-cards") public ObjectNode reviewCards(@RequestParam(required=false) String channel) {
+        return service.candidates.reviewCards(channel);
+    }
     @PostMapping("/candidates/match") public ObjectNode matchCandidates(@RequestBody ObjectNode input) { return runner.matchCandidates(input); }
     @PostMapping("/candidates/prepare") public ObjectNode prepareCandidates(@RequestBody ObjectNode input) { return runner.prepareCandidates(input); }
     @GetMapping("/preparations") public ObjectNode preparations() { return service.preparation.workspace(); }

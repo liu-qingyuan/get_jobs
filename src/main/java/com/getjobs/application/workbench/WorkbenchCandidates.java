@@ -1,5 +1,6 @@
 package com.getjobs.application.workbench;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.getjobs.worker.boss.BossCandidateReader;
@@ -7,6 +8,7 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.time.Instant;
 import java.util.*;
 import static com.getjobs.application.workbench.WorkbenchService.*;
 
@@ -45,6 +47,209 @@ final class WorkbenchCandidates {
         var result = object(); var jobs = store.list(c, "candidate");
         for (var row : jobs) ((ObjectNode) row).set("analysis", service.matching.view(c, (ObjectNode) row));
         result.set("jobs", jobs); result.set("runs", store.list(c, "candidate_run")); return result;
+    }
+
+    // Canonical display tokens match the existing Platform enum; JOB51 is canonical, 51JOB is a legacy alias.
+    private static final Set<String> REVIEW_CHANNELS = Set.of("OFFICIAL", "BOSS", "LIEPIN", "JOB51", "ZHILIAN", "OFFERTODAY", "JOBSDB");
+    private static final Set<String> REVIEW_CHANNEL_ALIASES = Set.of("51JOB");
+    private static final String NO_ADVICE = "暂无建议";
+    private static final String STALE_REASON = "分析输入已变化，当前结论待定；旧依据不作为当前建议";
+    private record PreparationRef(String id, String candidateId, String analysisId, String status) { }
+    private static final Comparator<ObjectNode> REVIEW_ORDER = Comparator
+            .comparingInt(WorkbenchCandidates::reviewGroup)
+            .thenComparing(WorkbenchCandidates::lastSeen, Comparator.reverseOrder())
+            .thenComparing(card -> card.path("candidateId").asText());
+
+    /** Read-only review cards; never refreshes matching, reserves budget, creates tasks/claims or persists derived state. */
+    ObjectNode reviewCards(String channel) {
+        String selected = channel == null ? "" : channel.trim();
+        if (!selected.isEmpty() && !REVIEW_CHANNELS.contains(selected) && !REVIEW_CHANNEL_ALIASES.contains(selected))
+            throw new WorkbenchException(400, "channel 参数无效");
+        String canonical = selected.equals("51JOB") ? "JOB51" : selected;
+        return store.read(c -> reviewCards(c, canonical));
+    }
+    private ObjectNode reviewCards(Connection c, String channel) throws Exception {        var scope = service.scope.latest(c);
+        int scopeVersion = scope == null ? 0 : scope.path("version").asInt();
+        var preparations = preparations(c);
+        var cards = new ArrayList<ObjectNode>();
+        for (var row : store.list(c, "candidate")) {
+            var candidate = (ObjectNode) row;
+            if (!channel.isEmpty() && !candidate.path("channel").asText().equals(channel)) continue;
+            cards.add(card(c, candidate, scopeVersion, preparations));
+        }
+        cards.sort(REVIEW_ORDER);
+        var result = object(); var output = result.putArray("cards");
+        for (var card : cards) output.add(card);
+        return result;
+    }
+
+    /** Only association metadata is retained here; package body, snapshot, task, claim and receipt never leave the store. */
+    private List<PreparationRef> preparations(Connection c) throws Exception {
+        var refs = new ArrayList<PreparationRef>();
+        for (var row : store.index(c, "preparation", "candidateId", "analysisId", "status"))
+            refs.add(new PreparationRef(row.path("id").asText(), row.path("candidateId").asText(),
+                    row.path("analysisId").asText(), row.path("status").asText()));
+        return refs;
+    }
+
+    private ObjectNode card(Connection c, ObjectNode candidate, int scopeVersion, List<PreparationRef> preparations) throws Exception {
+        var analysis = service.matching.view(c, candidate);
+        var decision = service.scope.matchingDecision(c, scopeVersion, reviewTarget(candidate));
+        boolean stale = analysis.path("stale").asBoolean();
+        String status = analysis.path("status").asText("NOT_ANALYZED");
+        String exception = analysis.path("exception").asText("");
+        var findings = analysis.path("findings");
+        String ineligible = ineligibleReason(candidate, decision);
+        if (ineligible == null && !stale && findings.isArray()) for (var finding : findings) {
+            String kind = finding.path("kind").asText();
+            if (kind.equals("HARD_REQUIREMENT") || kind.equals("NOT_APPLICABLE")) {
+                ineligible = "不适用（" + finding.path("reason").asText("硬性条件不满足") + "）";
+                break;
+            }
+        }
+        if (ineligible == null && status.equals("INELIGIBLE"))
+            ineligible = "不适用（" + firstText(analysis.path("questions"), "reason", "当前范围不允许") + "）";
+        String verdict = "UNDETERMINED";
+        String reason = "";
+        var requirements = service.json.createArrayNode();
+        String nextAction = NO_ADVICE;
+        if (ineligible != null) {
+            status = "INELIGIBLE";
+            reason = ineligible;
+        } else if (!exception.isEmpty()) {
+            reason = exception;
+        } else if (stale) {
+            reason = STALE_REASON;
+        } else if (!status.equals("NOT_ANALYZED")) {
+            if (!findings.isArray() || findings.isEmpty()) reason = "暂无分析依据";
+            else {
+                verdict = analysis.path("verdict").asText("UNDETERMINED");
+                for (var finding : findings) {
+                    requirements.add(requirement(finding));
+                    if (finding.path("suggestion") instanceof ObjectNode suggestion)
+                        nextAction = "项目目标：" + suggestion.path("goal").asText() + "；验收：" + suggestion.path("acceptance").asText();
+                }
+            }
+        }
+        var card = object();
+        card.put("candidateId", candidate.path("id").asText())
+                .put("channel", candidate.path("channel").asText())
+                .put("company", candidate.path("company").asText())
+                .put("title", candidate.path("title").asText())
+                .put("url", candidate.path("url").asText())
+                .put("region", candidate.path("region").asText())
+                .put("language", candidate.path("language").asText())
+                .put("lastSeenAt", candidate.path("lastSeenAt").asText())
+                .put("stale", stale)
+                .put("description", candidate.path("description").asText())
+                .put("descriptionComplete", candidate.path("descriptionComplete").asBoolean())
+                .put("status", status).put("statusLabel", label(status))
+                .put("verdict", verdict).put("verdictLabel", label(verdict))
+                .put("reason", reason)
+                .put("nextAction", nextAction);
+        card.set("requirements", requirements);
+        card.set("preparation", preparation(c, candidate, analysis, preparations));
+        return card;
+    }
+
+    private ObjectNode requirement(JsonNode finding) {
+        String kind = finding.path("kind").asText();
+        boolean hasGap = gap(kind, finding);
+        var item = object().put("kind", kind)
+                .put("requirementQuote", finding.path("requirementQuote").asText())
+                .put("reason", finding.path("reason").asText())
+                .put("gap", hasGap)
+                .put("gapReason", hasGap ? finding.path("reason").asText() : "");
+        var evidence = item.putArray("evidence");
+        for (var reference : finding.path("evidence")) {
+            var source = reference.path("source");
+            evidence.addObject().put("type", reference.path("type").asText())
+                    .put("id", reference.path("id").asText())
+                    .put("quote", reference.path("quote").asText())
+                    .put("label", source.path("label").asText(source.path("key").asText("")));
+        }
+        if (finding.path("suggestion") instanceof ObjectNode suggestion) item.set("suggestion", suggestion.deepCopy());
+        return item;
+    }
+
+    private ObjectNode preparation(Connection c, ObjectNode candidate, ObjectNode analysis, List<PreparationRef> preparations) throws Exception {
+        String analysisId = analysis.path("id").asText("");
+        PreparationRef selected = null;
+        if (!analysisId.isEmpty()) for (var ref : preparations)
+            if (ref.candidateId().equals(candidate.path("id").asText()) && ref.analysisId().equals(analysisId)) selected = ref;
+        if (selected == null) return object().put("status", "NOT_PREPARED").put("label", "未准备");
+        if (selected.status().equals("POLICY_APPROVED")) {
+            boolean allowed = service.preparation.review(c, store.get(c, "preparation", selected.id())).path("allowed").asBoolean();
+            return object().put("status", allowed ? "PREPARED" : "DERIVED_STALE").put("label", allowed ? "已准备" : "派生过期");
+        }
+        if (selected.status().equals("INVALIDATED")) return object().put("status", "DERIVED_STALE").put("label", "派生过期");
+        return object().put("status", "MATERIAL_EXCEPTION").put("label", "材料异常");
+    }
+
+    private ObjectNode reviewTarget(ObjectNode candidate) {
+        var target = object();
+        for (String field : List.of("url", "title", "company", "description", "channel", "region", "language", "direction", "lastReadDescription"))
+            target.set(field, candidate.path(field));
+        return target;
+    }
+
+    private static String ineligibleReason(ObjectNode candidate, ObjectNode decision) {
+        if (!decision.path("allowed").asBoolean()) {
+            for (var code : decision.path("reasonCodes")) if (code.asText().equals("EXPIRED")) return "不适用（范围已到期）";
+            return "不适用（" + firstText(decision.path("reasons"), "", "当前范围不允许") + "）";
+        }
+        if (Set.of("EXPIRED", "INCOMPLETE").contains(candidate.path("status").asText()))
+            return "不适用（" + firstText(candidate.path("reasons"), "", "候选已失效或信息不足") + "）";
+        if (!candidate.path("descriptionComplete").asBoolean() || candidate.path("description").asText().length() < 120)
+            return "不适用（未取得完整 JD，不能以标题/摘要分析）";
+        return null;
+    }
+
+    private static String firstText(JsonNode array, String field, String fallback) {
+        if (array != null && array.isArray()) for (var item : array) {
+            String value = item.isObject() ? item.path(field).asText("") : item.asText("");
+            if (!value.isBlank()) return value;
+        }
+        return fallback;
+    }
+
+    private static boolean gap(String kind, JsonNode finding) {
+        return switch (kind) {
+            case "NEEDS_FACTS", "EXPERIENCE_GAP", "HARD_REQUIREMENT", "NOT_APPLICABLE" -> true;
+            case "PARTIAL" -> finding.path("mandatoryGap").asBoolean() || finding.path("materialGap").asBoolean()
+                    || finding.path("requiresCvChange").asBoolean();
+            default -> false;
+        };
+    }
+
+    private static Instant lastSeen(ObjectNode card) {
+        try { return Instant.parse(card.path("lastSeenAt").asText()); }
+        catch (RuntimeException e) { return Instant.EPOCH; }
+    }
+
+    private static int reviewGroup(ObjectNode card) {
+        String status = card.path("status").asText(), verdict = card.path("verdict").asText();
+        if (status.equals("INELIGIBLE")) return 4;
+        if (status.equals("NOT_ANALYZED")) return 3;
+        if (Set.of("EXPERIENCE_GAP", "NEEDS_FACTS").contains(status) || verdict.equals("MISMATCH")) return 1;
+        if (verdict.equals("MATCH")) return 0;
+        return 2;
+    }
+
+    /** One fixed Chinese label table for analysis/verdict states; internal enums stay readable. */
+    private static String label(String value) {
+        return switch (value) {
+            case "INELIGIBLE" -> "不适用";
+            case "MISMATCH" -> "不匹配";
+            case "UNDETERMINED" -> "待定";
+            case "MATCH" -> "建议投";
+            case "ANALYSIS_READY" -> "已分析";
+            case "NEEDS_FACTS" -> "待补事实";
+            case "EXPERIENCE_GAP" -> "经验缺口";
+            case "NOT_ANALYZED" -> "未分析";
+            case "ANALYSIS_EXCEPTION" -> "分析异常";
+            default -> value;
+        };
     }
 
     ObjectNode discover(ObjectNode input, Reader reader) { return discover(input, reader, null, Set.of()); }
