@@ -133,6 +133,62 @@ public class BossJobService implements JobPlatformService {
         // executeDelivery 的 finally 才释放任务槽；禁止超时后并发启动新任务。
     }
 
+    /**
+     * Single-job reviewed first-contact entry used by the workbench adapter. It takes the same
+     * execution slot and the same application-owned browser as the old reviewed entry, then runs
+     * the one shared {@link Boss#firstContact}. It never starts a second session; a busy slot is a
+     * block, not a takeover.
+     */
+    public Boss.FirstContactOutcome firstContact(Boss.FirstContactRequest request, Boss.FirstContactGate gate) {
+        synchronized (this) {
+            if (isRunning) {
+                return new Boss.FirstContactOutcome("blocked", "not attempted", "not attempted", "", "",
+                        "Boss 任务正在运行，不能同时首击；不会停止或接管现有会话");
+            }
+            isRunning = true;
+            shouldStop = false;
+            runningSince = System.currentTimeMillis();
+        }
+        boolean monitoringPaused = false;
+        try {
+            playwrightManager.ensureReady();
+            Page page = playwrightManager.getBossPage();
+            if (page == null || page.isClosed())
+                return new Boss.FirstContactOutcome("blocked", "not attempted", "not attempted", "", "",
+                        "Boss 页面未初始化；不创建替代会话");
+            if (!playwrightManager.isLoggedIn(PLATFORM))
+                return new Boss.FirstContactOutcome("blocked", "not attempted", "not attempted", "", "",
+                        "请先登录Boss直聘");
+            playwrightManager.pauseBossMonitoring();
+            monitoringPaused = true;
+            BossConfig config = configService.getBossConfig();
+            Boss boss = bossProvider.getObject();
+            boss.setPage(page);
+            boss.setConfig(config);
+            boss.setShouldStopCallback(this::shouldStop);
+            return playwrightManager.callOnPlaywright(
+                    () -> boss.firstContact(page, request, this::guardStop, gate));
+        } catch (Exception e) {
+            String message = e.getMessage() == null || e.getMessage().isBlank()
+                    ? "Boss 单岗首击未开始" : e.getMessage();
+            return new Boss.FirstContactOutcome("blocked", "not attempted", "not attempted", "", "",
+                    "Boss 单岗首击未开始：" + message);
+        } finally {
+            if (monitoringPaused) {
+                try { playwrightManager.resumeBossMonitoring(); } catch (Exception ignored) { }
+            }
+            synchronized (this) {
+                shouldStop = false;
+                runningSince = 0L;
+                isRunning = false;
+            }
+        }
+    }
+
+    private void guardStop() {
+        if (shouldStop) throw new IllegalStateException("用户停止：未继续首击");
+    }
+
     /** 任务已经跑了多久（毫秒）；没在跑返回 0 */
     public long runningForMillis() {
         long since = runningSince;

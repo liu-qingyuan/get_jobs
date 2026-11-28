@@ -87,12 +87,16 @@ final class ChatDelivery {
         }
 
         WorkbenchService.require(mode.equals(APPROVED_MESSAGE), "未知联系回执模式");
-        String conversation = WorkbenchService.text(receipt, "conversationId", 300, true);
-        WorkbenchService.text(receipt, "messageId", 300, true);
+        boolean bossFirstContact = task.path("channel").asText().equals("BOSS") && !task.has("contactReceipt");
+        // The exact approved text hash binds the corresponding message for a Boss first contact;
+        // no prior conversation or platform message id exists yet. Existing conversations and the
+        // OfferToday path still require both identifiers.
+        String conversation = WorkbenchService.text(receipt, "conversationId", 300, !bossFirstContact);
+        WorkbenchService.text(receipt, "messageId", 300, !bossFirstContact);
         WorkbenchService.require(WorkbenchService.text(receipt, "initialMessageSha256", 64, true)
                         .equals(task.path("snapshot").path("initialMessageSha256").asText()),
                 "联系回执必须匹配已批准的精确消息");
-        if (task.has("packageId"))
+        if (task.has("packageId") && !conversation.isBlank())
             WorkbenchService.require(conversation.equals(task.path("observedExecutionContext").path("conversationId").asText()),
                     "回执不是本次观察/dispatch 的同一会话");
         return receipt;

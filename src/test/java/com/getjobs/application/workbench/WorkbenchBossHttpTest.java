@@ -155,6 +155,9 @@ class WorkbenchBossHttpTest {
                 assertTrue(saved.has("contactReceipt"), saved.toPrettyString());
                 assertEquals("PLATFORM_AUTO_GREETING", saved.path("contactReceipt").path("contactMode").asText());
                 assertFalse(saved.has("cvReceipt"), saved.toPrettyString());
+                assertEquals("claimed", saved.path("deliveryOutcome").path("attemptDisposition").asText(), saved.toPrettyString());
+                assertEquals("confirmed with evidence", saved.path("deliveryOutcome").path("messageSent").asText(), saved.toPrettyString());
+                assertEquals("not attempted", saved.path("deliveryOutcome").path("cvActuallyReceived").asText(), saved.toPrettyString());
             }
         }
     }

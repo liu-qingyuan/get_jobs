@@ -52,14 +52,16 @@ export interface TaskEvent {
   at: string
 }
 
-export interface JobsDbOutcome {
-  messageSent: 'not applicable'
+export interface DeliveryOutcome {
+  messageSent: 'not applicable' | 'not attempted' | 'unknown' | 'confirmed with evidence'
   cvActuallyReceived: 'not attempted' | 'unknown' | 'confirmed with evidence'
   attemptDisposition: 'blocked' | 'claimed' | 'duplicate'
 }
 
+export type JobsDbOutcome = DeliveryOutcome
+
 export interface Task {
-  deliveryOutcome?: JobsDbOutcome
+  deliveryOutcome?: DeliveryOutcome
   id: string
   kind: TaskKind
   channel: Channel

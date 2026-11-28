@@ -24,6 +24,8 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -86,6 +88,29 @@ public class Boss {
     @FunctionalInterface
     public interface ProgressCallback {
         void accept(String message, Integer current, Integer total);
+    }
+
+    public static final String CONTACT_MODE_AUTO_GREETING = "PLATFORM_AUTO_GREETING";
+    public static final String CONTACT_MODE_APPROVED_MESSAGE = "APPROVED_MESSAGE";
+
+    /**
+     * Everything the reviewed first contact needs. The approved description is the exact JD the
+     * operator/package approved; the live detail page must still match it before the claim.
+     */
+    public record FirstContactRequest(Path approval, Path attemptsDirectory, String canonicalUrl,
+            String navigateUrl, String company, String title, String approvedMessage,
+            List<String> approvedDescriptions, long timeoutMillis) { }
+
+    /** First-contact observations. Claim/block/duplicate is never a delivery receipt. */
+    public record FirstContactOutcome(String attemptDisposition, String messageSent, String cvActuallyReceived,
+            String contactMode, String evidence, String reason) {
+        public boolean confirmed() { return "confirmed with evidence".equals(messageSent); }
+    }
+
+    /** Optional budget/stage authorization. It must never replace the ReviewedApplication claim. */
+    @FunctionalInterface
+    public interface FirstContactGate {
+        void beforeClaim(Page detailPage) throws Exception;
     }
 
     // 通过 Lombok @RequiredArgsConstructor 使用构造器注入 bossService 与 aiService
@@ -1020,6 +1045,7 @@ public class Boss {
     }
 
     /**
+     * 旧审核入口的窄首击：准备审核正文后进入共用 {@link #firstContact}。
      * 备注：目前Boss无法通过新标签页打开立即沟通按钮，所以只能点击更多详情，然后从更多详情里打开聊天按钮
      */
     @SneakyThrows
@@ -1071,184 +1097,321 @@ public class Boss {
         // Only one exact reviewed job/text may leave the application. Query parameters
         // are per-visit tracking tokens; approval binds the canonical job URL.
         String canonicalUrl = detailUrl.split("\\?", 2)[0];
-        ReviewedApplication approval;
         try {
-            approval = ReviewedApplication.verify(ReviewedApplication.APPROVAL,
+            ReviewedApplication.verify(ReviewedApplication.APPROVAL,
                     canonicalUrl, job.getCompanyName(), job.getJobName(), message);
         } catch (Exception e) {
             throw stop("单岗审核失效或岗位/正文不匹配：已停止发送");
         }
         checkAccess(page);
+
         Page detailPage = page.context().newPage();
-        boolean attempted = false;
-        boolean confirmed = false;
+        boolean keepOpen = false;
         try {
-        checkAccess(page);
-        Response detailNavigation = detailPage.navigate(detailUrl, new Page.NavigateOptions()
-                .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED).setTimeout(15_000));
-        if (detailNavigation != null) observeResponse(detailNavigation);
-        checkAccess(detailPage);
-        PlaywrightUtil.sleep(1);
-
-        // 3. 查找"立即沟通"按钮
-        Locator chatBtn = detailPage.locator("a.btn-startchat, a.op-btn-chat");
-        boolean foundChatBtn = false;
-        for (int i = 0; i < 5; i++) {
-            checkAccess(detailPage);
-            if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
-                log.info("停止指令已触发，结束查找聊天按钮 | 公司：{} | 岗位：{}", job.getCompanyName(), job.getJobName());
-                try { detailPage.close(); } catch (Exception ignore) {}
-                return false;
-            }
-            if (chatBtn.count() > 0 && (chatBtn.first().textContent().contains("立即沟通"))) {
-                foundChatBtn = true;
-                break;
-            }
-            PlaywrightUtil.sleep(1);
-        }
-        if (!foundChatBtn) {
-            throw stop("岗位详情解析异常：立即沟通按钮未出现");
-        }
-        checkAccess(detailPage);
-        try {
-            // Revalidate expiry/revocation after navigation and immediately before claim.
-            approval = ReviewedApplication.verify(ReviewedApplication.APPROVAL,
-                    canonicalUrl, job.getCompanyName(), job.getJobName(), message);
-            approval.claim();
-        } catch (Exception e) {
-            throw stop("发送审核或尝试记录检查失败：停止且不自动重试");
-        }
-        // A pre-existing confirmation is not evidence of this attempt.
-        Locator automaticConfirmation = detailPage.getByText("已向BOSS发送消息",
-                new Page.GetByTextOptions().setExact(true));
-        boolean hadAutomaticConfirmation = automaticConfirmation.count() > 0
-                && automaticConfirmation.first().isVisible();
-        attempted = true;
-        checkAccess(detailPage);
-        chatBtn.first().click();
-        PlaywrightUtil.sleep(1);
-
-        // 4. 等待聊天输入框
-        Locator inputLocator = detailPage.locator("div#chat-input.chat-input[contenteditable='true'], textarea.input-area");
-        boolean inputReady = false;
-        for (int i = 0; i < 10; i++) {
-            checkAccess(detailPage);
-            if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
-                log.info("停止指令已触发，结束等待聊天输入框 | 公司：{} | 岗位：{}", job.getCompanyName(), job.getJobName());
-                // An attempted contact remains open until its outcome is verified.
-                return false;
-            }
-            // BOSS may send its configured greeting directly, without a chat editor.
-            // Confirm the exact platform receipt + identity, save evidence, then stop
-            // this single reviewed job without sending a second custom message.
-            if (!hadAutomaticConfirmation && automaticConfirmation.count() == 1
-                    && automaticConfirmation.first().isVisible()
-                    && canonicalUrl.equals(detailPage.url().split("\\?", 2)[0])
-                    && chatBtn.count() > 0
-                    && chatBtn.first().textContent().contains("继续沟通")) {
-                String visible = detailPage.locator("body").innerText();
-                if (!visible.contains(job.getCompanyName()) || !visible.contains(job.getJobName()))
-                    throw stop("平台确认身份不匹配：停止并保留尝试记录");
-                checkAccess(detailPage);
-                try {
-                    var evidenceDir = java.nio.file.Path.of("target", "boss-attempts");
-                    var evidenceId = extractEncryptId(canonicalUrl);
-                    java.nio.file.Files.createDirectories(evidenceDir);
-                    detailPage.screenshot(new Page.ScreenshotOptions()
-                            .setPath(evidenceDir.resolve(evidenceId + ".png")));
-                    java.nio.file.Files.writeString(evidenceDir.resolve(evidenceId + ".txt"),
-                            "Time: " + java.time.Instant.now() + "\nURL: " + canonicalUrl
-                                    + "\nCompany: " + job.getCompanyName() + "\nJob: " + job.getJobName()
-                                    + "\nType: platform_automatic_greeting\nVisible platform text:\n" + visible);
-                } catch (Exception e) {
-                    throw stop("平台确认留证失败：停止并保留尝试记录，不自动重试");
-                }
-                checkAccess(detailPage);
+            var request = new FirstContactRequest(ReviewedApplication.APPROVAL,
+                    ReviewedApplication.defaultAttemptsDirectory(ReviewedApplication.APPROVAL),
+                    canonicalUrl, detailUrl, job.getCompanyName(), job.getJobName(), message,
+                    List.of(job.getJobInfo() == null ? "" : job.getJobInfo()), 60_000L);
+            var outcome = firstContact(detailPage, request, () -> checkAccess(detailPage), null);
+            keepOpen = "claimed".equals(outcome.attemptDisposition()) && !outcome.confirmed();
+            if (outcome.confirmed()) {
+                captureFirstContactEvidence(detailPage, canonicalUrl, job, outcome);
                 resultList.add(job);
-                confirmed = true;
-                log.info("平台已确认首次联系（自动招呼，无附件）：{} | {}", job.getCompanyName(), job.getJobName());
+                log.info("平台已确认首次联系（{}，无附件）：{} | {}", outcome.contactMode(),
+                        job.getCompanyName(), job.getJobName());
                 return true;
             }
-            if (inputLocator.count() > 0 && inputLocator.first().isVisible()) {
-                inputReady = true;
-                break;
-            }
-            PlaywrightUtil.sleep(1);
-        }
-        if (!inputReady) throw stop("沟通结果未知：已保留尝试标记，停止且不自动重试");
-
-        String sentReceipt = "已发送\n\n" + message;
-        boolean hadSentReceipt = detailPage.locator("body").innerText().contains(sentReceipt);
-
-        // 6. 输入打招呼语
-        Locator input = inputLocator.first();
-        checkAccess(detailPage);
-        input.click();
-        checkAccess(detailPage);
-        Object tagObj = input.evaluate("el => el.tagName.toLowerCase()");
-        if (tagObj instanceof String && ((String) tagObj).equals("textarea")) {
-            input.fill(message);
-        } else {
-            // 对 contenteditable 节点写入文本并派发 input 事件
-            input.evaluate("(el, msg) => { el.innerText = msg; el.dispatchEvent(new Event('input')); }", message);
-        }
-
-        // 7. 点击发送按钮（div.send-message 或 button.btn-send）
-        Locator sendText = detailPage.locator("div.send-message, button[type='send'].btn-send, button.btn-send");
-        if (sendText.count() > 0) {
-            checkAccess(detailPage);
-            sendText.first().click();
-            checkAccess(detailPage);
-            PlaywrightUtil.sleep(1);
-            // Preserve the visible platform outcome for independent verification.
-            // A click is only an attempt, never proof of delivery.
-            try {
-                String visible = detailPage.locator("body").innerText();
-                // The platform may first render "发送中". Observe only; never resend.
-                for (int receiptPoll = 0; receiptPoll < 20
-                        && !hadSentReceipt && !visible.contains(sentReceipt); receiptPoll++) {
-                    checkAccess(detailPage);
-                    detailPage.waitForTimeout(500);
-                    checkAccess(detailPage);
-                    visible = detailPage.locator("body").innerText();
-                }
-                boolean freshSentReceipt = !hadSentReceipt && visible.contains(sentReceipt)
-                        && canonicalUrl.equals(detailPage.url().split("\\?", 2)[0])
-                        && visible.contains(job.getCompanyName()) && visible.contains(job.getJobName());
-                String evidenceId = extractEncryptId(detailUrl);
-                java.nio.file.Path evidenceDir = java.nio.file.Path.of("target", "boss-attempts");
-                java.nio.file.Files.createDirectories(evidenceDir);
-                detailPage.screenshot(new Page.ScreenshotOptions()
-                        .setPath(evidenceDir.resolve(evidenceId + ".png")));
-                java.nio.file.Files.writeString(evidenceDir.resolve(evidenceId + ".txt"),
-                        "Time: " + java.time.Instant.now() + "\nURL: " + canonicalUrl
-                                + "\nCompany: " + job.getCompanyName() + "\nJob: " + job.getJobName()
-                                + "\nVisible platform text:\n" + visible);
-                checkAccess(detailPage);
-                if (freshSentReceipt) {
-                    resultList.add(job);
-                    confirmed = true;
-                    log.info("平台已确认首次联系（审核正文，无附件）：{} | {}", job.getCompanyName(), job.getJobName());
-                    return true;
-                }
-            } catch (Exception e) {
-                log.warn("平台结果留证失败，发送结果仍待核验");
-            }
-        } else {
-            log.warn("未找到发送按钮，发送结果仍待核验：{}", job.getJobName());
-        }
-
-        // No authoritative platform receipt exists here. Never increment success or
-        // overwrite durable history with failure for an ambiguous attempt.
-        throw stop("发送结果待平台核验：已保留尝试标记，任务停止且不自动重试");
+            if ("duplicate".equals(outcome.attemptDisposition()))
+                throw stop("该岗位已有 ReviewedApplication 尝试记录；须先人工核验结果");
+            if ("blocked".equals(outcome.attemptDisposition()))
+                throw stop("单岗首击被阻止：" + outcome.reason());
+            // No authoritative platform receipt exists here. Never increment success or
+            // overwrite durable history with failure for an ambiguous attempt.
+            throw stop("发送结果待平台核验：已保留尝试标记，任务停止且不自动重试");
         } finally {
             // Close only this detail tab after durable platform proof; retain ambiguous attempts.
-            if (!attempted || confirmed) {
+            if (!keepOpen) {
                 try { detailPage.close(); } catch (Exception ignored) { }
             }
         }
     }
 
+    private void captureFirstContactEvidence(Page detailPage, String canonicalUrl, Job job,
+            FirstContactOutcome outcome) {
+        try {
+            Path evidenceDir = Path.of("target", "boss-attempts");
+            Files.createDirectories(evidenceDir);
+            String evidenceId = extractEncryptId(canonicalUrl);
+            if (evidenceId == null || evidenceId.isBlank()) evidenceId = BossCandidateReader.jobId(canonicalUrl);
+            detailPage.screenshot(new Page.ScreenshotOptions().setPath(evidenceDir.resolve(evidenceId + ".png")));
+            Files.writeString(evidenceDir.resolve(evidenceId + ".txt"),
+                    "Time: " + java.time.Instant.now() + "\nURL: " + canonicalUrl
+                            + "\nCompany: " + job.getCompanyName() + "\nJob: " + job.getJobName()
+                            + "\nContactMode: " + outcome.contactMode()
+                            + "\nEvidence: " + outcome.evidence()
+                            + "\nVisible platform text:\n" + detailPage.locator("body").innerText());
+        } catch (Exception e) {
+            // The platform observation is only useful if this attempt's evidence is retained.
+            throw new IllegalStateException("平台确认留证失败；保留 claim，不自动重试", e);
+        }
+    }
+
+    /**
+     * The one reviewed first-contact operation. Both the old reviewed entry and the workbench
+     * adapter enter here. The ReviewedApplication claim is the only click fence; a gate may only
+     * consume budget/stage authorization before it.
+     */
+    public FirstContactOutcome firstContact(Page detailPage, FirstContactRequest request,
+            Runnable accessCheck, FirstContactGate beforeClaim) {
+        if (detailPage == null || detailPage.isClosed()) return blocked("Boss 详情页不可用；未 claim、未点击");
+        final String canonical;
+        final String navigate;
+        try {
+            canonical = BossCandidateReader.detailUrl(request.canonicalUrl());
+            String raw = request.navigateUrl() == null || request.navigateUrl().isBlank()
+                    ? request.canonicalUrl() : request.navigateUrl();
+            if (!BossCandidateReader.detailUrl(raw).equals(canonical))
+                return blocked("Boss 导航链接与规范岗位不一致；未 claim、未点击");
+            navigate = raw;
+        } catch (IllegalArgumentException e) {
+            return blocked("Boss 岗位链接不规范；未 claim、未点击");
+        }
+        if (config != null) {
+            try { ReviewedApplication.requireSupportedOptions(config); }
+            catch (IllegalStateException e) { return blocked(e.getMessage()); }
+        }
+        if (request.approvedMessage() == null || request.approvedMessage().isBlank())
+            return blocked("核准正文为空；未 claim、未点击");
+        if (request.approvedDescriptions() == null
+                || request.approvedDescriptions().stream().allMatch(v -> v == null || v.isBlank()))
+            return blocked("没有可核对的核准 JD；未 claim、未点击");
+
+        boolean claimed = false;
+        boolean clicked = false;
+        long timeout = request.timeoutMillis() > 0 ? request.timeoutMillis() : 60_000L;
+        long deadline = System.nanoTime() + Math.min(timeout, 120_000L) * 1_000_000L;
+        Path attempts = request.attemptsDirectory() == null
+                ? ReviewedApplication.defaultAttemptsDirectory(request.approval()) : request.attemptsDirectory();
+        try {
+            access(accessCheck);
+            ReviewedApplication approval = ReviewedApplication.verify(request.approval(),
+                    attempts, canonical, request.company(), request.title(), request.approvedMessage());
+            if (approval.claimed()) return duplicate("该岗位已有 ReviewedApplication 尝试记录：" + approval.claimPath() + "；不重投");
+
+            detailPage.navigate(navigate, new Page.NavigateOptions()
+                    .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(15_000));
+            access(accessCheck);
+            if (BossCandidateReader.requiresUserAction(detailPage))
+                return blocked("Boss 要求登录或安全验证；未 claim、未点击");
+            if (!sameCanonical(detailPage.url(), canonical))
+                return blocked("Boss 岗位页面被重定向，不能绑定目标；未 claim、未点击");
+            String visible = body(detailPage);
+            if (!visible.contains(request.company()) || !visible.contains(request.title()))
+                return blocked("Boss 岗位页面的公司/职位与核准目标不符；未 claim、未点击");
+            String liveJd = liveDescription(detailPage);
+            if (liveJd.isEmpty()) return blocked("现场 JD 不可读；未 claim、未点击");
+            if (!approvedDescription(request.approvedDescriptions(), liveJd))
+                return blocked("现场 JD 与核准版本不一致；未 claim、未点击");
+            if (visible(autoConfirmation(detailPage)) || sentPlatformGreeting(visible, request.title()))
+                return blocked("页面已显示此岗位的既有自动招呼；不重复联系");
+            Locator chat = firstVisibleStart(detailPage);
+            if (chat == null) return blocked("未找到可核实的首次立即沟通按钮；未 claim、未点击");
+            access(accessCheck);
+
+            // Optional budget/stage authorization. It is not the click fence.
+            if (beforeClaim != null) beforeClaim.beforeClaim(detailPage);
+            access(accessCheck);
+            // Revalidate expiry/revocation/hash immediately before the durable claim.
+            approval = ReviewedApplication.verify(request.approval(), attempts,
+                    canonical, request.company(), request.title(), request.approvedMessage());
+            try {
+                approval.claim();
+            } catch (java.nio.file.FileAlreadyExistsException e) {
+                return duplicate("同岗 claim 已被另一入口取得：" + approval.claimPath() + "；不点击");
+            }
+            claimed = true;
+
+            chat.click(new Locator.ClickOptions().setTimeout(5_000));
+            clicked = true;
+            return observeFirstContact(detailPage, canonical, request, accessCheck, deadline);
+        } catch (Exception e) {
+            String reason = safe(e);
+            if (!claimed) return blocked("Boss 首击在 claim 前停止：" + reason);
+            return claimedUnknown(clicked
+                    ? "已 claim 并点击一次但未能核实结果；保留 UNKNOWN，不重试：" + reason
+                    : "已 claim 但点击前中断；保留 UNKNOWN，不重试：" + reason);
+        }
+    }
+
+    private FirstContactOutcome observeFirstContact(Page detailPage, String canonical,
+            FirstContactRequest request, Runnable accessCheck, long deadline) {
+        String sentReceipt = "已发送\n\n" + request.approvedMessage();
+        boolean sentExact = false;
+        boolean hadSentReceipt = false;
+        long editorSeenAt = 0L;
+        while (System.nanoTime() < deadline) {
+            access(accessCheck);
+            if (BossCandidateReader.requiresUserAction(detailPage))
+                return claimedUnknown("点击后 Boss 要求登录或安全验证；保留 UNKNOWN，不重试");
+            String current;
+            try { current = body(detailPage); }
+            catch (RuntimeException navigating) { detailPage.waitForTimeout(100); continue; }
+            boolean same = sameCanonical(detailPage.url(), canonical)
+                    && current.contains(request.company()) && current.contains(request.title());
+            // A platform auto greeting is the whole first contact; never add a custom text after it.
+            if (!sentExact && same) {
+                boolean directConfirmation = visible(autoConfirmation(detailPage));
+                boolean platformGreeting = sentPlatformGreeting(current, request.title());
+                if (directConfirmation || platformGreeting)
+                    return claimedFirstContact(request, canonical, CONTACT_MODE_AUTO_GREETING,
+                            directConfirmation ? "已向BOSS发送消息" : "已发送\n" + platformGreeting(request.title()));
+            }
+            Locator input = inputLocator(detailPage);
+            boolean inputVisible = input != null && visible(input);
+            if (inputVisible && editorSeenAt == 0L) editorSeenAt = System.nanoTime();
+            if (!sentExact && inputVisible && System.nanoTime() - editorSeenAt >= 750_000_000L) {
+                Locator send = sendButton(detailPage);
+                if (send == null)
+                    return claimedUnknown("聊天编辑器出现但未找到发送按钮；保留 UNKNOWN，不重试");
+                hadSentReceipt = current.contains(sentReceipt);
+                if (hadSentReceipt)
+                    return claimedUnknown("页面已出现该核准正文的既有发送回执；保留 UNKNOWN，不重复发送");
+                sentExact = true;
+                input.click(new Locator.ClickOptions().setTimeout(5_000));
+                Object tag = input.evaluate("el => el.tagName.toLowerCase()");
+                if (tag instanceof String name && name.equals("textarea")) input.fill(request.approvedMessage());
+                else input.evaluate("(el, msg) => { el.innerText = msg; el.dispatchEvent(new Event('input')); }",
+                        request.approvedMessage());
+                access(accessCheck);
+                send.click(new Locator.ClickOptions().setTimeout(5_000));
+            }
+            if (sentExact && same && !hadSentReceipt && current.contains(sentReceipt))
+                return claimedFirstContact(request, canonical, CONTACT_MODE_APPROVED_MESSAGE, sentReceipt);
+            detailPage.waitForTimeout(100);
+        }
+        return claimedUnknown(sentExact
+                ? "已发送核准正文但未在时间预算内看到新回执；保留 UNKNOWN，不重试"
+                : "已点击一次但未在时间预算内看到平台自动招呼或编辑器回执；保留 UNKNOWN，不重试");
+    }
+
+    private static FirstContactOutcome claimedFirstContact(FirstContactRequest request, String canonical,
+            String contactMode, String confirmation) {
+        String evidence = "Boss 同岗页面一次性点击立即沟通后出现平台确认「" + confirmation + "」；岗位 "
+                + BossCandidateReader.jobId(canonical) + "、公司/职位匹配；ReviewedApplication claim 先于点击；无附件";
+        return new FirstContactOutcome("claimed", "confirmed with evidence", "not attempted",
+                contactMode, evidence, "");
+    }
+
+    private static String platformGreeting(String title) {
+        return "您好，我对" + title + "很感兴趣，希望和您聊聊，谢谢！";
+    }
+
+    /** The real Boss chat panel reports the platform greeting as 已发送. */
+    public static boolean sentPlatformGreeting(String visible, String title) {
+        return visible != null && title != null && !title.isBlank()
+                && visible.contains("已发送") && visible.contains(platformGreeting(title));
+    }
+
+    private static FirstContactOutcome blocked(String reason) {
+        return new FirstContactOutcome("blocked", "not attempted", "not attempted", "", "", reason);
+    }
+
+    private static FirstContactOutcome duplicate(String reason) {
+        return new FirstContactOutcome("duplicate", "not attempted", "not attempted", "", "", reason);
+    }
+
+    private static FirstContactOutcome claimedUnknown(String reason) {
+        return new FirstContactOutcome("claimed", "unknown", "not attempted", "", "", reason);
+    }
+
+    private static void access(Runnable accessCheck) {
+        if (accessCheck != null) accessCheck.run();
+    }
+
+    private static String body(Page page) {
+        return page.locator("body").innerText();
+    }
+
+    private static Locator autoConfirmation(Page page) {
+        return page.getByText("已向BOSS发送消息", new Page.GetByTextOptions().setExact(true)).first();
+    }
+
+    private static Locator firstVisibleStart(Page page) {
+        var buttons = page.locator("a.btn-startchat, a.op-btn-chat");
+        for (int i = 0; i < buttons.count(); i++) {
+            var button = buttons.nth(i);
+            if (visible(button) && text(button).contains("立即沟通")) return button;
+        }
+        return null;
+    }
+
+    private static Locator inputLocator(Page page) {
+        var inputs = page.locator("div#chat-input.chat-input[contenteditable='true'], textarea.input-area");
+        for (int i = 0; i < inputs.count(); i++) if (visible(inputs.nth(i))) return inputs.nth(i);
+        return null;
+    }
+
+    private static Locator sendButton(Page page) {
+        var buttons = page.locator("div.send-message, button[type='send'].btn-send, button.btn-send");
+        for (int i = 0; i < buttons.count(); i++) if (visible(buttons.nth(i))) return buttons.nth(i);
+        return null;
+    }
+
+    private static boolean visible(Locator locator) {
+        try { return locator.count() > 0 && locator.isVisible(); }
+        catch (RuntimeException e) { return false; }
+    }
+
+    private static String text(Locator locator) {
+        try { return locator.textContent(); }
+        catch (RuntimeException e) { return ""; }
+    }
+
+    private static boolean sameCanonical(String current, String canonical) {
+        try { return BossCandidateReader.detailUrl(current).equals(canonical); }
+        catch (IllegalArgumentException e) { return false; }
+    }
+
+    /** The live JD is the visible full description; a missing/short/login-gated section is unreadable. */
+    private static String liveDescription(Page page) {
+        try {
+            var sections = page.locator(".job-sec-text");
+            String best = null;
+            for (int i = 0; i < sections.count(); i++) {
+                String value = sections.nth(i).innerText();
+                if (value == null || value.isBlank() || value.contains("登录查看完整内容")) continue;
+                if (best == null || value.length() > best.length()) best = value;
+            }
+            return best == null ? "" : normalize(best);
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    private static boolean approvedDescription(List<String> approved, String live) {
+        String normalized = normalize(live);
+        if (normalized.isEmpty()) return false;
+        for (String candidate : approved) {
+            if (candidate == null) continue;
+            String exact = normalize(candidate);
+            if (!exact.isEmpty() && exact.equals(normalized)) return true;
+        }
+        return false;
+    }
+
+    private static String normalize(String value) {
+        if (value == null) return "";
+        return value.replace("\r\n", "\n").replace('\r', '\n').lines()
+                .map(String::stripTrailing).reduce((a, b) -> a + "\n" + b).orElse("").strip();
+    }
+
+    private static String safe(Throwable error) {
+        String message = error == null ? "" : error.getMessage();
+        if (message == null || message.isBlank()) return "Boss 首击失败";
+        String firstLine = message.lines().findFirst().orElse(message).trim();
+        return firstLine.length() > 500 ? firstLine.substring(0, 500) : firstLine;
+    }
 
     /**
      * 注册页面响应监听：拦截 /wapi/zpgeek/job/detail.json 请求并解析写库

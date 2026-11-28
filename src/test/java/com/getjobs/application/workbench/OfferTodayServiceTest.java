@@ -76,6 +76,7 @@ class OfferTodayServiceTest {
         service.recordEvent(id, json.createObjectNode().put("type", "PROGRESS").put("message", "Fixture execution"));
         service.recordEvent(id, json.createObjectNode().put("type", "SUBMITTING").put("message", "Fixture claim"));
         service.recordEvent(id, receipt(service.task(id), "CONTACTED", "fixture-conversation", "first-message"));
+        assertFalse(service.task(id).has("deliveryOutcome"), "OfferToday uses contact + CV receipts, not Boss deliveryOutcome");
         var valid = receipt(service.task(id), "CV_DELIVERED", "fixture-conversation", "cv-message");
         var proof = (ObjectNode) json.readTree(valid.path("evidence").asText());
         for (String field : java.util.List.of("resumeSha256", "conversationId", "jobId", "attemptId")) {
@@ -86,6 +87,8 @@ class OfferTodayServiceTest {
         var result = service.recordEvent(id, valid);
         assertEquals("SUBMITTED", result.path("state").asText());
         assertTrue(result.has("contactReceipt"));
+        assertTrue(result.has("cvReceipt"));
+        assertFalse(result.has("deliveryOutcome"), "A completed OfferToday CV must not be reported as Boss not-attempted");
         assertEquals(result.path("snapshot").path("resume").path("sha256"), result.path("cvReceipt").path("resumeSha256"));
         assertThrows(WorkbenchException.class, () -> service.recordEvent(id, valid));
         assertThrows(WorkbenchException.class, () -> service.approveTask(id));

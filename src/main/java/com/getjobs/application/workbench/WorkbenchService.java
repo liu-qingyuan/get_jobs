@@ -608,6 +608,8 @@ public final class WorkbenchService {
                     require(state.equals("UNKNOWN") && !task.has("contactReceipt"), "只有已占位且尚未登记联系的申请可记录联系回执");
                     var receipt = chat.contactReceipt(task, evidence);
                     task.set("contactReceipt", receipt);
+                    // The chat outcome is Boss-specific; OfferToday still uses contact + CV receipts.
+                    if (task.path("channel").asText().equals("BOSS")) task.set("deliveryOutcome", chatOutcome(task));
                     if (task.has("packageId")) scope.executionResult(c, task.path("outboundClaim").asText(), "CONTACTED", evidence);
                 }
                 case "CV_DELIVERED" -> {
@@ -782,13 +784,22 @@ public final class WorkbenchService {
             workflow.recover(c);
             for (var record : store.list(c, "task")) {
                 var task = (ObjectNode) record;
-                if (task.has("tokenHash")) { recoverJobsDbDisposition(task); task.remove("tokenHash"); store.save(c, "task", task); }
+                boolean save = false;
+                if (task.has("tokenHash")) { recoverJobsDbDisposition(task); task.remove("tokenHash"); save = true; }
                 if (task.path("state").asText().equals("RUNNING")) {
                     boolean application = task.path("kind").asText().equals("APPLICATION") && !(task.has("packageId") && !task.has("outboundClaim"));
                     task.put("state", application ? "UNKNOWN" : "NEEDS_INPUT"); task.remove("tokenHash");
                     append(task, "RECOVERED", application ? "上次申请运行中断，需核实结果；禁止自动重投" : "上次执行中断且已知没有外发 claim；处理必要例外后可恢复安全断点", "", "system");
-                    store.save(c, "task", task);
+                    save = true;
                 }
+                boolean bossAttempted = task.path("channel").asText().equals("BOSS") && task.has("packageId")
+                        && (task.has("outboundClaim") || task.has("contactReceipt")
+                            || Set.of("UNKNOWN", "NEEDS_INPUT").contains(task.path("state").asText()));
+                if (bossAttempted) {
+                    task.set("deliveryOutcome", chatOutcome(task));
+                    save = true;
+                }
+                if (save) store.save(c, "task", task);
             }
             return null;
         });
@@ -807,9 +818,21 @@ public final class WorkbenchService {
             if (task.has("packageId")) {
                 for (String field : java.util.List.of("outboundClaim", "cvClaim")) if (task.has(field)) scope.executionResult(c, task.path(field).asText(), "UNKNOWN", "执行结束但无对应回执，不能重投");
             }
+            if (task.path("channel").asText().equals("BOSS") && task.has("packageId"))
+                task.set("deliveryOutcome", chatOutcome(task));
             recoverJobsDbDisposition(task);
             task.remove("tokenHash"); store.save(c, "task", task); return null;
         });
+    }
+
+    /** Message and CV are separate observations; contact claim/block is not a delivery receipt. */
+    private ObjectNode chatOutcome(ObjectNode task) {
+        boolean claimed = task.has("outboundClaim");
+        return json.createObjectNode()
+                .put("attemptDisposition", claimed ? "claimed" : "blocked")
+                .put("messageSent", task.has("contactReceipt")
+                        ? "confirmed with evidence" : claimed ? "unknown" : "not attempted")
+                .put("cvActuallyReceived", "not attempted");
     }
 
     private void append(ObjectNode task, String type, String message, String evidence, String source) {

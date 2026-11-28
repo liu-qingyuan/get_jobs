@@ -45,6 +45,27 @@ class WorkbenchServiceTest {
         assertThrows(WorkbenchException.class, () -> approvedTask(service, "https://careers.example.test/jobs/unknown"));
     }
 
+    @Test void recoveryPreservesBossClaimedAttemptAsUnknownAndPersistsDeliveryOutcome() {
+        var service = new WorkbenchService(directory, directory.resolve("jobsdb"), json);
+        service.store.write(c -> {
+            var task = json.createObjectNode().put("id", "boss-recover").put("channel", "BOSS")
+                    .put("kind", "APPLICATION").put("packageId", "pkg-1").put("state", "UNKNOWN")
+                    .put("outboundClaim", "grant-1").put("attemptId", "boss-recover").put("tokenHash", "dead");
+            task.putArray("events");
+            service.store.save(c, "task", task);
+            return null;
+        });
+
+        service.recoverInterrupted();
+
+        var task = service.state().withArray("tasks").get(0);
+        assertEquals("UNKNOWN", task.path("state").asText());
+        assertEquals("claimed", task.at("/deliveryOutcome/attemptDisposition").asText());
+        assertEquals("unknown", task.at("/deliveryOutcome/messageSent").asText());
+        assertEquals("not attempted", task.at("/deliveryOutcome/cvActuallyReceived").asText());
+        assertFalse(task.has("tokenHash"));
+    }
+
     @Test void legacyImportIsPreviewOnlyPrefersCurrentContactAndDoesNotImportSecrets() throws Exception {
         var legacy = directory.resolve("jobsdb");
         java.nio.file.Files.createDirectories(legacy);
