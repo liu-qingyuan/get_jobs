@@ -66,6 +66,48 @@ class WorkbenchServiceTest {
         assertFalse(task.has("tokenHash"));
     }
 
+    /**
+     * Workbench 边界：这三个渠道没有 effect 注册；createTask / beginTask 均拒绝且零 task/事件/claim。
+     * 本测试不启动旧 batch Worker，也不把 hasPlatformEffect 当作旧 Worker 启动计数。
+     */
+    @Test void workbenchRejectsUnsupportedPlatformChannelsWithoutTaskOrEffect() {
+        var service = new WorkbenchService(directory, directory.resolve("jobsdb"), json);
+        for (String channel : java.util.List.of("LIEPIN", "JOB51", "ZHILIAN")) {
+            var request = json.createObjectNode().put("kind", "APPLICATION").put("channel", channel)
+                    .put("region", "MAINLAND").put("language", "zh").put("direction", "ML")
+                    .put("company", "Fixture").put("title", "Controlled single target")
+                    .put("url", "https://www.liepin.com/job/1234567.shtml");
+            var rejection = assertThrows(WorkbenchException.class, () -> service.createTask(request));
+            assertEquals(400, rejection.status);
+            assertTrue(rejection.getMessage().contains("channel"), rejection.getMessage());
+            assertFalse(service.hasPlatformEffect(channel), "workbench 不注册不受支持渠道的 effect：" + channel);
+        }
+        assertEquals(0, service.state().withArray("tasks").size(), "绕过 UI 直接创建不受支持渠道不得留下任务");
+
+        for (String channel : java.util.List.of("LIEPIN", "JOB51", "ZHILIAN")) {
+            String id = "unsupported-" + channel;
+            service.store.write(c -> {
+                var task = json.createObjectNode().put("id", id).put("kind", "APPLICATION").put("channel", channel)
+                        .put("region", "MAINLAND").put("language", "zh").put("direction", "ML")
+                        .put("company", "Fixture").put("title", "Controlled single target")
+                        .put("url", "https://www.liepin.com/job/1234567.shtml").put("state", "APPROVED");
+                task.putArray("events");
+                service.store.save(c, "task", task);
+                return null;
+            });
+            assertThrows(WorkbenchException.class, () -> service.beginTask(id, "navigation-only", "http://127.0.0.1:1/api/workbench"));
+            var task = service.task(id);
+            assertEquals("APPROVED", task.path("state").asText(), channel + " 启动被拒后不得进入 claim/RUNNING");
+            assertEquals(0, task.path("events").size());
+            assertFalse(task.has("tokenHash"));
+            assertFalse(task.has("outboundClaim"));
+            assertFalse(service.hasPlatformEffect(channel), "workbench 不注册不受支持渠道的 effect：" + channel);
+        }
+        var state = service.state();
+        assertFalse(state.has("navigation"), "导航 read model 不得进入服务端状态/授权");
+        assertFalse(state.has("platformNavigation"));
+    }
+
     @Test void legacyImportIsPreviewOnlyPrefersCurrentContactAndDoesNotImportSecrets() throws Exception {
         var legacy = directory.resolve("jobsdb");
         java.nio.file.Files.createDirectories(legacy);

@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import { BiEnvelope, BiBriefcase, BiSearch, BiTask, BiUserCircle, BiBrain, BiMoon, BiSun } from 'react-icons/bi'
+import { BiEnvelope, BiBriefcase, BiSearch, BiTask, BiUserCircle, BiBrain, BiCompass, BiMoon, BiSun } from 'react-icons/bi'
 import { motion } from 'framer-motion'
 import { useTheme } from 'next-themes'
 import { API_BASE } from '@/lib/api'
@@ -70,6 +70,7 @@ export default function Sidebar() {
   ]
 
   const platformGroup = [
+    { href: '/platforms', icon: BiCompass, label: '平台导航', color: 'text-sky-300' },
     { href: '/boss', icon: BiBriefcase, label: 'Boss直聘', color: 'text-indigo-300' },
     { href: '/liepin', icon: BiSearch, label: '猎聘', color: 'text-purple-300' },
     { href: '/51job', icon: BiTask, label: '51job', color: 'text-blue-300' },
