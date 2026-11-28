@@ -8,7 +8,8 @@
     "build:prod": "next build && node scripts/copy-dist.mjs",
     "start": "node start-prod.mjs",
     "lint": "eslint",
-    "test:navigation": "node --no-warnings test/platform-navigation.test.mjs"
+    "test:navigation": "node --no-warnings test/platform-navigation.test.mjs",
+    "test:review-cards": "node --no-warnings test/review-cards.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-label": "^2.1.7",

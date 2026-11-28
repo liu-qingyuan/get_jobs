@@ -115,7 +115,13 @@ try {
     return route.abort('blockedbyclient') // All websites/accounts/third-party traffic blocked.
   })
   const page = await context.newPage(); page.on('pageerror', error => failures.push(error.message))
+  // #49: old workbench tabs live inside the outer “高级 / 审计” tab and are not mounted on the default review view.
+  const openAudit = async () => {
+    await page.getByRole('tab', { name: '高级 / 审计', exact: true }).click()
+    await page.getByRole('tab', { name: '候选与发现', exact: true }).waitFor()
+  }
   await page.goto(`${base}/workbench`)
+  await openAudit()
   await page.getByRole('button', { name: '一次启动本轮求职', exact: true }).click()
   const progress = page.getByRole('region', { name: '整轮进展与安全断点', exact: true })
   const screenshot = async name => {
@@ -139,7 +145,7 @@ try {
   await writeFile(join(root, 'mode'), 'resolved')
   await progress.getByRole('button', { name: '处理例外后恢复同一轮', exact: true }).click()
   await until(async () => { const s = await get(); return !s.runtime.busy && s.tasks.every(task => task.state === 'SUBMITTED') }, 'Resume safe login checkpoint')
-  await page.reload(); await progress.getByRole('heading', { name: /本轮处理结束/ }).waitFor()
+  await page.reload(); await openAudit(); await progress.getByRole('heading', { name: /本轮处理结束/ }).waitFor()
   state = await get(); assert.equal(state.tasks.length, 3); assert.equal(state.scope.usage.outbound, 4)
   for (const task of completed) assert.deepEqual(state.tasks.find(row => row.id === task.id), task)
   const calls = (await readFile(join(root, 'calls'), 'utf8')).trim().split('\n')
@@ -164,13 +170,14 @@ try {
   await until(async () => !(await get()).runtime.busy, 'Restart resume')
   state = await get(); assert.deepEqual(state.tasks.find(task => task.id === unknown.id), unknown)
   assert.equal(state.tasks.find(task => task.company === 'Synthetic crash-d').state, 'SUBMITTED')
-  await page.reload(); await progress.getByText('Synthetic crash-c · Python engineer · 外发结果未知 · 禁止重投', { exact: true }).waitFor()
+  await page.reload(); await openAudit(); await progress.getByText('Synthetic crash-c · Python engineer · 外发结果未知 · 禁止重投', { exact: true }).waitFor()
   await screenshot('workflow-unknown-restart.png')
   // #15: no Boss login/session is ever provided. The real HTTP path must show a read exception,
   // capability limits and no official-AI fallback or additional send, even with a scope that allows CONTACT.
   const beforeBossOutbound = state.scope.usage.outbound
   await post('/scope', { ...state.scope.current, expectedVersion: 1, channels: ['OFFICIAL', 'OFFERTODAY', 'BOSS'], hosts: ['careers.example.test', 'www.offertoday.com', 'www.zhipin.com'], regions: ['HK', 'MAINLAND'] })
   await page.reload()
+  await openAudit()
   const discovery = page.getByRole('region', { name: '只读候选发现', exact: true })
   await discovery.getByRole('button', { name: '载入当前范围来源', exact: true }).click()
   await discovery.getByLabel('官网只读入口（每行一个）').fill('')
@@ -192,6 +199,7 @@ try {
   // #16: configured fake JobsDB read, unified matching/materials, no original CLI apply/batch or fallback.
   await post('/scope', { ...state.scope.current, expectedVersion: 2, channels: ['JOBSDB'], hosts: ['hk.jobsdb.com'], regions: ['HK'] })
   await page.reload()
+  await openAudit()
   await discovery.getByRole('button', { name: '载入当前范围来源', exact: true }).click()
   assert.equal(await discovery.getByLabel('官网只读入口（每行一个）').inputValue(), '')
   assert.equal(await discovery.getByLabel('JobsDB 只读列表（每行一个）').inputValue(), 'https://hk.jobsdb.com/jobs')
@@ -223,6 +231,7 @@ try {
   const projectIds = (await get('/candidates')).jobs.filter(j => j.url.includes('/project-')).map(j => j.id)
   await post('/candidates/match', { scopeVersion: projectScope.version, candidateIds: projectIds, secondsPerBatch: 5 })
   await page.reload()
+  await openAudit()
   await page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Synthetic project-gap · Python engineer', exact: true }) }).getByRole('button', { name: '建立独立项目建议（不执行）', exact: true }).click()
   const projects = page.getByRole('region', { name: '独立项目队列', exact: true })
   const project = projects.getByRole('article', { name: '补强项目 Synthetic local evaluation project', exact: true })
@@ -255,7 +264,7 @@ try {
   assert.equal(recovered.status, 'STOPPED'); assert.equal(recovered.attempts.length, 2)
   assert.equal((await get('/scope')).usage.seconds, secondsBeforeRestart)
   assert.match(await readFile(join(projectRoot, recovered.id, 'checkpoint.txt'), 'utf8'), /Synthetic local checkpoint/)
-  await page.reload(); await project.getByText('已停止 · 待显式恢复', { exact: true }).waitFor()
+  await page.reload(); await openAudit(); await project.getByText('已停止 · 待显式恢复', { exact: true }).waitFor()
   await writeFile(join(root, 'mode'), 'project-complete')
   await startProject(); await project.getByText('产物待独立验证', { exact: true }).waitFor()
   await project.getByText(/SHA256 [a-f0-9]{64}/).waitFor()
@@ -265,7 +274,7 @@ try {
   assert.equal(state.projects.projects[0].attempts[2].evidence.verified, false)
   assert.equal(state.scope.usage.outbound, beforeBossOutbound)
   await screenshot('project-unverified.png')
-  await page.reload(); await project.getByText('产物待独立验证', { exact: true }).waitFor()
+  await page.reload(); await openAudit(); await project.getByText('产物待独立验证', { exact: true }).waitFor()
   assert.equal(await project.getByRole('button', { name: '按当前范围启动 / 恢复项目', exact: true }).count(), 0)
   await page.getByRole('tab', { name: '求职范围', exact: true }).click()
   await page.getByRole('region', { name: '范围历史与动作依据', exact: true }).getByText(new RegExp(`独立项目执行（非成果入库） · ${recovered.id}`), { exact: false }).first().waitFor()

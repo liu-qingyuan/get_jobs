@@ -94,6 +94,11 @@ try {
     return route.abort('blockedbyclient')
   })
   page = await context.newPage()
+  // #49: old workbench tabs live inside the outer “高级 / 审计” tab and are not mounted on the default review view.
+  const openAudit = async () => {
+    await page.getByRole('tab', { name: '高级 / 审计', exact: true }).click()
+    await page.getByRole('tab', { name: '候选与发现', exact: true }).waitFor()
+  }
   const waitForCandidates = () => page.waitForFunction(() => {
     let node = document.querySelector('[aria-label="候选岗位队列"]')
     if (!node) return false
@@ -103,6 +108,7 @@ try {
   page.on('pageerror', error => failures.push(error.message))
   page.on('dialog', dialog => dialog.accept())
   await page.goto(`${base}/workbench`)
+  await openAudit()
   await page.getByRole('tab', { name: '简历版本', exact: true }).click()
   const upload = page.locator('section').filter({ has: page.getByRole('heading', { name: '新增简历版本', exact: true }) })
   await upload.getByLabel('版本名称').fill('HK synthetic en')
@@ -130,6 +136,7 @@ try {
   assert.equal(baseline.resumes.length, 1)
   const version = baseline.version
   await page.reload()
+  await openAudit()
   await page.getByRole('tab', { name: '个人资料', exact: true }).click()
   await panel.getByText('已确认，直接复用', { exact: false }).first().waitFor()
   for (const name of ['one.md', 'two.md']) await panel.getByRole('group', { name: '复用已登记来源（仅勾选项会交给 AI）', exact: true }).getByRole('checkbox', { name: new RegExp(name) }).check()
@@ -176,6 +183,7 @@ try {
   await scopePanel.getByRole('button', { name: '撤销范围', exact: true }).click()
   await scopePanel.getByText('当前范围 v5 · 已撤销', { exact: true }).waitFor()
   await page.reload()
+  await openAudit()
   await page.getByRole('tab', { name: '求职范围', exact: true }).click()
   await scopePanel.getByText('当前范围 v5 · 已撤销', { exact: true }).waitFor()
   const scopeState = await (await fetch(`${base}/api/workbench/scope`)).json()
@@ -212,6 +220,7 @@ try {
   const matchScope = (await (await fetch(`${base}/api/workbench/scope`)).json()).current
   await post('/scope', { ...matchScope, expectedVersion: 6, factIds: [...matchScope.factIds, gapFact.id] })
   await page.reload()
+  await openAudit()
   await page.getByText('高级：独立匹配 / 调整候选选择（整轮启动无需此步骤）', { exact: true }).click()
   const matching = page.getByRole('form', { name: '批量匹配', exact: true })
   await matching.getByRole('button', { name: '批量分析所选候选（3/20）', exact: true }).click()
@@ -221,12 +230,14 @@ try {
   await candidates.getByText('补强建议（未授权执行）：合成数据评估小项目', { exact: false }).waitFor()
   assert.equal((await (await fetch(`${base}/api/workbench/candidates/gaps`)).json()).suggestions.length, 1)
   await page.reload()
+  await openAudit()
   await candidates.getByText('真实经验缺口 · 可读取补强建议 · 当前输入缓存', { exact: true }).waitFor()
   assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '1')
   await waitForCandidates()
   await page.screenshot({ path: join(root, 'matching.png'), fullPage: true })
   const conflicting = await post('/facts', { key: 'production-evaluation', label: '合成冲突', value: 'PRIVATE_UNCONFIRMED_CONFLICT', scope: 'SITE:www.offertoday.com', confirmed: false })
   await page.reload()
+  await openAudit()
   await candidates.getByText('待核实事实 · 解决后自动重评 · 当前输入缓存', { exact: true }).waitFor()
   assert.equal((await (await fetch(`${base}/api/workbench/candidates/gaps`)).json()).suggestions.length, 0)
   assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '2')
@@ -234,6 +245,7 @@ try {
   await page.screenshot({ path: join(root, 'matching-needs-facts.png'), fullPage: true })
   assert((await fetch(`${base}/api/workbench/facts/${conflicting.id}`, { method: 'DELETE' })).ok)
   await page.reload()
+  await openAudit()
   await candidates.getByText('真实经验缺口 · 可读取补强建议 · 当前输入缓存', { exact: true }).waitFor()
   assert.equal(await readFile(join(root, 'match-calls'), 'utf8'), '2')
   // #13: prepare through the visible batch Interface. Only the supported candidate can be approved.
@@ -269,6 +281,7 @@ try {
   await preparation.getByRole('button', { name: '批量准备所选候选（3/20）', exact: true }).click()
   await page.getByRole('status').filter({ hasText: '批量准备材料成功' }).waitFor()
   await page.reload()
+  await openAudit()
   await page.getByText('高级：独立备料与冻结包详情（整轮自动衔接）', { exact: true }).click()
   await preparation.getByText('策略核准 · 未发送', { exact: true }).waitFor()
   assert.equal(await readFile(join(root, 'preparation-calls'), 'utf8'), '1')
@@ -278,6 +291,7 @@ try {
   await discovery.getByRole('button', { name: '一次启动范围内只读发现', exact: true }).click()
   await candidates.getByText('未取得新全文；保留上次完整 JD 与原取得时间', { exact: false }).waitFor()
   await page.reload()
+  await openAudit()
   await candidates.getByRole('heading', { name: '候选岗位（3）', exact: true }).waitFor()
   const retainedCard = candidates.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Synthetic Official Co · AI engineer', exact: true }) })
   await retainedCard.getByText('范围拒绝', { exact: true }).waitFor()

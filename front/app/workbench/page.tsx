@@ -1,7 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'next/navigation'
+import { Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { BiBriefcase, BiCopy, BiDownload, BiPlus, BiRefresh, BiBell } from 'react-icons/bi'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -9,6 +10,12 @@ import PageHeader from '@/app/components/PageHeader'
 import MaterialBaseline from './MaterialBaseline'
 import ScopePolicyPanel from './ScopePolicy'
 import Candidates from './Candidates'
+import ReviewCards from './ReviewCards'
+import {
+  canonicalReviewChannel,
+  type JobReviewCard,
+  type ReviewFilter,
+} from '@/lib/review-cards'
 import {
   type BossMessageDraft, type Channel, type EventType, type Fact, type FactInput, type Language, type OfferTodayDiscovery, type Region, type Resume,
   type Task, type TaskInput, type TaskKind, type TaskState, type WorkbenchState,
@@ -61,7 +68,9 @@ function taskStateName(task: Task): string {
     ? '缺少简历送达回执，待核实' : stateName[task.state]
 }
 
-export default function WorkbenchPage() {
+function WorkbenchPage() {
+  const searchParams = useSearchParams()
+  const requestedChannel = canonicalReviewChannel(searchParams.get('channel'))
   const [state, setState] = useState<WorkbenchState | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -70,7 +79,16 @@ export default function WorkbenchPage() {
   const [updatedAt, setUpdatedAt] = useState('')
   const [working, setWorking] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [view, setView] = useState<'review' | 'audit'>('review')
   const [tab, setTab] = useState('candidates')
+  const [cards, setCards] = useState<JobReviewCard[]>([])
+  const [cardsLoading, setCardsLoading] = useState(true)
+  const [cardsError, setCardsError] = useState('')
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('ALL')
+  const [reviewChannel, setReviewChannel] = useState('')
+  const [reviewReady, setReviewReady] = useState(false)
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null)
+  const cardsRequest = useRef(0)
   const [newAlerts, setNewAlerts] = useState<string[]>([])
   const [notifications, setNotifications] = useState(false)
   const seenStates = useRef<Map<string, TaskState> | null>(null)
@@ -136,13 +154,52 @@ export default function WorkbenchPage() {
     }
   }, [])
 
+  const loadCards = useCallback(async (channel: string) => {
+    const sequence = ++cardsRequest.current
+    setCardsLoading(true)
+    setCardsError('')
+    try {
+      const query = channel ? `?channel=${encodeURIComponent(channel)}` : ''
+      const response = await workbenchGet<{ cards: JobReviewCard[] }>(`/review-cards${query}`)
+      if (sequence !== cardsRequest.current) return
+      setCards(Array.isArray(response.cards) ? response.cards : [])
+    } catch (error) {
+      if (sequence !== cardsRequest.current) return
+      // 保留页头、筛选和中文错误；绝不换入样例卡或虚构分数。
+      setCardsError(errorText(error))
+    } finally {
+      if (sequence === cardsRequest.current) setCardsLoading(false)
+    }
+  }, [])
+
+  // 渠道深链跟随 Next 的查询参数；静态导出由外层 Suspense 承接。
   useEffect(() => {
+    setReviewChannel(requestedChannel)
+    setReviewReady(true)
+  }, [requestedChannel])
+
+  // 默认岗位审核只读取 review-cards；不请求 /state，也不触发 refreshMatching()。
+  useEffect(() => {
+    if (!reviewReady) return
+    void loadCards(reviewChannel)
+  }, [reviewReady, reviewChannel, loadCards])
+
+  // /state 只在进入“高级 / 审计”后读取并按原三秒语义轮询；返回审核即停止。
+  useEffect(() => {
+    if (view !== 'audit') return
     void refresh()
     const timer = window.setInterval(() => { void refresh() }, 3000)
     const onVisible = () => { if (document.visibilityState === 'visible') void refresh() }
     document.addEventListener('visibilitychange', onVisible)
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
-  }, [refresh])
+  }, [view, refresh])
+
+  function changeChannel(channel: string) {
+    const canonical = canonicalReviewChannel(channel)
+    if (canonical === reviewChannel) return
+    setReviewChannel(canonical)
+    window.history.replaceState(null, '', canonical ? `/workbench?channel=${encodeURIComponent(canonical)}` : '/workbench')
+  }
 
   function selectTask(id: string) {
     setSelectedId(id)
@@ -528,9 +585,33 @@ export default function WorkbenchPage() {
 
   return (
     <div className="space-y-5 pb-12">
-      <PageHeader icon={<BiBriefcase />} title="求职工作台" subtitle="一次确认范围，只读发现完整候选；匹配、备料与执行分别留痕，结果以证据为准。"
-        actions={<Button variant="outline" size="sm" onClick={() => void refresh()}><BiRefresh />刷新</Button>} />
+      <PageHeader icon={<BiBriefcase />} title="求职工作台"
+        subtitle={view === 'review'
+          ? '只读岗位审核：默认只读取岗位卡，选岗查看要求、证据与缺口；看卡不创建任务、不扣预算、不发送。审计内容在最后的「高级 / 审计」。'
+          : '审计视图：任务、claim、回执、人工报告与账本；仅进入本视图后才读取工作台状态。'}
+        actions={<Button variant="outline" size="sm" onClick={() => view === 'review' ? void loadCards(reviewChannel) : void refresh()}><BiRefresh />刷新</Button>} />
 
+      <Tabs value={view} onValueChange={value => setView(value === 'audit' ? 'audit' : 'review')} className="space-y-4">
+        <TabsList className="h-auto flex-wrap gap-1">
+          <TabsTrigger value="review">岗位审核</TabsTrigger>
+          <TabsTrigger value="audit">高级 / 审计</TabsTrigger>
+        </TabsList>
+        <TabsContent value="review" className="space-y-4">
+          <ReviewCards
+            cards={cards}
+            loading={cardsLoading}
+            error={cardsError}
+            filter={reviewFilter}
+            channel={reviewChannel}
+            selectedId={selectedCardId}
+            onFilter={setReviewFilter}
+            onChannel={changeChannel}
+            onSelect={setSelectedCardId}
+            onRefresh={() => void loadCards(reviewChannel)}
+            onOpenAudit={() => setView('audit')}
+          />
+        </TabsContent>
+        <TabsContent value="audit" className="space-y-4">
       {loadError && <p role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800 dark:bg-rose-950 dark:text-rose-200">读取状态失败：{loadError}。{state ? '下方为上次获取的数据。' : '尚未获取真实数据。'}</p>}
       {actionError && <p role="alert" className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800 dark:bg-rose-950 dark:text-rose-200">{actionError}</p>}
       {notice && <p role="status" className="rounded-xl border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">{notice}</p>}
@@ -691,6 +772,14 @@ export default function WorkbenchPage() {
           </TabsContent>
         </Tabs>
       </>}
+        </TabsContent>
+      </Tabs>
     </div>
   )
+}
+
+export default function WorkbenchPageShell() {
+  return <Suspense fallback={<div className="space-y-5 pb-12"><p className="text-sm text-slate-600 dark:text-slate-300" role="status">正在读取岗位审核…</p></div>}>
+    <WorkbenchPage />
+  </Suspense>
 }

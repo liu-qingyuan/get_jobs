@@ -98,7 +98,13 @@ try {
   })
   const page = await context.newPage(), errors = []
   page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept())
+  // #49: the legacy project queue is inside the outer “高级 / 审计” tab, not the default review view.
+  const openAudit = async () => {
+    await page.getByRole('tab', { name: '高级 / 审计', exact: true }).click()
+    await page.getByRole('tab', { name: '候选与发现', exact: true }).waitFor()
+  }
   await page.goto(`${base}/workbench`)
+  await openAudit()
   const panel = page.getByRole('region', { name: '独立项目队列', exact: true })
   await panel.getByText('产物待独立验证', { exact: true }).waitFor()
   await panel.getByLabel('每次项目运行秒数上限').fill('3')
@@ -112,7 +118,7 @@ try {
   assert.equal(state.facts.length, 2); assert.equal(state.tasks.length, 0); assert.equal(state.scope.usage.outbound, 0)
   assert.equal(analysis.status, 'EXPERIENCE_GAP'); assert.equal(analysis.findings[0].kind, 'SUPPORTED')
   assert(analysis.findings.some(f => f.kind === 'EXPERIENCE_GAP' && f.requirementQuote.includes('five years')))
-  await page.reload(); await panel.getByText('独立验证 · PASSED · INDEPENDENT_VERIFIER', { exact: true }).waitFor()
+  await page.reload(); await openAudit(); await panel.getByText('独立验证 · PASSED · INDEPENDENT_VERIFIER', { exact: true }).waitFor()
   assert.deepEqual(errors, [])
   console.log(JSON.stringify({ root, screenshot: join(root, 'verification.png'), projectId: project.id, verification: state.projects.projects[0].verifications[0].status, facts: state.facts.length, tasks: state.tasks.length, outbound: state.scope.usage.outbound, match: analysis.status }))
 } finally {
