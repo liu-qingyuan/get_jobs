@@ -211,7 +211,8 @@ final class WorkbenchPreparation {
         return contacts;
     }
 
-    record ApprovedMaterial(JsonNode facts, byte[] resumeBytes, String resumeSha256, String filename, String exactText) {}
+    record ApprovedMaterial(JsonNode facts, byte[] resumeBytes, String resumeSha256,
+            String resumeContent, String filename, String exactText) {}
 
     ApprovedMaterial approvedMaterial(ObjectNode task) throws Exception {
         var snapshot = task.path("snapshot");
@@ -221,7 +222,8 @@ final class WorkbenchPreparation {
         String sha = hash(bytes);
         require(sha.equals(resume.path("sha256").asText()), "冻结附件已变化");
         String text = task.path("channel").asText().equals("JOBSDB") ? null : snapshot.path("initialMessage").textValue();
-        return new ApprovedMaterial(snapshot.path("facts").deepCopy(), bytes, sha, resume.path("filename").asText(), text);
+        return new ApprovedMaterial(snapshot.path("facts").deepCopy(), bytes, sha,
+                resume.path("content").asText(), resume.path("filename").asText(), text);
     }
 
     private void verifyFrozenFile(ObjectNode resume) throws Exception {

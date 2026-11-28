@@ -94,7 +94,7 @@ final class ChatDelivery {
         String conversation = WorkbenchService.text(receipt, "conversationId", 300, !bossFirstContact);
         WorkbenchService.text(receipt, "messageId", 300, !bossFirstContact);
         WorkbenchService.require(WorkbenchService.text(receipt, "initialMessageSha256", 64, true)
-                        .equals(task.path("snapshot").path("initialMessageSha256").asText()),
+                        .equals(approvedMessageSha256(task)),
                 "联系回执必须匹配已批准的精确消息");
         if (task.has("packageId") && !conversation.isBlank())
             WorkbenchService.require(conversation.equals(task.path("observedExecutionContext").path("conversationId").asText()),
@@ -122,6 +122,25 @@ final class ChatDelivery {
             WorkbenchService.require(conversation.equals(task.path("observedExecutionContext").path("conversationId").asText()),
                     "回执不是本次观察/dispatch 的同一会话");
         return receipt;
+    }
+
+    /**
+     * Boss sends the operator's separately approved body, not the generic preparation placeholder.
+     * The hash must come from that immutable approval and still match its exact UTF-8 message.
+     */
+    private static String approvedMessageSha256(ObjectNode task) {
+        if (task.path("channel").asText().equals("BOSS") && task.path("bossMessageApproval").isObject()) {
+            var approval = task.path("bossMessageApproval");
+            String message = approval.path("message").asText();
+            String expected = approval.path("messageSha256").asText();
+            WorkbenchService.require(!message.isBlank()
+                            && expected.equals(WorkbenchService.hash(message.getBytes(StandardCharsets.UTF_8))),
+                    "Boss 核准正文已变化，不能登记联系回执");
+            return expected;
+        }
+        // Legacy/fake platform adapters that never had a text approval still bind the frozen snapshot.
+        // The production Boss effect refuses to click without bossMessageApproval before this receipt.
+        return task.path("snapshot").path("initialMessageSha256").asText();
     }
 
     private ObjectNode parse(String evidence) throws Exception {

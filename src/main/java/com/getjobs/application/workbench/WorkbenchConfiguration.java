@@ -23,9 +23,11 @@ public class WorkbenchConfiguration {
             @Value("${workbench.projects-root:}") String projectsRoot,
             ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
             @Value("${workbench.boss-contact-enabled:true}") boolean bossContactEnabled) {
-        boolean bossContact = bossContactEnabled && browsers.getIfAvailable() != null && bossJobs.getIfAvailable() != null;
+        var legacyBoss = bossJobs.getIfAvailable();
+        boolean bossContact = bossContactEnabled && browsers.getIfAvailable() != null && legacyBoss != null;
+        WorkbenchBossMessage.Drafter bossDrafter = legacyBoss == null ? null : legacyBoss::draftMessageForMaterial;
         return new WorkbenchService(Path.of(root), Path.of(jobsdb), json, projectsRoot.isBlank() ? null : Path.of(projectsRoot),
-                bossContact ? Map.of("BOSS", List.of("in-process-contact")) : Map.of());
+                bossContact ? Map.of("BOSS", List.of("in-process-contact")) : Map.of(), bossDrafter);
     }
     @Bean(destroyMethod="close") WorkbenchRunner workbenchRunner(WorkbenchService service, ObjectMapper json,
             ObjectProvider<PlaywrightManager> browsers, ObjectProvider<BossJobService> bossJobs,
@@ -117,7 +119,7 @@ public class WorkbenchConfiguration {
                 arguments(json, projectCommand), arguments(json, verifierCommand),
                 "http://127.0.0.1:" + port + "/api/workbench", timeout, connections);
         if (bossContactEnabled && browser != null && legacyBoss != null)
-            runner.setBossSingleJobEffect(new BossContactEffect(browser, legacyBoss, json));
+            runner.setBossSingleJobEffect(new BossContactEffect(browser, legacyBoss, json, service));
         return runner;
     }
 

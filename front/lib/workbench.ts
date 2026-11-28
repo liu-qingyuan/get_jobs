@@ -60,8 +60,51 @@ export interface DeliveryOutcome {
 
 export type JobsDbOutcome = DeliveryOutcome
 
+export interface BossMessageApproval {
+  approvalId: string
+  version: number
+  taskId: string
+  attemptId: string
+  packageId?: string
+  materialVersion: string
+  url: string
+  platformJobId: string
+  company: string
+  title: string
+  jdSha256: string
+  resumeSha256: string
+  resumeContentSha256: string
+  factsSha256: string
+  materialsSha256: string
+  message: string
+  messageSha256: string
+  approvedAt: string
+  source: 'USER_REVIEW'
+}
+
+export interface BossMessageDraft {
+  taskId: string
+  attemptId: string
+  url: string
+  platformJobId: string
+  packageId?: string
+  materialVersion: string
+  jdSha256: string
+  resumeSha256: string
+  resumeContentSha256: string
+  factsSha256: string
+  materialsSha256: string
+  message: string
+  messageSha256: string
+  rulesVersion: string
+}
+
 export interface Task {
   deliveryOutcome?: DeliveryOutcome
+  bossMessageApproval?: BossMessageApproval
+  bossMessageApprovals?: BossMessageApproval[]
+  bossMessageApprovalValid?: boolean
+  bossMessageApprovalReason?: string
   id: string
   kind: TaskKind
   channel: Channel

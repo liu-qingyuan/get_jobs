@@ -137,7 +137,7 @@ bash gradlew --no-daemon workbench --console=plain
 - `GET /api/workbench/preparations` 与 `/state.preparations` 返回 `{packages:[...]}`。每包包含 `id/candidateId/analysisId/scopeVersion/source=SCOPE_POLICY/rulesVersion/target/status/reason/proposal?/snapshot?`；`snapshot` 包含独立 `resume/facts/initialMessage/initialMessageSha256` 及 OfferToday 的 `contactVerified/contactFacts`。`target.resumeId` 是范围所选基线 ID；`snapshot.resume.id` 是实际冻结文件的版本 ID，派生时不同。后续授权按范围基线核验，实际执行只能使用该包冻结文件，不偷偷换回原文件。
 - `POST /api/workbench/preparations/{id}/check`：`{action:PREPARE|APPLY|CONTACT|SEND_CV}`，返回 `allowed/source/packageId/reasons`。每个不可逆阶段必须重核范围版本/有效期/暂停撤销、动作与变换许可、动作预算、当前匹配/事实/文件、原申请和策略已消费外发目标的防重；文件或事实变化不能重新授权 UNKNOWN。此入口只读、不创建授权、不扣量、不 claim/启动/发送，也不代表渠道执行能力可用。后续消费者须另行消费单阶段授权、确认 claim 并收集相应真实回执；不能复用核验响应作重试或下一阶段许可。`INVALIDATED` 是当前读取视图，历史核准依据不覆盖。局部八图以 `liu-qingyuan/get_jobs#13` 发布合同为准。
 
-#27 已接入普通本地 CV 原字节复用、显式选择歧义阻断与 verdict；#32 将策略 task 的建立集中到现有 WorkbenchService，`attemptId=taskId`，`/jobsdb/apply` 也委托到同一个 task/start/events/claim 生命周期，不再新写 `jobsdb_attempt`。旧桥接记录只读保留并参与全部任务入口防重，不迁成新 task；原 CLI 账本仍单独展示。尚未核实的 Boss 外发及缺少当前已确认答案库的 JobsDB 自动整轮继续阻断，不因迁移或配置而开放；#33 的权限/证据 fence 和 #36/#37/#38 的三平台 fake `/cycles` 合同只证明开发链路，真实平台验收仍属 #28–#30。Phase 1 新三平台路径只用原 CV，不消费岗位改写；既有高级 REORDER 行为不是 Phase 1 送达证明。
+#27 已接入普通本地 CV 原字节复用、显式选择歧义阻断与 verdict；#32 将策略 task 的建立集中到现有 WorkbenchService，`attemptId=taskId`，`/jobsdb/apply` 也委托到同一个 task/start/events/claim 生命周期，不再新写 `jobsdb_attempt`。旧桥接记录只读保留并参与全部任务入口防重，不迁成新 task；原 CLI 账本仍单独展示。尚未核实的 Boss 附件/CV、在线资料和自动周期外发，以及缺少当前已确认答案库的 JobsDB 自动整轮继续阻断，不因迁移或配置而开放；#33 的权限/证据 fence 和 #36/#37/#38 的三平台 fake `/cycles` 合同只证明开发链路，真实平台验收仍属 #28–#30。Phase 1 新三平台路径只用原 CV，不消费岗位改写；既有高级 REORDER 行为不是 Phase 1 送达证明。
 
 ## 连续求职周期 Interface（#14）
 
@@ -152,7 +152,7 @@ bash gradlew --no-daemon workbench --console=plain
 - 上传后，worker 在实际问卷页读取题名、精确题干、控件和全部选项，核对批准值与实际选中答案。工作台通过 `VALIDATE` 处理 `CHECK/QUESTIONS/CLAIM/SUBMIT`。review 页须独立显示这次上传产生的选中简历 ID。校验通过后 Python 在一个事务内写入原生 UNKNOWN 和来源，最终复核后至多提交一次。披露后任一步拒绝或中断都保留预算与可能披露的记录。
 - 重启不自动外发。原执行子进程有精确 PID/启动时间的私有租约；内置 Python 标准库监护脚本在 POSIX 独立进程组内运行命令，保留组长直到后代全部结束，主命令退出不代表释放。仅有私有 release proof 才清除租约，资源不明时不强杀监护进程并假设成功。重启先确认释放**自己创建的**整组后代，再开放共享槽；PID 复用/身份不明、监护进程异常消失或创建窗口中断时停止，不能杀其他进程或猜测资源已释放；无可靠 POSIX 进程组/Python 环境则明确不可执行。所有旧 callback token 失效；策略任务未登记 claim 的中断保持已知未外发，可恢复；任何已 claim/已联系者保持 UNKNOWN。历史人工任务缺回执仍按旧合同保守 UNKNOWN。
 
-## Boss 候选与渠道能力（#15：外发仍待核实）
+## Boss 候选与渠道能力（#15/#44：文本 CONTACT 受控，附件/在线资料仍待核实）
 
 候选主屏增加 Boss 只读列表（`https://www.zhipin.com/web/geek/jobs?...`），选择内地地区并在范围中明确允许 `BOSS`、`www.zhipin.com` 及 DISCOVER/MATCH/PREPARE。本副本只复用用户已有隔离 Chrome profile，不读取原国内目录、不拷贝会话。登录态在本机私有 `boss-auth-state.json` 保存/恢复（不导出、不进入通用资料）；需要登录时由用户在 managed 窗口完成一次可见步骤，不输入凭证、不破解验证、不新建替代 profile。公开列表可匿名读取，登录页顶栏的登录/注册链接不构成登录墙。读取优先复用已就绪的 managed 列表页；仅放行同源只读搜索 POST 与岗位/详情 GET。登录后的精确岗位页可用 `.job-sec-text` 全文，绑定岗位 URL/ID；否则只使用正常导航中实际观察到的同岗只读 GET 响应。原 Boss 任务忙碌时拒绝；所有读取、页面置前和重核均在浏览器拥有线程串行。缺会话也不调用官网 AI。
 
@@ -162,12 +162,14 @@ bash gradlew --no-daemon workbench --console=plain
 | --- | --- |
 | 只读列表与已观察的详情 | 技术链路已覆盖；不是联系/申请证据 |
 | 匹配与独立材料准备 | 复用统一记录和策略材料核验；核准材料不等于渠道可执行 |
-| 精确首条文本 CONTACT | **待核实，不执行**；旧「立即沟通」可能先发未知自动招呼，DOM 联系提示不绑定核准正文 |
+| 精确首条文本 CONTACT | 任务详情显式核准完整正文后，由 `Boss.firstContact` 使用冻结原文；发送阶段零模型；平台自动招呼只记录自动招呼，不补发冻结正文 |
 | APPLY / SEND_CV / 在线资料 / 图片 / 重复联系 | **不支持，不执行**；没有可核验送达合同，范围或未知开关不能开启 |
 
-Boss 的附件验收同样采用转换附件 A，不要求平台副本字节相同；但输入来源、同岗账号/会话、原生附件、本次 dispatch 与新鲜 CV 回执必须可追踪，不能用文件名、附件 ID、旧消息或本地 hash 回显补齐。此合同不证明实际首击/自动招呼或发送能力。Boss 的外发预检/核准仍明确返回 `CAPABILITY_UNVERIFIED`，不创建发送任务或 claim，不占外发量、不调用原批次，也不回退官网任务/查询。Boss 草稿消息不声称已随附 CV。原 Boss 单岗审核、配置和历史数据仍保留；只证明联系时不能记 CV 送达或申请完成，退出码或模型判断也不能替代证明。`runtime.bossReadConfigured` 只表示只读 Adapter 已安装，连接在读取时检查；`bossOutboundSupported=false` 与 `bossCapabilityReason` 明示限制。
+Boss 的附件验收同样采用转换附件 A，不要求平台副本字节相同；但输入来源、同岗账号/会话、原生附件、本次 dispatch 与新鲜 CV 回执必须可追踪，不能用文件名、附件 ID、旧消息或本地 hash 回显补齐。此合同不证明 CV 或在线资料送达。
 
-本票尚欠精确单岗外发验收，保持待能力核实；后续须另获授权的只读核对或脱敏回放证明动作前的精确消息控制与真实回执。开发授权不包含真实联系、上传或试投，也不切换正在运行的工作台。原因及局部目标图见 #15，取舍见 ADR 0003。
+#44 起，单岗文本 CONTACT 使用 task 字段 `bossMessageApproval`：绑定 task/attempt、规范岗位 URL/ID、JD hash、材料版本、简历/事实 hash、完整正文及 UTF-8 字节 SHA256。核准不可变，重新核准生成新版本；任何 JD、材料或正文变化使旧核准失效。没有核准、哈希不符或正文变化时在首击前拒绝，发送阶段不调用模型。平台自动招呼只记录自动招呼，不能把冻结正文标成已发送；CV、在线资料、图片和重复联系仍明确 `CAPABILITY_UNVERIFIED`，不创建附件 claim、不占外发量、不调用原批次，也不回退官网任务/查询。原 Boss 单岗审核、配置和历史数据仍保留；只证明联系时不能记 CV 送达或申请完成，退出码或模型判断也不能替代证明。`runtime.bossReadConfigured` 只表示只读 Adapter 已安装，连接在读取时检查；`bossOutboundSupported` 仅表示受控文本 CONTACT 已配置，附件能力仍为 `bossCvSupported=false`。
+
+#44 的精确文本控制已在 fake page/临时材料上验证；真实平台的消息控制与新鲜回执仍须另获授权的只读核对或脱敏回放，不能以 fixture 代替。开发授权不包含真实联系、上传或试投，也不切换正在运行的工作台。附件/在线资料仍见 #15，取舍见 ADR 0003。#44 不改写历史审核/UNKNOWN 语义。
 
 ## JobsDB 候选与未核实的单岗外发（#16 增量）
 
@@ -256,7 +258,7 @@ OfferToday 使用独立的 `CONTACTED` 和 `CV_DELIVERED` 回执事件，其 evi
 
 三平台 `/cycles` 合同均验证一个 task/attempt、无逐岗人工批准、真实资源与阶段计量：JobsDB 恰好一次 APPLY effect，Boss/OfferToday 各一次 CONTACT 和一次 SEND_CV（同一次申请，不是两次申请）。并发 task-start/cycle 返回 409；推广参数别名与重启复用原 task，SUBMITTED/UNKNOWN 均不重投。MISMATCH 或披露前的验证阻塞保持零外发，JobsDB 上传后发现未知必答题则保留一次外发计量；已 dispatch 后缺失或错绑回执则保留 UNKNOWN 和已有 effect，不继续未获许可的阶段，恢复/别名/重启也不产生新 effect。错绑的联系回执不能授权 CV；JobsDB 原账本成功也不能替代同一 task 的有效绑定回执。
 
-替身脚本只在测试临时目录生成，不存在生产配置项、HTTP 路由或打包资源。默认 `WorkbenchConfiguration` 不注入替身，Boss 仍为 `CAPABILITY_UNVERIFIED`；测试组合的 CONTACT/SEND_CV 和回执沿用现有 task 合同，不证明真实平台能力或送达。
+替身脚本只在测试临时目录生成，不存在生产配置项、HTTP 路由或打包资源。默认 `WorkbenchConfiguration` 不注入替身；Boss 的受控文本 CONTACT 只消费工作台 `bossMessageApproval`，测试组合的 CONTACT/SEND_CV 和回执沿用现有 task 合同，不证明真实平台能力或送达，附件仍为 `CAPABILITY_UNVERIFIED`。
 
 ```bash
 bash gradlew --no-daemon test -x buildFrontend --console=plain

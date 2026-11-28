@@ -97,7 +97,7 @@ class BossFirstContactTest {
         String description = jd == null ? "" : "<div class=\"job-sec-text\">" + jd + "</div>";
         String script = """
                 <script>
-                window.__clicks=0; window.__sends=0;
+                window.__clicks=0; window.__sends=0; window.__payload=null;
                 const mode = '%s';
                 const start = document.getElementById('start');
                 start.addEventListener('click', () => {
@@ -115,6 +115,7 @@ class BossFirstContactTest {
                   window.__sends++;
                   if (mode !== 'editor') return;
                   const msg=document.getElementById('chat-input').innerText;
+                  window.__payload=msg;
                   const d=document.createElement('div'); d.style.whiteSpace='pre-wrap'; d.textContent='已发送\\n\\n'+msg; document.body.appendChild(d);
                 });
                 </script>
@@ -126,7 +127,7 @@ class BossFirstContactTest {
                 %s
                 <a class="btn-startchat" id="start">立即沟通</a>
                 <div id="chat-panel" style="display:none">
-                  <div id="chat-input" class="chat-input" contenteditable="true"></div>
+                  <div id="chat-input" class="chat-input" contenteditable="true" style="white-space:pre-wrap"></div>
                   <button class="btn-send" type="send" id="send">发送</button>
                 </div>
                 %s
@@ -164,7 +165,21 @@ class BossFirstContactTest {
             assertEquals(Boss.CONTACT_MODE_APPROVED_MESSAGE, outcome.contactMode());
             assertTrue(outcome.evidence().contains(MESSAGE), outcome.evidence());
             assertEquals(1, sends(page));
+            assertEquals(MESSAGE, page.evaluate("() => window.__payload"));
             assertEquals("not attempted", outcome.cvActuallyReceived());
+        }
+    }
+
+    @Test void editorPayloadIsByteForByteTheApprovedChineseSpacesAndNewlines() throws Exception {
+        String exact = "您好，我关注这个岗位。  这里有连续空格。\n\n第二段：保留标点，谢谢！\n";
+        Path approval = approval(CANONICAL, COMPANY, TITLE, exact);
+        try (var context = browser.newContext()) {
+            Page page = page(context, JD, "editor");
+            var outcome = boss().firstContact(page, request(approval, CANONICAL, JD, exact), null, null);
+            assertTrue(outcome.confirmed(), outcome.toString());
+            assertEquals(Boss.CONTACT_MODE_APPROVED_MESSAGE, outcome.contactMode());
+            assertEquals(1, sends(page));
+            assertEquals(exact, page.evaluate("() => window.__payload"));
         }
     }
 

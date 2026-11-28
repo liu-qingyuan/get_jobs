@@ -30,17 +30,21 @@ final class BossContactEffect implements BossSingleJobEffect {
     private final BossJobService legacyBoss;
     private final ObjectMapper json;
     private final Path attemptsDirectory;
+    private final WorkbenchService workbench;
 
-    BossContactEffect(PlaywrightManager browser, BossJobService legacyBoss, ObjectMapper json) {
-        this(browser, legacyBoss, json, Path.of("target", "boss-attempts"));
+    BossContactEffect(PlaywrightManager browser, BossJobService legacyBoss, ObjectMapper json,
+            WorkbenchService workbench) {
+        this(browser, legacyBoss, json, Path.of("target", "boss-attempts"), workbench);
     }
 
-    /** Tests pass a temporary attempts root shared with their legacy fixture; production uses target/. */
-    BossContactEffect(PlaywrightManager browser, BossJobService legacyBoss, ObjectMapper json, Path attemptsDirectory) {
+    /** Tests pass a temporary attempts root/shared store; production uses target/ and the live workbench. */
+    BossContactEffect(PlaywrightManager browser, BossJobService legacyBoss, ObjectMapper json,
+            Path attemptsDirectory, WorkbenchService workbench) {
         this.browser = browser;
         this.legacyBoss = legacyBoss;
         this.json = json;
         this.attemptsDirectory = attemptsDirectory;
+        this.workbench = workbench;
     }
 
     @Override
@@ -56,10 +60,13 @@ final class BossContactEffect implements BossSingleJobEffect {
         String company = task.path("company").asText();
         String title = task.path("title").asText();
         String description = task.path("description").asText();
-        String message = task.at("/snapshot/initialMessage").asText();
-        String initialMessageSha256 = task.at("/snapshot/initialMessageSha256").asText();
         String resumePath = bundle.path("resumePath").asText();
-        String resumeSha256 = task.at("/snapshot/resume/sha256").asText();
+        // The frozen body comes ONLY from the operator's exact approval. Re-verify task, attempt,
+        // canonical job, JD, resume/facts hashes and the UTF-8 message bytes before any page work.
+        var approved = workbench.bossMessages.requireCurrent(task);
+        String message = approved.path("message").asText();
+        String initialMessageSha256 = approved.path("messageSha256").asText();
+        String resumeSha256 = approved.path("resumeSha256").asText();
 
         if (stopped.getAsBoolean()) {
             needsInput(emit, "执行器已停止；未进入 claim、未点击");
@@ -74,6 +81,8 @@ final class BossContactEffect implements BossSingleJobEffect {
         WorkbenchService.require(Files.isRegularFile(resume)
                         && WorkbenchService.hash(Files.readAllBytes(resume)).equals(resumeSha256),
                 "Boss 核准简历已变化；不点击");
+        WorkbenchService.require(resumeSha256.equals(task.at("/snapshot/resume/sha256").asText()),
+                "Boss 冻结简历与核准记录不一致；不点击");
 
         Files.createDirectories(directory);
         Path approval = directory.resolve("boss-first-contact-approval.json");
@@ -105,6 +114,9 @@ final class BossContactEffect implements BossSingleJobEffect {
                 Math.min(Math.max(seconds, 1), 120) * 1000L);
         var outcome = legacyBoss.firstContact(request, page -> {
             WorkbenchService.require(!stopped.getAsBoolean(), "执行器已停止；不进入 claim、不点击");
+            // Re-read the exact approval immediately before the stage claim. A changed JD/material/
+            // body must stop before ReviewedApplication's one click fence.
+            workbench.bossMessages.requireCurrent(task);
             // Budget/stage authorization only. The click fence is the ReviewedApplication claim,
             // which Boss.firstContact persists after this gate returns.
             String account = account(page);
@@ -128,8 +140,11 @@ final class BossContactEffect implements BossSingleJobEffect {
                     .put("attemptId", task.path("attemptId").asText())
                     .put("contactMode", outcome.contactMode())
                     .put("platformConfirmation", outcome.evidence());
-            if (Boss.CONTACT_MODE_APPROVED_MESSAGE.equals(outcome.contactMode()))
+            if (Boss.CONTACT_MODE_APPROVED_MESSAGE.equals(outcome.contactMode())) {
                 receipt.put("initialMessageSha256", initialMessageSha256);
+                receipt.put("bossMessageApprovalId", approved.path("approvalId").asText())
+                        .put("bossMessageApprovalVersion", approved.path("version").asInt());
+            }
             receipt.put("proof", "Boss 同岗页面点击一次立即沟通后的新鲜可见回执；ReviewedApplication claim 先于点击；"
                     + "岗位 " + jobId + "，公司/职位匹配；无附件、无 CV");
             emit.apply(json.createObjectNode().put("type", "CONTACTED")

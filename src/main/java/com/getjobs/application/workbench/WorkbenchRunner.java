@@ -115,7 +115,7 @@ public final class WorkbenchRunner implements AutoCloseable {
                 .put("bossReadConfigured", bossReader != null).put("bossOutboundSupported", bossSingleJob != null)
                 .put("bossCvSupported", false)
                 .put("bossCapabilityReason", bossSingleJob != null
-                        ? "Boss 受控 CONTACT：只记录平台自动招呼，不发送自拟正文或 CV；需应用持有已登录 browser-data 会话，点击前再次核验"
+                        ? "Boss 受控 CONTACT：发送阶段只使用工作台显式核准的冻结正文，不调用模型、不发送 CV；点击前重核 task/attempt/JD/材料/正文；平台自动招呼只记录自动招呼"
                         : BossCandidateReader.OUTBOUND_BLOCK_REASON);
         result.set("connections", connections.view(service.json));
         return result;

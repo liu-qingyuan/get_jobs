@@ -33,6 +33,8 @@ class ChatDeliveryTest {
         var snapshot = json.createObjectNode().put("initialMessageSha256", WorkbenchService.hash(INITIAL.getBytes(StandardCharsets.UTF_8)));
         snapshot.set("resume", json.createObjectNode().put("sha256", RESUME));
         task.set("snapshot", snapshot);
+        task.set("bossMessageApproval", json.createObjectNode().put("message", INITIAL)
+                .put("messageSha256", WorkbenchService.hash(INITIAL.getBytes(StandardCharsets.UTF_8))));
         return task;
     }
 

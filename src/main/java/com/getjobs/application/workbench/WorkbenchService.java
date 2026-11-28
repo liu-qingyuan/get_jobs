@@ -34,6 +34,7 @@ public final class WorkbenchService {
     final WorkbenchProjects projects;
     final WorkbenchVerification verification;
     final ChatDelivery chat;
+    final WorkbenchBossMessage bossMessages;
 
     public WorkbenchService(Path root, Path jobsdb, ObjectMapper json) {
         this(root, jobsdb, json, null);
@@ -43,9 +44,16 @@ public final class WorkbenchService {
         this(root, jobsdb, json, projectsRoot, Map.of());
     }
 
-    // Internal composition Seam: actual effect commands, never a capability flag or production property.
-    // Test Adapters stay in src/test; all policy, persistence and claim logic below remains real.
-    WorkbenchService(Path root, Path jobsdb, ObjectMapper json, Path projectsRoot, Map<String, List<String>> platformEffects) {
+    WorkbenchService(Path root, Path jobsdb, ObjectMapper json, Path projectsRoot,
+            Map<String, List<String>> platformEffects) {
+        this(root, jobsdb, json, projectsRoot, platformEffects, null);
+    }
+
+    // Internal composition Seam: actual effect commands and the Boss draft model, never a capability
+    // flag or production property. Test Adapters stay in src/test; all policy, persistence and claim
+    // logic below remains real.
+    WorkbenchService(Path root, Path jobsdb, ObjectMapper json, Path projectsRoot,
+            Map<String, List<String>> platformEffects, WorkbenchBossMessage.Drafter bossDrafter) {
         var effects = new java.util.HashMap<String, List<String>>();
         platformEffects.forEach((channel, command) -> {
             require(Set.of("BOSS", "JOBSDB", "OFFERTODAY").contains(channel) && !command.isEmpty()
@@ -67,6 +75,7 @@ public final class WorkbenchService {
         this.projects = new WorkbenchProjects(this, projectsRoot);
         this.verification = new WorkbenchVerification(this);
         this.chat = new ChatDelivery(this);
+        this.bossMessages = new WorkbenchBossMessage(this, bossDrafter);
     }
 
     List<String> effectCommand(String channel, List<String> configured) { return platformEffects.getOrDefault(channel, configured); }
@@ -86,7 +95,10 @@ public final class WorkbenchService {
             result.set("workflow", workflow.workspace(c));
             result.set("projects", projects.workspace(c));
             var tasks = store.list(c, "task");
-            tasks.forEach(task -> ((ObjectNode) task).remove("tokenHash"));
+            tasks.forEach(task -> {
+                ((ObjectNode) task).remove("tokenHash");
+                bossMessages.annotate((ObjectNode) task);
+            });
             result.set("tasks", tasks);
             result.set("jobsdbAttempts", store.list(c, "jobsdb_attempt"));
             var platforms = legacy.platforms();
@@ -248,6 +260,17 @@ public final class WorkbenchService {
             task.put("platformJobId", offerToday.id()).put("initialMessage", text(input, "initialMessage", 8000, true))
                     .put("contactVerified", input.path("contactVerified").asBoolean(false));
         }
+        if (channel.equals("BOSS") && kind.equals("APPLICATION")) {
+            try {
+                String canonical = BossCandidateReader.detailUrl(taskUrl);
+                // The Boss single-job identity is known before material approval; the exact message
+                // approval still cannot exist until the material snapshot is approved.
+                task.put("platformJobId", BossCandidateReader.jobId(canonical))
+                        .put("attemptId", task.path("id").asText());
+            } catch (IllegalArgumentException e) {
+                throw new WorkbenchException(400, "Boss 岗位链接不规范，不能创建单岗任务");
+            }
+        }
         task.set("events", json.createArrayNode());
         return store.write(c -> { store.save(c, "task", task); return task; });
     }
@@ -267,6 +290,16 @@ public final class WorkbenchService {
             duplicate(c, task);
             var snapshot = json.createObjectNode().put("approvedAt", now());
             snapshot.set("resume", resume.deepCopy());
+            if (task.path("channel").asText().equals("BOSS")
+                    && task.path("kind").asText().equals("APPLICATION")) {
+                try {
+                    String canonical = BossCandidateReader.detailUrl(task.path("url").asText());
+                    task.put("platformJobId", BossCandidateReader.jobId(canonical));
+                } catch (IllegalArgumentException e) {
+                    throw new WorkbenchException(400, "Boss 岗位链接不规范，不能批准此任务");
+                }
+                if (task.path("attemptId").asText().isBlank()) task.put("attemptId", task.path("id").asText());
+            }
             if (task.path("channel").asText().equals("OFFERTODAY")) {
                 require(task.path("contactVerified").asBoolean(), "请先核对 OfferToday 实际联系方式与最新偏好及线上资料");
                 String filename = resume.path("filename").asText().toLowerCase(Locale.ROOT);
@@ -765,6 +798,9 @@ public final class WorkbenchService {
         }
     }
 
+    public ObjectNode draftBossMessage(ObjectNode input) { return bossMessages.draft(input); }
+    public ObjectNode approveBossMessage(ObjectNode input) { return bossMessages.approve(input); }
+
     public ObjectNode task(String id) { return store.write(c -> publicTask(store.get(c, "task", id))); }
 
     void startFailed(String id) {
@@ -865,7 +901,11 @@ public final class WorkbenchService {
                 + "接口字段名和枚举值须为上述英文值；JSON 文本字段须加双引号。任务只包含所选地区与官网作用域已确认资料。\n"
                 + json.writerWithDefaultPrettyPrinter().writeValueAsString(publicTask(task));
     }
-    ObjectNode publicTask(ObjectNode task) { var copy = task.deepCopy(); copy.remove("tokenHash"); return copy; }
+    ObjectNode publicTask(ObjectNode task) {
+        var copy = task.deepCopy();
+        copy.remove("tokenHash");
+        return bossMessages.annotate(copy);
+    }
     static void require(boolean condition, String message) { if (!condition) throw new WorkbenchException(409, message); }
     static String hash(byte[] bytes) {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }

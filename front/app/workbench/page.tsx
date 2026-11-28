@@ -10,7 +10,7 @@ import MaterialBaseline from './MaterialBaseline'
 import ScopePolicyPanel from './ScopePolicy'
 import Candidates from './Candidates'
 import {
-  type Channel, type EventType, type Fact, type FactInput, type Language, type OfferTodayDiscovery, type Region, type Resume,
+  type BossMessageDraft, type Channel, type EventType, type Fact, type FactInput, type Language, type OfferTodayDiscovery, type Region, type Resume,
   type Task, type TaskInput, type TaskKind, type TaskState, type WorkbenchState,
   workbenchFile, workbenchGet, workbenchJson, workbenchUpload,
 } from '@/lib/workbench'
@@ -30,7 +30,7 @@ const eventName: Record<string, string> = {
   APPROVED: '材料已批准', RUNNING: '执行器已启动', PROCESS_ENDED: '执行器结束', RECOVERED: '中断恢复', DRAFT: '已生成待审核草稿',
   PROGRESS: '进展', NEEDS_INPUT: '需要人工处理', FAILED: '失败', SUBMITTING: '提交前占位（结果未知）',
   SUBMITTED: '确认已提交', EMPLOYER_STATUS: '人工核对雇主状态',
-  CONTACTED: '已联系（未送达简历）', CV_DELIVERED: '简历已送达',
+  CONTACTED: '已联系（未送达简历）', CV_DELIVERED: '简历已送达', MESSAGE_APPROVED: 'Boss 招呼语已核准',
 }
 const alertStates: TaskState[] = ['NEEDS_INPUT', 'FAILED', 'UNKNOWN']
 const resumeInstruction = '仅产出待人工审核的简历草稿；不得自行批准、投递或声称已导出 PDF。'
@@ -97,6 +97,8 @@ export default function WorkbenchPage() {
   const [eventEvidence, setEventEvidence] = useState('')
   const [conversationId, setConversationId] = useState('')
   const [messageId, setMessageId] = useState('')
+  const [bossDraft, setBossDraft] = useState<BossMessageDraft | null>(null)
+  const [bossMessage, setBossMessage] = useState('')
 
   const refresh = useCallback(async () => {
     if (loadingRef.current || (document.visibilityState !== 'visible' && !notifyRef.current)) return
@@ -149,6 +151,9 @@ export default function WorkbenchPage() {
     setEventEvidence('')
     setConversationId('')
     setMessageId('')
+    setBossDraft(null)
+    const task = state?.tasks.find(item => item.id === id)
+    setBossMessage(task?.bossMessageApproval?.message ?? '')
   }
 
   async function act(label: string, request: () => Promise<unknown>, after?: () => void) {
@@ -219,8 +224,19 @@ export default function WorkbenchPage() {
   }
 
   const selected = state?.tasks.find(task => task.id === selectedId)
+  // Load the saved approval once per selected task; refreshing state must not overwrite local edits.
+  useEffect(() => {
+    const task = state?.tasks.find(item => item.id === selectedId)
+    setBossDraft(null)
+    setBossMessage(task?.bossMessageApproval?.message ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId])
   const offerTodayForm = taskForm.kind === 'APPLICATION' && taskForm.channel === 'OFFERTODAY'
   const offerTodaySelected = selected?.kind === 'APPLICATION' && selected.channel === 'OFFERTODAY'
+  const bossSelected = selected?.kind === 'APPLICATION' && selected.channel === 'BOSS'
+  const bossApproval = selected?.bossMessageApproval
+  const bossMessageDirty = !!bossApproval && bossMessage !== bossApproval.message
+  const bossApprovalCurrent = !!(bossApproval && selected?.bossMessageApprovalValid === true && !bossMessageDirty)
   const approvedContext = selected && selected.state === 'APPROVED' && context?.taskId === selected.id &&
     context.updatedAt === selected.updatedAt ? context.text : null
   const matchingResumes = state?.resumes.filter(resume =>
@@ -237,6 +253,7 @@ export default function WorkbenchPage() {
   const canStart = !!(selected && selected.state === 'APPROVED' && !state?.runtime.busy && (
     offerTodaySelected ? state?.runtime.offerTodayConfigured && !!selected.snapshot?.initialMessageSha256 &&
       selected.snapshot?.contactVerified && !!selected.snapshot?.resume?.sha256 :
+      bossSelected ? state?.runtime.bossOutboundSupported && !!selected.packageId && bossApprovalCurrent :
       state?.runtime.agentConfigured && (selected.kind === 'RESUME' || selected.kind === 'CHECK' ||
         (selected.kind === 'APPLICATION' && selected.channel === 'OFFICIAL'))
   ))
@@ -297,9 +314,41 @@ export default function WorkbenchPage() {
   function startTask(task: Task) {
     const prompt = task.channel === 'OFFERTODAY'
       ? `确定启动 OfferToday「${task.title}」？使用零模型脚本、当前已授权 Chrome 连接和本次批准的附件；启动不等于送达。未连接或控件不确定会等待人工，不会自动重复联系。`
-      : `确定启动「${task.title}」？将把本次批准的资料/简历交给已配置的外部 AI 执行器，其模型可能是外部服务并消耗额度。启动不等于已投递。`
+      : task.channel === 'BOSS'
+        ? `确定启动 Boss「${task.title}」？启动前会重核 task/attempt、岗位、JD、材料与已核准正文 SHA256；发送阶段不调用模型。没有核准或任一哈希不符会在首击前停止；平台自动招呼不会补发冻结正文。`
+        : `确定启动「${task.title}」？将把本次批准的资料/简历交给已配置的外部 AI 执行器，其模型可能是外部服务并消耗额度。启动不等于已投递。`
     if (!window.confirm(prompt)) return
     void act('启动任务', () => workbenchJson<Task>(`/tasks/${encodeURIComponent(task.id)}/start`, 'POST'))
+  }
+
+  async function generateBossDraft(task: Task) {
+    if (working) return
+    setWorking('生成 Boss 招呼语草稿')
+    setActionError('')
+    setNotice('')
+    try {
+      const draft = await workbenchJson<BossMessageDraft>('/boss/draft', 'POST', { taskId: task.id })
+      setBossDraft(draft)
+      setBossMessage(draft.message)
+      setNotice('已按当前岗位 JD、已核准事实和核准简历生成本地草稿；未点击、未发送。可编辑后显式核准。')
+    } catch (error) {
+      setActionError(errorText(error))
+    } finally {
+      setWorking('')
+    }
+  }
+
+  function approveBossMessage(task: Task) {
+    const message = bossMessage
+    if (!message.trim()) {
+      setActionError('请先生成或填写完整招呼语正文，再显式核准。')
+      return
+    }
+    if (!window.confirm(`核准 Boss「${task.company || '未指定公司'} · ${task.title}」的完整招呼语？\n\n${message}\n\n核准绑定此 task/attempt、岗位、JD、材料版本与 UTF-8 正文 SHA256；之后修改一个字、空格或换行都会使旧核准失效，必须重新核准。`)) return
+    void act('核准 Boss 招呼语', () => workbenchJson<Task>('/boss/approve-message', 'POST', { taskId: task.id, message }), () => {
+      setBossDraft(null)
+      setBossMessage(message)
+    })
   }
 
   function checkStatus(task: Task) {
@@ -541,17 +590,44 @@ export default function WorkbenchPage() {
                 {selected.url && /^https?:\/\//i.test(selected.url) && <a className="mt-2 inline-block text-sm text-indigo-700 underline dark:text-indigo-300" href={selected.url} target="_blank" rel="noopener noreferrer">打开岗位链接 ↗</a>}
                 {selected.description && <p className="mt-3 whitespace-pre-wrap text-sm">{selected.description}</p>}
                 {selected.note && <p className={`${small} mt-2 whitespace-pre-wrap`}>备注：{selected.note}</p>}
+                {bossSelected && <section className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 dark:border-indigo-800 dark:bg-indigo-950/40" aria-label="Boss 单岗招呼语">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="font-semibold">Boss 单岗招呼语</h3>
+                      <p className={`${small} mt-1`}>目标岗位：{selected.company || '未指定公司'} · {selected.title}</p>
+                      <p className={`${small} break-all`}>岗位 ID：{selected.platformJobId || '缺失'} · task/attempt：{selected.id} / {selected.attemptId || '未绑定'}</p>
+                    </div>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${bossApprovalCurrent ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200'}`}>
+                      {bossApprovalCurrent ? `已核准 v${bossApproval?.version}` : bossApproval ? '核准失效，需重新核准' : '未核准'}
+                    </span>
+                  </div>
+                  <p className={`${small} mt-2`}>草稿仅使用此岗位 JD、已核准事实、核准简历正文和参考语；不使用全局 introduce、未确认候选、跨地区/平台材料或未选简历。生成与预览均不点击、不发送；发送阶段不调用模型。</p>
+                  <label className={`${small} mt-3 block`} htmlFor="boss-message-body">完整正文（按 UTF-8 字节逐字核准，保留标点、连续空格与换行）</label>
+                  <textarea id="boss-message-body" className={`${control} mt-1 min-h-36`} value={bossMessage}
+                    onChange={event => { setBossMessage(event.target.value); setBossDraft(null) }}
+                    placeholder="点击「生成草稿」，或直接填写你将要发送的完整正文" />
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button type="button" size="sm" disabled={!!working || !selected.snapshot || !selected.attemptId} onClick={() => void generateBossDraft(selected)}>{working === '生成 Boss 招呼语草稿' ? '生成中…' : '生成草稿'}</Button>
+                    <Button type="button" size="sm" variant="outline" disabled={!!working || !bossMessage.trim() || !selected.attemptId || !['PENDING', 'APPROVED', 'NEEDS_INPUT', 'FAILED'].includes(selected.state)} onClick={() => approveBossMessage(selected)}>显式核准当前完整正文</Button>
+                  </div>
+                  {!selected.snapshot && <p className={`${small} mt-2`}>尚无可核准材料快照；请先按原流程批准岗位与材料（此 Boss 任务还不能从工作台启动）。</p>}
+                  {bossMessageDirty && <p className="mt-2 rounded-lg bg-amber-100 p-2 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">正文已被本地编辑，已核准版本失效；请重新显式核准后再启动。</p>}
+                  {bossApproval && <p className={`${small} mt-2 break-all`}>已核准 v{bossApproval.version} · 正文 SHA256 {bossApproval.messageSha256} · 材料 {bossApproval.materialVersion} · JD {bossApproval.jdSha256} · 简历 {bossApproval.resumeSha256} · 事实 {bossApproval.factsSha256} · 核准时间 {date(bossApproval.approvedAt)}</p>}
+                  {bossApproval && !bossMessageDirty && selected.bossMessageApprovalValid === false && <p className="mt-2 rounded-lg bg-rose-50 p-2 text-sm text-rose-900 dark:bg-rose-950 dark:text-rose-200">旧核准已失效：{selected.bossMessageApprovalReason || 'JD、材料或正文已变化，请重新核准。'} 启动前会被服务端拒绝。</p>}
+                  {bossDraft && <p className={`${small} mt-2 break-all`}>本次草稿绑定 JD {bossDraft.jdSha256} · 正文 SHA256 {bossDraft.messageSha256}；尚未核准。</p>}
+                  {!selected.packageId && <p className={`${small} mt-2`}>此任务不是由当前候选范围准备的单岗任务；招呼语核准仅留痕，不能从工作台启动。</p>}
+                </section>}
                 {selected.kind === 'GAP' ? <div className="mt-4 rounded-xl bg-slate-50 p-3 text-sm dark:bg-slate-800"><p>待补强（只记录，不执行）</p><p className="mt-1 break-all">路径建议：{selected.projectPath || '未填写'}</p><p className="mt-1 whitespace-pre-wrap">计划：{selected.projectPlan || '未填写'}</p></div> : <>
                   <p className={`${small} mt-4`}>{selected.kind === 'CHECK' ? '只读查询：不交付简历附件，不允许申请或修改官网资料。' : `所选简历：${selectedResume ? `${selectedResume.label} · ${selectedResume.approved ? '已审核' : '未审核'} · ${selectedResume.sha256}` : '未选择；此任务无法批准，需创建新任务绑定已审核版本'}`}</p>
                   {selected.kind === 'RESUME' && <p className={`${small} mt-2`}>外部 AI 返回草稿后另存新版本，原简历不变；新版本仍需人工审核。不自动导出 PDF。</p>}
                   {offerTodaySelected && <div className="mt-3 rounded-xl border border-slate-200 p-3 text-sm dark:border-slate-700"><p className="font-semibold">OfferToday · {selected.snapshot ? '已批准冻结的首条消息与附件' : '待批准的首条消息'}</p><pre className="mt-2 whitespace-pre-wrap break-words">{selected.snapshot ? selected.snapshot.initialMessage : selected.initialMessage || '未填写'}</pre>{selected.snapshot && <><p className={`${small} mt-2 break-all`}>消息 SHA256：{selected.snapshot.initialMessageSha256} · 附件 SHA256：{selected.snapshot.resume?.sha256 || '缺失'}</p><p className={small}>已冻结适用事实：{selected.snapshot.facts?.length ?? 0} 条；联系方式核对：{selected.snapshot.contactVerified ? '已确认' : '未确认'}</p></>}<p className={`${small} mt-2`}>已联系：{selected.contactReceipt ? '已登记本岗联系回执' : '无回执'} · 简历已送达：{selected.cvReceipt ? '已登记附件送达回执' : '无回执'}。工作台校验回执归属与材料哈希，真实发送证据由执行器或人工提供；点击或脚本退出不算送达。</p></div>}
                   {selected.deliveryOutcome && <p className={small}>消息 {selected.deliveryOutcome.messageSent} · CV 实收 {selected.deliveryOutcome.cvActuallyReceived} · 原生占位 {selected.deliveryOutcome.attemptDisposition}</p>}
-                  {!selected.deliveryOutcome && selected.channel !== 'OFFICIAL'  && selected.channel !== 'OFFERTODAY' && selected.kind === 'APPLICATION' && <p className="mt-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">平台投递不支持从工作台 HTTP 直接启动。请走原平台入口；复制已批准上下文仅供交接，不能视为已执行。</p>}
+                  {!selected.deliveryOutcome && selected.channel !== 'OFFICIAL' && selected.channel !== 'OFFERTODAY' && selected.channel !== 'BOSS' && selected.kind === 'APPLICATION' && <p className="mt-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">平台投递不支持从工作台 HTTP 直接启动。请走原平台入口；复制已批准上下文仅供交接，不能视为已执行。</p>}
                   {selected.approvalSource === 'SCOPE_POLICY' && <p className={`${small} mt-2 break-all`}>策略 task / attempt：{selected.id} · 冻结包：{selected.packageId}；不是逐岗人审或原 CLI 历史。</p>}
                   {selected.state === 'UNKNOWN' && <p className="mt-2 rounded-lg bg-rose-50 p-3 text-sm text-rose-900 dark:bg-rose-950 dark:text-rose-200">{offerTodaySelected ? '结果未知：禁止自动重跑或再次联系。仅有同岗、同次尝试的联系回执不代表简历送达；附件回执须匹配同一会话与冻结 SHA256。' : '结果未知：不可重新批准或重投。只在找到明确、对应此岗位的回执后记录已提交。'}</p>}
                   {offerTodaySelected && selected.state === 'NEEDS_INPUT' && <p className="mt-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">遇到人工阻塞：脚本不会自动继续或重新联系；请核对实际页面状态，不要把点击/附件选择当作送达。</p>}
-                  <div className="mt-4 flex flex-wrap gap-2"><Button type="button" size="sm" disabled={!canApprove || !!working} onClick={() => approveTask(selected)}>批准岗位与材料快照</Button><Button type="button" variant="outline" size="sm" disabled={!canStart || !!working} onClick={() => startTask(selected)}>{offerTodaySelected ? '启动 OfferToday 零模型脚本' : '启动外部执行器'}</Button>{selected.state === 'APPROVED' && <Button type="button" variant="outline" size="sm" disabled={!!working} onClick={() => void loadContext(selected)}>读取批准上下文</Button>}</div>
-                  {offerTodaySelected ? !state.runtime.offerTodayConfigured && <p className={`${small} mt-2`}>OfferToday 脚本未配置，无法启动；与官网 AI 配置无关，批准不代表执行。</p> : !state.runtime.agentConfigured && <p className={`${small} mt-2`}>未配置外部执行器，官网/简历任务不能启动；批准不代表执行。</p>}
+                  <div className="mt-4 flex flex-wrap gap-2"><Button type="button" size="sm" disabled={!canApprove || !!working} onClick={() => approveTask(selected)}>批准岗位与材料快照</Button><Button type="button" variant="outline" size="sm" disabled={!canStart || !!working} onClick={() => startTask(selected)}>{offerTodaySelected ? '启动 OfferToday 零模型脚本' : bossSelected ? '启动 Boss 已核准首联（零模型发送）' : '启动外部执行器'}</Button>{selected.state === 'APPROVED' && <Button type="button" variant="outline" size="sm" disabled={!!working} onClick={() => void loadContext(selected)}>读取批准上下文</Button>}</div>
+                  {offerTodaySelected ? !state.runtime.offerTodayConfigured && <p className={`${small} mt-2`}>OfferToday 脚本未配置，无法启动；与官网 AI 配置无关，批准不代表执行。</p> : bossSelected ? !state.runtime.bossOutboundSupported ? <p className={`${small} mt-2`}>Boss 单岗执行器未配置，不能从工作台启动；核准只冻结正文，不代表已发送。</p> : !selected.packageId && <p className={`${small} mt-2`}>只有由当前候选范围准备的单岗任务可从工作台启动；此任务仅留痕。</p> : !state.runtime.agentConfigured && <p className={`${small} mt-2`}>未配置外部执行器，官网/简历任务不能启动；批准不代表执行。</p>}
                   {selected.state === 'APPROVED' && state.runtime.busy && <p className={`${small} mt-2`}>执行器正在处理其他任务，请等待空闲。</p>}
                   {approvedContext !== null && <div className="mt-4"><label className={small} htmlFor="approved-context">批准范围的上下文（不是执行或提交证明）</label><textarea id="approved-context" readOnly className={`${control} mt-1 min-h-36 font-mono`} value={approvedContext} /><Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => void copyContext()}><BiCopy />复制上下文</Button></div>}
                 </>}
@@ -607,7 +683,7 @@ export default function WorkbenchPage() {
           </TabsContent>
 
           <TabsContent value="platforms" className="grid gap-4 lg:grid-cols-2">
-            <section className={panel}><h2 className="text-lg font-semibold">Boss · 使用现有页面</h2><p className={`${small} mt-2`}>候选主屏已接入 Boss 有界只读列表、匹配与备料；仅复用本副本显式登录的浏览器。精确文本、附件与在线资料的外发能力待核实，工作台不会 claim 或通过 HTTP 触发旧批次；原审核入口与数据保留。</p><Link href="/boss" className="mt-3 inline-block rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">打开 Boss 页面 ↗</Link><p className={`${small} mt-2 break-all`}>后端提供的入口：{state.platforms.bossUrl || '未提供（使用 /boss）'}</p></section>
+            <section className={panel}><h2 className="text-lg font-semibold">Boss · 使用现有页面</h2><p className={`${small} mt-2`}>候选主屏已接入 Boss 有界只读列表、匹配与备料；仅复用本副本显式登录的浏览器。受控单岗文本 CONTACT 只在任务详情显式核准完整正文后启动，发送阶段不调用模型；附件、在线资料、重复联系仍不支持，工作台不会通过 HTTP 触发旧批次。原审核入口与数据保留。</p><Link href="/boss" className="mt-3 inline-block rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">打开 Boss 页面 ↗</Link><p className={`${small} mt-2 break-all`}>后端提供的入口：{state.platforms.bossUrl || '未提供（使用 /boss）'}</p></section>
             <section className={panel}><h2 className="text-lg font-semibold">OfferToday HK · 逐岗申请</h2><p className={`${small} mt-2`}>使用已有的已授权 Chrome 连接；只在你点击时读取当前已加载职位（最多 40 条），不自动翻页、建任务、联系或上传附件。</p><div className="mt-3 flex flex-wrap gap-2"><a href={state.platforms.offerTodayUrl} target="_blank" rel="noopener noreferrer" className="inline-block rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">打开港区平台 ↗</a><Button type="button" variant="outline" size="sm" disabled={!!working || !state.runtime.offerTodayConfigured} onClick={() => void discoverOfferToday()}>只读读取当前已加载职位</Button></div><p className={`${small} mt-2`}>{state.runtime.offerTodayConfigured ? '脚本已配置；浏览器连接仍需在读取/执行时校验。' : '脚本未配置，无法读取或启动；不依赖官网 AI。'}</p><p className={`${small} mt-2`}>脚本已接入已核对的原生聊天、附件选择与平台历史回执；尚未进行真实发送验收，不保证所有页面变体可执行。未知控件、账号变化或材料不符时停止，不删除旧附件、改默认简历或重复联系。工作台只校验回执归属与材料哈希，不把本地点击或退出码当送达。</p>
               {discovery && <div className="mt-3 space-y-2"><p className={small}>{discovery.connected === true ? '已连接当前已授权标签页；仅展示本次已加载职位。' : discovery.connected === false ? '当前未连接已授权标签页，不展示虚构职位。' : '连接状态未确认；以下仅为服务端返回的只读结果。'}{discovery.note ? ` ${discovery.note}` : ''}</p>{discovery.connected !== false && (discovery.jobs.length === 0 ? <p className={small}>本次没有可显示的已加载职位；不会自动翻页。</p> : <div className="max-h-72 space-y-2 overflow-y-auto">{discovery.jobs.map((job, index) => <div key={`${job.url}-${index}`} className="rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-700"><p className="font-medium">{job.title}</p>{job.company && <p className={small}>{job.company}</p>}<p className={`${small} break-all`}>{job.url}</p><Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => chooseOfferToday(job)}>预填待创建任务</Button></div>)}</div>)}</div>}
             </section>

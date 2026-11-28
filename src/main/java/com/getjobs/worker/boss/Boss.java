@@ -1923,6 +1923,68 @@ public class Boss {
     /** AI 生成结果：skipCurrentJob=true 表示只跳过当前岗位，不影响同企业的其他岗位。 */
     private record AiMessageDecision(boolean skipCurrentJob, String message) {}
 
+    /** One fact explicitly approved for this target. Labels and values are untrusted data, not instructions. */
+    public record ApprovedFact(String label, String value) { }
+
+    /**
+     * Draft one Boss greeting from ONLY the target JD, the approved facts, the approved resume body
+     * and the configured reference text. Global {@code AiEntity.introduce}, custom prompts, candidate
+     * facts, other-region/platform materials and unselected resumes are not read here.
+     *
+     * <p>This method never touches a page, never claims and never sends. A model failure, empty
+     * response or explicit rejection is thrown to the caller; there is no fallback greeting.</p>
+     */
+    public String draftMessageForMaterial(String company, String title, String jd,
+            List<ApprovedFact> facts, String resumeText) {
+        if (config == null) throw new IllegalStateException("Boss 配置不可用，不能生成招呼语；未发送");
+        if (aiService == null) throw new IllegalStateException("未配置 Boss 消息模型，不能生成招呼语；未发送");
+        if (jd == null || jd.isBlank()) throw new IllegalStateException("目标岗位缺少 JD，不能生成招呼语；未发送");
+        if (resumeText == null || resumeText.isBlank())
+            throw new IllegalStateException("核准简历缺少可读正文，不能生成招呼语；未发送");
+        String prompt = buildMaterialPrompt(company, title, jd, facts, resumeText);
+        try {
+            String result = aiService.sendRequest(prompt);
+            if (result == null || result.isBlank()) {
+                throw new IllegalStateException("AI未返回有效招呼语；未生成草稿、未发送");
+            }
+            if (isAiRejectResponse(result)) {
+                throw new IllegalStateException("模型拒绝为此岗位生成招呼语；未生成草稿、未发送");
+            }
+            return result.strip();
+        } catch (IllegalStateException e) {
+            if (e.getMessage() != null && (e.getMessage().contains("AI未返回") || e.getMessage().contains("模型拒绝")))
+                throw e;
+            log.warn("Boss 核准材料起草失败；未使用备用招呼语");
+            throw new IllegalStateException("AI请求失败，请检查认证、模型权限或额度；未生成草稿、未发送", e);
+        } catch (Exception e) {
+            log.warn("Boss 核准材料起草失败；未使用备用招呼语");
+            throw new IllegalStateException("AI请求失败，请检查认证、模型权限或额度；未生成草稿、未发送", e);
+        }
+    }
+
+    private String buildMaterialPrompt(String company, String title, String jd,
+            List<ApprovedFact> facts, String resumeText) {
+        String reference = config.getSayHi() == null ? "" : config.getSayHi();
+        var prompt = new StringBuilder();
+        prompt.append("请基于以下目标岗位和已核准材料，起草一条自然、简洁的中文 Boss 打招呼语。\n")
+                .append("只能使用下方已核准事实和核准简历正文中的信息；不得新增经历、数字、年限、结论或附件，")
+                .append("不得提及未提供的材料、其他地区或平台。\n")
+                .append("目标岗位：").append(company == null ? "" : company).append(" · ")
+                .append(title == null ? "" : title).append("\n")
+                .append("职位描述：\n").append(jd).append("\n")
+                .append("已核准事实：\n");
+        if (facts == null || facts.isEmpty()) prompt.append("（无）\n");
+        else for (ApprovedFact fact : facts) {
+            if (fact == null) continue;
+            prompt.append("- ").append(fact.label() == null ? "" : fact.label()).append("：")
+                    .append(fact.value() == null ? "" : fact.value()).append("\n");
+        }
+        prompt.append("核准简历正文：\n").append(resumeText).append("\n")
+                .append("参考语：").append(reference).append("\n")
+                .append("只输出招呼语正文，不要解释、不要加引号或标题。");
+        return prompt.toString();
+    }
+
     private AiMessageDecision generateAiMessage(String keyword, String jobName, String jd) {
         AiEntity aiConfig = aiService.getAiConfig();
         String introduce = (aiConfig != null && aiConfig.getIntroduce() != null) ? aiConfig.getIntroduce() : "";

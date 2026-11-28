@@ -14,7 +14,7 @@ import static com.getjobs.worker.boss.Locators.*;
 
 /** Bounded Boss list/detail reads on the browser's owning thread. Reuses the authorized managed list when ready; never opens chat, logs in, writes legacy DB, or sends. */
 public final class BossCandidateReader {
-    public static final String OUTBOUND_BLOCK_REASON = "Boss 外发能力待核实：立即沟通可能先发未知自动招呼，不能保证核准精确文本；附件、在线资料、图片及重复联系均未获支持。不会 claim、启动旧批次或回退官网 AI";
+    public static final String OUTBOUND_BLOCK_REASON = "Boss 文本 CONTACT 仅在 workbench 单岗已配置且使用 bossMessageApproval 时受控；APPLY、附件、在线资料、图片及重复联系未获支持。不会 claim、启动旧批次或回退官网 AI";
     public static final class UserActionRequired extends RuntimeException {
         public UserActionRequired() { super("Boss 要求用户在可见浏览器完成登录或安全验证"); }
     }

@@ -12,6 +12,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -183,6 +184,18 @@ public class BossJobService implements JobPlatformService {
                 isRunning = false;
             }
         }
+    }
+
+    /**
+     * Text-only draft from the workbench's frozen material. It does not touch the browser or the
+     * execution slot: only the existing AiService is called, and only the one Boss prompt builder
+     * that excludes the global introduce/custom prompt.
+     */
+    public String draftMessageForMaterial(String company, String title, String jd,
+            List<Boss.ApprovedFact> facts, String resumeContent) {
+        Boss boss = bossProvider.getObject();
+        boss.setConfig(configService.getBossConfig());
+        return boss.draftMessageForMaterial(company, title, jd, facts, resumeContent);
     }
 
     private void guardStop() {

@@ -67,6 +67,10 @@ public class WorkbenchController {
                 .filename("resume-" + id + extension, StandardCharsets.UTF_8).build().toString())
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).body(new FileSystemResource(path));
     }
+    /** Drafts from frozen JD/facts/resume only; never claims or sends. */
+    @PostMapping("/boss/draft") public ObjectNode draftBossMessage(@RequestBody ObjectNode input) { return service.draftBossMessage(input); }
+    /** Freezes the complete operator-reviewed body for this exact Boss target. */
+    @PostMapping("/boss/approve-message") public ObjectNode approveBossMessage(@RequestBody ObjectNode input) { return service.approveBossMessage(input); }
     @PostMapping("/tasks") public ObjectNode task(@RequestBody ObjectNode input) { return service.createTask(input); }
     @PostMapping("/tasks/{id}/approve") public ObjectNode approveTask(@PathVariable String id) { return service.approveTask(id); }
     @PostMapping("/tasks/{id}/start") public ObjectNode start(@PathVariable String id) { return runner.start(id); }
